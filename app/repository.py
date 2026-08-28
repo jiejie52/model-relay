@@ -125,3 +125,68 @@ class RelayRepository:
 
     def default_session_expiry(self):
         return utcnow() + timedelta(seconds=self.settings.session_ttl_seconds)
+
+    async def create_fusion_corpus(self, row: dict[str, Any]) -> dict[str, Any]:
+        rows = await self.backend.upsert("fusion_corpora", row, on_conflict="id")
+        return rows[0]
+
+    async def update_fusion_corpus(
+        self, corpus_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        rows = await self.backend.update(
+            "fusion_corpora", values, filters={"id": f"eq.{corpus_id}"}
+        )
+        return rows[0] if rows else None
+
+    async def get_fusion_corpus(
+        self,
+        corpus_id: str,
+        *,
+        tenant_id: str | None = None,
+        conversation_hash: str | None = None,
+    ) -> dict[str, Any] | None:
+        filters = {"id": f"eq.{corpus_id}"}
+        if tenant_id:
+            filters["tenant_id"] = f"eq.{tenant_id}"
+        if conversation_hash:
+            filters["conversation_hash"] = f"eq.{conversation_hash}"
+        rows = await self.backend.select("fusion_corpora", filters=filters, limit=1)
+        return rows[0] if rows else None
+
+    async def create_fusion_material(self, row: dict[str, Any]) -> dict[str, Any]:
+        rows = await self.backend.upsert("fusion_materials", row, on_conflict="id")
+        return rows[0]
+
+    async def create_fusion_artifact(self, row: dict[str, Any]) -> dict[str, Any]:
+        rows = await self.backend.insert("fusion_artifacts", row)
+        return rows[0]
+
+    async def get_fusion_artifact(
+        self,
+        artifact_id: str,
+        *,
+        corpus_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        filters = {"id": f"eq.{artifact_id}"}
+        if corpus_id:
+            filters["fusion_corpus_id"] = f"eq.{corpus_id}"
+        rows = await self.backend.select("fusion_artifacts", filters=filters, limit=1)
+        return rows[0] if rows else None
+
+    async def next_fusion_artifact_version(self, corpus_id: str, artifact_type: str) -> int:
+        rows = await self.backend.select(
+            "fusion_artifacts",
+            filters={
+                "fusion_corpus_id": f"eq.{corpus_id}",
+                "artifact_type": f"eq.{artifact_type}",
+            },
+            select="artifact_version",
+            limit=1,
+            order="artifact_version.desc",
+        )
+        if not rows:
+            return 1
+        try:
+            return int(rows[0].get("artifact_version") or 0) + 1
+        except Exception:
+            return 1

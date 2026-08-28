@@ -105,6 +105,26 @@ class SupabaseBackend:
         )
         return response.json()
 
+    async def upsert(
+        self,
+        table: str,
+        row: dict[str, Any],
+        *,
+        on_conflict: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params = {"on_conflict": on_conflict} if on_conflict else None
+        response = await self._request(
+            "POST",
+            f"{self.settings.supabase_root}/rest/v1/{table}",
+            params=params,
+            headers={
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json_body=row,
+        )
+        return response.json()
+
     async def update(
         self,
         table: str,

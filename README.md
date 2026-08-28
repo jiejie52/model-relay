@@ -434,3 +434,75 @@ python -m app.worker
 6. 同一 Idempotency-Key 不重复创建模型调用。
 7. `continue_session` 只向 Dify 暴露 session id，不暴露 encrypted history。
 8. Relay 不可用时不要让 Dify 自动回退到直连大响应模型调用。
+
+## 7. Provider-Neutral Fusion Runtime (v0.2.0-fusion)
+
+This package now accepts the same `/v1/jobs` control plane for answer-fusion jobs.
+Normal `normal_inference` session behavior is unchanged.
+
+Supported Fusion stages:
+
+```text
+fusion_corpus_ingest
+material_evidence_mapping
+global_adjudication
+scoped_decision
+final_evidence_review
+direct_final_synthesis
+synthesis_blueprint
+final_draft_generation
+quality_review
+evidence_grounded_repair
+```
+
+### 7.1 Database migration
+
+After the existing `001_relay_schema.sql`, run:
+
+```text
+sql/002_fusion_runtime.sql
+```
+
+It creates `fusion_corpora`, `fusion_materials` and `fusion_artifacts`.
+The Relay API/Worker continues to be the only backend component that reads/writes these tables.
+
+### 7.2 Fusion Job contract
+
+Fusion jobs are stateless at the Relay session layer and are linked by immutable
+`fusion_corpus_id` plus versioned Artifact IDs. `fusion_corpus_ingest` also accepts
+`mode=new_fusion_corpus` for compatibility with the Dify DSL.
+
+Example Corpus ingest:
+
+```json
+{
+  "tenant_id": "dify-app-id",
+  "conversation_hash": "sha256-of-conversation",
+  "stage": "fusion_corpus_ingest",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash-lite",
+  "think_level": "medium",
+  "mode": "new_fusion_corpus",
+  "fusion_corpus_id": "fcor_xxx",
+  "payload": {
+    "corpus_version": 1,
+    "business_question": "...",
+    "materials": []
+  }
+}
+```
+
+Model stages use the same Job endpoint and submit `fusion_corpus_id`, `stage`,
+`route_profile` and a stage-specific `payload`. The Worker rehydrates the Corpus
+and referenced Artifacts from Supabase before calling the provider.
+
+### 7.3 Storage boundary
+
+Canonical Corpus and Artifacts are stored below:
+
+```text
+dify-assets/fusion/<tenant>/<conversation>/<corpus_id>/...
+```
+
+Dify receives only compact job results, Corpus IDs, Artifact IDs and stage payloads.
+Raw provider responses remain in Relay job storage.

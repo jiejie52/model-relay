@@ -1,0 +1,22 @@
+# Fusion Runtime deployment
+
+1. In Supabase SQL Editor, run `sql/002_fusion_runtime.sql` after the existing `001_relay_schema.sql`.
+2. Deploy this source to the existing Railway project. Redeploy both services:
+   - `relay-api`: existing uvicorn command / Dockerfile default.
+   - `relay-worker`: `python -m app.worker`.
+3. No new secret is required. Keep the existing AIHubMix, Supabase and Relay variables.
+4. Confirm `GET /health` returns version `0.2.0-fusion`.
+5. Import `AI对话助手-Chatflow_V20260828_FusionCorpusRelay_V20.20.3_FusionRuntimeSync.yml` in Dify.
+6. Re-run the small travel-expense Fusion test.
+
+Expected first successful chain:
+
+```text
+fusion_corpus_ingest -> succeeded + fusion_corpus_id
+DIRECT_GLOBAL_ADJUDICATION -> global_adjudication job
+comparison schema/post-validation -> AWAITING_DECISION
+```
+
+If a Supabase table/migration is missing, Relay status now exposes `SUPABASE_ERROR` with the downstream HTTP body excerpt. If a Fusion model stage returns malformed JSON/schema, Relay returns `FUSION_OUTPUT_INVALID_JSON` or `FUSION_SCHEMA_INVALID` and archives the raw provider response in the Relay job storage path.
+
+The normal `normal_inference` session contract is unchanged: `new_session / continue_session / stateless` still require `current_query`; only Fusion stages use the new `fusion_corpus_id + payload` contract.

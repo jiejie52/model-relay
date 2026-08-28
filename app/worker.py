@@ -9,12 +9,13 @@ from typing import Any
 from uuid import uuid4
 
 from .config import get_settings
+from .fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
 from .providers.base import ProviderHTTPError
 from .providers.openai_compatible import OpenAICompatibleResponsesProvider
 from .providers.registry import ProviderRegistry
 from .repository import RelayRepository
 from .storage_paths import job_object_path, session_history_version_path
-from .supabase import SupabaseBackend
+from .supabase import SupabaseBackend, SupabaseError
 from .utils import compact_error_excerpt, json_bytes, truncate_utf8, utcnow
 
 
@@ -28,6 +29,7 @@ class RelayWorker:
         self.backend = SupabaseBackend(settings)
         self.repo = RelayRepository(self.backend, settings)
         self.providers = ProviderRegistry(settings)
+        self.fusion = FusionRuntime(self.backend, self.repo, self.providers, settings)
         self.worker_id = (
             f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
         )
@@ -88,6 +90,10 @@ class RelayWorker:
             )
         except ProviderHTTPError as exc:
             await self._store_provider_error(updated, exc)
+        except FusionRuntimeError as exc:
+            await self._store_fusion_error(updated, exc)
+        except SupabaseError as exc:
+            await self._store_supabase_error(updated, exc)
         except Exception as exc:
             logger.exception("job_failed_unexpected job_id=%s", job_id)
             await self._fail_job(updated, "WORKER_ERROR", str(exc)[:2000])
@@ -114,6 +120,10 @@ class RelayWorker:
         request_snapshot = await self.backend.storage_get_json(
             job["request_object_path"]
         )
+
+        if is_fusion_stage(job.get("stage")):
+            await self._execute_fusion_job(job, request_snapshot)
+            return
 
         session = None
         material_prefix = request_snapshot.get("material_prefix")
@@ -288,6 +298,108 @@ class RelayWorker:
             lease_owner=self.worker_id,
         )
         logger.info("job_succeeded job_id=%s", job["id"])
+
+    async def _execute_fusion_job(
+        self, job: dict[str, Any], request_snapshot: dict[str, Any]
+    ) -> None:
+        result = await self.fusion.execute(job, request_snapshot)
+        tenant_id = job["tenant_id"]
+        conversation_hash = job["conversation_hash"]
+        raw_path = job_object_path(
+            settings, tenant_id, conversation_hash, job["id"], "raw-response.json"
+        )
+        output_path = job_object_path(
+            settings, tenant_id, conversation_hash, job["id"], "response-output.json"
+        )
+        await self.backend.storage_put(raw_path, result.raw_bytes)
+        await self.backend.storage_put(output_path, json_bytes(result.response_output))
+
+        latest = await self.repo.get_job(job["id"])
+        if not latest or latest.get("status") == "cancelled":
+            logger.info("fusion_job_cancelled_before_commit job_id=%s", job["id"])
+            return
+
+        compact_result = {
+            "job_id": job["id"],
+            "status": "succeeded",
+            "stage": job.get("stage"),
+            "fusion_corpus_id": request_snapshot.get("fusion_corpus_id"),
+            "artifact_id": result.artifact_id,
+            "payload": result.payload,
+            "response_id": result.response_id,
+            "usage": result.usage or {},
+            "cached_tokens": result.cached_tokens,
+            "raw_response_stored": True,
+        }
+        compact_result.update(result.artifact_aliases)
+        if len(json_bytes(compact_result)) > settings.relay_result_hard_limit_bytes:
+            raise FusionRuntimeError(
+                "FUSION_COMPACT_RESULT_TOO_LARGE",
+                "Fusion compact result exceeded the configured hard limit; store a smaller artifact payload",
+            )
+
+        await self.repo.update_job(
+            job["id"],
+            {
+                "status": "succeeded",
+                "raw_response_object_path": raw_path,
+                "response_output_object_path": output_path,
+                "compact_result": compact_result,
+                "completed_at": utcnow().isoformat(),
+                "heartbeat_at": utcnow().isoformat(),
+                "error_code": None,
+                "error_message": None,
+            },
+            lease_owner=self.worker_id,
+        )
+        logger.info(
+            "fusion_job_succeeded job_id=%s stage=%s artifact_id=%s",
+            job["id"],
+            job.get("stage"),
+            result.artifact_id,
+        )
+
+    async def _store_fusion_error(
+        self, job: dict[str, Any], exc: FusionRuntimeError
+    ) -> None:
+        raw_path = None
+        if exc.raw_bytes:
+            raw_path = job_object_path(
+                settings,
+                job["tenant_id"],
+                job["conversation_hash"],
+                job["id"],
+                "fusion-error-response.json",
+            )
+            try:
+                await self.backend.storage_put(raw_path, exc.raw_bytes)
+            except Exception:
+                raw_path = None
+        await self._fail_job(job, exc.code, exc.message, raw_path=raw_path)
+
+    async def _store_supabase_error(
+        self, job: dict[str, Any], exc: SupabaseError
+    ) -> None:
+        path = job_object_path(
+            settings,
+            job["tenant_id"],
+            job["conversation_hash"],
+            job["id"],
+            "supabase-error.json",
+        )
+        raw = json_bytes(
+            {
+                "status_code": exc.status_code,
+                "message": str(exc),
+                "body": str(exc.body or "")[:8192],
+            }
+        )
+        try:
+            await self.backend.storage_put(path, raw)
+        except Exception:
+            path = None
+        message = f"Supabase HTTP {exc.status_code}: {str(exc.body or str(exc))[:4096]}"
+        await self._fail_job(job, "SUPABASE_ERROR", message, raw_path=path)
 
     async def _store_provider_error(
         self, job: dict[str, Any], exc: ProviderHTTPError
