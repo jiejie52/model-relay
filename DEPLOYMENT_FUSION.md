@@ -20,3 +20,9 @@ comparison schema/post-validation -> AWAITING_DECISION
 If a Supabase table/migration is missing, Relay status now exposes `SUPABASE_ERROR` with the downstream HTTP body excerpt. If a Fusion model stage returns malformed JSON/schema, Relay returns `FUSION_OUTPUT_INVALID_JSON` or `FUSION_SCHEMA_INVALID` and archives the raw provider response in the Relay job storage path.
 
 The normal `normal_inference` session contract is unchanged: `new_session / continue_session / stateless` still require `current_query`; only Fusion stages use the new `fusion_corpus_id + payload` contract.
+
+## v0.2.1 schema-shape fix
+
+After deployment, `/health` should report `0.2.1-fusion-schema`.
+This release keeps the SQL schema unchanged from `002_fusion_runtime.sql`; no new migration is required.
+It strengthens `global_adjudication` structured-output transport and bounded normalization for canonical array fields such as `material_alignment`.

@@ -34,7 +34,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.2.0-fusion", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.2.1-fusion-schema", lifespan=lifespan)
 
 
 def _repo() -> RelayRepository:
@@ -73,7 +73,7 @@ def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "relay-api", "version": "0.2.0-fusion"}
+    return {"ok": True, "service": "relay-api", "version": "0.2.1-fusion-schema"}
 
 
 @app.post(

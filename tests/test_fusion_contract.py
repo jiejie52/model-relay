@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
 
-from app.fusion_runtime import FusionRuntime
+from app.fusion_runtime import FusionRuntime, _normalize_stage_output
 from app.models import JobSubmitRequest
 
 
@@ -116,6 +116,35 @@ class FusionContractTests(unittest.TestCase):
         self.assertEqual(first.payload["fusion_corpus_id"], "fcor_test")
         self.assertEqual(first.payload["candidate_count"], 1)
         self.assertTrue(second.payload["idempotent_reuse"])
+
+
+    def test_global_adjudication_singleton_container_normalization(self):
+        obj = {
+            "candidate_overview": [
+                {
+                    "candidate_id": "A",
+                    "material_alignment": {"alignment_id": "A-MA01"},
+                    "evidence_coverage": {"evidence_id": "A-EV01"},
+                    "proposal_compatibility": {"compatibility_id": "A-PC01"},
+                }
+            ],
+            "resolution_evidence_registry": {"resolution_evidence_id": "RE01"},
+            "conflicts": {"conflict_id": "C01"},
+        }
+        normalized, notes = _normalize_stage_output("global_adjudication", obj)
+        candidate = normalized["candidate_overview"][0]
+        self.assertIsInstance(candidate["material_alignment"], list)
+        self.assertIsInstance(candidate["evidence_coverage"], list)
+        self.assertIsInstance(candidate["proposal_compatibility"], list)
+        self.assertIsInstance(normalized["resolution_evidence_registry"], list)
+        self.assertIsInstance(normalized["conflicts"], list)
+        self.assertTrue(any("material_alignment" in x for x in notes))
+
+    def test_fusion_provider_payload_forces_json_object_transport(self):
+        runtime = FusionRuntime(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+        payload = runtime._provider_payload("global_adjudication", {})
+        self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
+        self.assertEqual(payload["temperature"], 0)
 
     def test_corpus_hash_ignores_volatile_signed_urls(self):
         backend = FakeBackend()

@@ -435,7 +435,7 @@ python -m app.worker
 7. `continue_session` 只向 Dify 暴露 session id，不暴露 encrypted history。
 8. Relay 不可用时不要让 Dify 自动回退到直连大响应模型调用。
 
-## 7. Provider-Neutral Fusion Runtime (v0.2.0-fusion)
+## 7. Provider-Neutral Fusion Runtime (v0.2.1-fusion-schema)
 
 This package now accepts the same `/v1/jobs` control plane for answer-fusion jobs.
 Normal `normal_inference` session behavior is unchanged.
@@ -506,3 +506,12 @@ dify-assets/fusion/<tenant>/<conversation>/<corpus_id>/...
 
 Dify receives only compact job results, Corpus IDs, Artifact IDs and stage payloads.
 Raw provider responses remain in Relay job storage.
+
+
+### v0.2.1-fusion-schema
+
+- Global Adjudication now sends the same JSON Object transport constraint used by the legacy Fusion path.
+- The prompt includes an explicit dynamic canonical ComparisonReport contract, including array container types.
+- Added bounded container-shape normalization (singleton object -> singleton array) for known canonical array fields before strict validation.
+- Added duplicate-key rejection when parsing model JSON.
+- No semantic values, candidate identities, evidence refs, or conflict decisions are invented during normalization.
