@@ -13,6 +13,7 @@ from .security import require_owner_headers, require_relay_auth
 from .storage_paths import job_object_path, session_material_prefix_path
 from .supabase import SupabaseBackend, SupabaseError
 from .utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
+from .relay_gateway import router as dify_relay_gateway_router
 
 
 settings = get_settings()
@@ -35,6 +36,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Model Relay API", version="0.2.1-fusion-schema", lifespan=lifespan)
+app.include_router(dify_relay_gateway_router)
 
 
 def _repo() -> RelayRepository:
