@@ -45,20 +45,6 @@ class Settings(BaseSettings):
 
     supabase_timeout_seconds: float = 60.0
 
-    # V20.25.23 Fusion Async Resume / Callback Contract. The callback target
-    # is fixed by Relay configuration; Dify job payloads only register the
-    # owning conversation/user identity.
-    dify_callback_enabled: bool = False
-    dify_callback_base_url: str | None = None
-    dify_callback_api_key: SecretStr | None = None
-    dify_callback_timeout_seconds: float = 900.0
-    dify_callback_connect_timeout_seconds: float = 30.0
-    dify_callback_poll_seconds: float = 2.0
-    dify_callback_max_attempts: int = 8
-    dify_callback_base_backoff_seconds: int = 5
-    dify_callback_max_backoff_seconds: int = 300
-    dify_callback_lease_seconds: int = 180
-
     @property
     def supabase_root(self) -> str:
         return self.supabase_url.rstrip("/")

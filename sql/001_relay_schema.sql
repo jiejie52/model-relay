@@ -187,5 +187,3 @@ revoke all on function public.commit_relay_session_history(uuid, bigint, text, t
     from public, anon, authenticated;
 grant execute on function public.commit_relay_session_history(uuid, bigint, text, text, text)
     to service_role;
-
--- V20.25.23 note: existing deployments must also run 003_fusion_async_callbacks.sql.
