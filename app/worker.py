@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
+from .callback_dispatcher import DifyCallbackDispatcher
 from .config import get_settings
 from .fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
 from .providers.base import ProviderHTTPError, ProviderRequestError
@@ -33,24 +34,42 @@ class RelayWorker:
         self.worker_id = (
             f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
         )
+        self.callbacks = DifyCallbackDispatcher(self.repo, settings, self.worker_id + "-callback")
 
     async def close(self) -> None:
+        await self.callbacks.close()
         await self.backend.close()
+
+    def _callback_ready_values(self, job: dict[str, Any]) -> dict[str, Any]:
+        if not str(job.get("callback_kind") or "").strip():
+            return {}
+        return {
+            "callback_status": "pending",
+            "callback_next_attempt_at": utcnow().isoformat(),
+            "callback_lease_owner": None,
+            "callback_lease_expires_at": None,
+        }
 
     async def run_forever(self) -> None:
         logger.info("worker_started id=%s", self.worker_id)
-        while True:
-            try:
-                job = await self.repo.claim_job(self.worker_id)
-                if not job:
+        callback_task = asyncio.create_task(self.callbacks.run_forever())
+        try:
+            while True:
+                try:
+                    job = await self.repo.claim_job(self.worker_id)
+                    if not job:
+                        await asyncio.sleep(settings.worker_poll_seconds)
+                        continue
+                    await self.process_job(job)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("worker_loop_error")
                     await asyncio.sleep(settings.worker_poll_seconds)
-                    continue
-                await self.process_job(job)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("worker_loop_error")
-                await asyncio.sleep(settings.worker_poll_seconds)
+        finally:
+            callback_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await callback_task
 
     async def process_job(self, job: dict[str, Any]) -> None:
         job_id = job["id"]
@@ -296,6 +315,7 @@ class RelayWorker:
                 "heartbeat_at": utcnow().isoformat(),
                 "error_code": None,
                 "error_message": None,
+                **self._callback_ready_values(job),
             },
             lease_owner=self.worker_id,
         )
@@ -351,6 +371,7 @@ class RelayWorker:
                 "heartbeat_at": utcnow().isoformat(),
                 "error_code": None,
                 "error_message": None,
+                **self._callback_ready_values(job),
             },
             lease_owner=self.worker_id,
         )
@@ -450,6 +471,7 @@ class RelayWorker:
                 "raw_response_object_path": raw_path,
                 "completed_at": utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
+                **self._callback_ready_values(job),
             },
             lease_owner=self.worker_id,
         )

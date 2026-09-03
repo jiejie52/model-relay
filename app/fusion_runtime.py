@@ -432,6 +432,11 @@ class FusionRuntime:
         material_rows: list[dict[str, Any]] = []
         candidate_count = 0
         effective_tokens = 0
+        max_single_material_tokens = 0
+        visual_count = 0
+        table_count = 0
+        required_evidence_count = 0
+        high_severity_parse_warnings = 0
         for index, item in enumerate(materials, 1):
             if not isinstance(item, dict):
                 continue
@@ -504,6 +509,20 @@ class FusionRuntime:
 
             material_tokens = max(1, len(source_text) // 4) if source_text else max(1, int(mat.get("text_length") or 0) // 4)
             effective_tokens += material_tokens
+            max_single_material_tokens = max(max_single_material_tokens, material_tokens)
+            visual_count += self._visual_count(projection)
+            table_count += self._table_count(projection)
+            if str(mat.get("warning_level") or "").lower() in {"high", "error", "critical"}:
+                high_severity_parse_warnings += 1
+            catalog = projection.get("evidence_catalog") if isinstance(projection, dict) else []
+            if isinstance(catalog, list):
+                required_evidence_count += sum(
+                    1
+                    for item0 in catalog
+                    if isinstance(item0, dict)
+                    and str(item0.get("policy") or item0.get("evidence_policy") or "").lower()
+                    in {"required", "review"}
+                )
             stored = dict(mat)
             stored.update(
                 {
@@ -585,6 +604,16 @@ class FusionRuntime:
             "material_count": len(stored_materials),
             "candidate_count": candidate_count,
             "effective_tokens": effective_tokens,
+            "metrics": {
+                "estimated_input_tokens": effective_tokens,
+                "material_count": len(stored_materials),
+                "candidate_count": candidate_count,
+                "max_single_material_tokens": max_single_material_tokens,
+                "visual_count": visual_count,
+                "required_evidence_count": required_evidence_count,
+                "high_severity_parse_warnings": high_severity_parse_warnings,
+                "table_count": table_count,
+            },
             "status": "ready",
         }
         return FusionExecutionResult(

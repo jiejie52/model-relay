@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 
+from .callback_contract import callback_registration
 from .config import get_settings
 from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
 from .repository import RelayRepository
@@ -35,7 +36,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.2.2-structured-output-passthrough", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.2.3-fusion-async-resume", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 
 
@@ -75,7 +76,7 @@ def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "relay-api", "version": "0.2.2-structured-output-passthrough"}
+    return {"ok": True, "service": "relay-api", "version": "0.2.3-fusion-async-resume"}
 
 
 @app.post(
@@ -196,6 +197,14 @@ async def submit_job(
         "attempt_count": 0,
         "expires_at": repository.default_job_expiry().isoformat(),
     }
+    row.update(
+        callback_registration(
+            metadata=request.metadata,
+            stage=request.stage,
+            payload=request.payload,
+            job_id=str(job_id),
+        )
+    )
 
     try:
         created = await repository.create_job(row)
@@ -330,6 +339,10 @@ async def cancel_job(
                 "completed_at": utcnow().isoformat(),
                 "error_code": "CANCELLED_BY_CLIENT",
                 "error_message": "Job cancelled by client",
+                **({
+                    "callback_status": "pending",
+                    "callback_next_attempt_at": utcnow().isoformat(),
+                } if job.get("callback_kind") else {}),
             },
         )
         if updated:

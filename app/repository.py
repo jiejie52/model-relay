@@ -99,6 +99,77 @@ class RelayRepository:
         )
         return bool(result)
 
+    async def claim_callback(self, worker_id: str) -> dict[str, Any] | None:
+        result = await self.backend.rpc(
+            "claim_relay_callback",
+            {
+                "p_worker_id": worker_id,
+                "p_lease_seconds": self.settings.dify_callback_lease_seconds,
+            },
+        )
+        if isinstance(result, list):
+            return result[0] if result else None
+        return result if isinstance(result, dict) else None
+
+    async def complete_callback(self, job_id: str, worker_id: str) -> bool:
+        rows = await self.backend.update(
+            "relay_jobs",
+            {
+                "callback_status": "delivered",
+                "callback_completed_at": utcnow().isoformat(),
+                "callback_last_error": None,
+                "callback_lease_owner": None,
+                "callback_lease_expires_at": None,
+            },
+            filters={
+                "id": f"eq.{job_id}",
+                "callback_lease_owner": f"eq.{worker_id}",
+                "callback_status": "eq.delivering",
+            },
+        )
+        return bool(rows)
+
+    async def retry_callback(
+        self, job_id: str, worker_id: str, error: str, *, delay_seconds: int
+    ) -> bool:
+        next_at = utcnow() + timedelta(seconds=max(1, int(delay_seconds)))
+        rows = await self.backend.update(
+            "relay_jobs",
+            {
+                "callback_status": "pending",
+                "callback_next_attempt_at": next_at.isoformat(),
+                "callback_last_error": str(error or "")[:6000],
+                "callback_lease_owner": None,
+                "callback_lease_expires_at": None,
+            },
+            filters={
+                "id": f"eq.{job_id}",
+                "callback_lease_owner": f"eq.{worker_id}",
+                "callback_status": "eq.delivering",
+            },
+        )
+        return bool(rows)
+
+    async def fail_callback(
+        self, job_id: str, worker_id: str, error: str, *, terminal: bool
+    ) -> bool:
+        rows = await self.backend.update(
+            "relay_jobs",
+            {
+                "callback_status": "failed" if terminal else "pending",
+                "callback_last_error": str(error or "")[:6000],
+                "callback_completed_at": utcnow().isoformat() if terminal else None,
+                "callback_lease_owner": None,
+                "callback_lease_expires_at": None,
+            },
+            filters={
+                "id": f"eq.{job_id}",
+                "callback_lease_owner": f"eq.{worker_id}",
+                "callback_status": "eq.delivering",
+            },
+        )
+        return bool(rows)
+
     async def commit_session_history(
         self,
         *,
