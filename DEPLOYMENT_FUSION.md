@@ -26,3 +26,16 @@ The normal `normal_inference` session contract is unchanged: `new_session / cont
 After deployment, `/health` should report `0.2.1-fusion-schema`.
 This release keeps the SQL schema unchanged from `002_fusion_runtime.sql`; no new migration is required.
 It strengthens `global_adjudication` structured-output transport and bounded normalization for canonical array fields such as `material_alignment`.
+
+
+## v0.2.2 generic structured-output passthrough
+
+No SQL migration is required. Redeploy both `relay-api` and `relay-worker` from the same source revision.
+
+After deployment, `/health` must report `0.2.2-structured-output-passthrough`.
+
+The Relay now maps arbitrary caller JSON Schema to provider-native Responses `text.format.type=json_schema`; it does not inspect Dify business property names. Current Dify requests using `payload.output_schema_mode=strict_json_schema` and `payload.output_schema` are supported without changing the request shape.
+
+When such a schema is present, legacy Railway-owned output-shape contracts and stage-specific output validators are bypassed, and only generic JSON-Schema validation is applied. If the upstream provider rejects the schema transport, the Job fails rather than silently weakening to `json_object`.
+
+See `STRUCTURED_OUTPUT_PASSTHROUGH.md` for the exact request and provider mapping.

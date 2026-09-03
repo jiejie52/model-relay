@@ -60,6 +60,14 @@ class JobSubmitRequest(BaseModel):
     # Provider-specific optional fields. Protected fields such as model/input/store
     # are ignored by the adapter and cannot override Relay safety rules.
     provider_payload: dict[str, Any] = Field(default_factory=dict)
+
+    # Provider-neutral structured-output request. The Relay treats the schema as
+    # opaque business data: it validates JSON-Schema syntax and maps it to the
+    # provider transport, but never inspects domain property names. Current Dify
+    # builders may also use payload.output_schema_mode + payload.output_schema;
+    # that compatibility form is resolved by app.structured_output.
+    structured_output: dict[str, Any] = Field(default_factory=dict)
+
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

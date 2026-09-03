@@ -35,7 +35,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.2.1-fusion-schema", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.2.2-structured-output-passthrough", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 
 
@@ -75,7 +75,7 @@ def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "relay-api", "version": "0.2.1-fusion-schema"}
+    return {"ok": True, "service": "relay-api", "version": "0.2.2-structured-output-passthrough"}
 
 
 @app.post(

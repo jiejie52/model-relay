@@ -4,7 +4,11 @@ from typing import Any
 import httpx
 
 from ..config import Settings
-from .base import ProviderHTTPError, ProviderResult
+from .base import ProviderHTTPError, ProviderRequestError, ProviderResult
+from ..structured_output import (
+    StructuredOutputError,
+    apply_openai_responses_structured_output,
+)
 
 
 class OpenAICompatibleResponsesProvider:
@@ -78,6 +82,20 @@ class OpenAICompatibleResponsesProvider:
             for key, value in provider_payload.items():
                 if key not in self._PROTECTED_OVERRIDE_KEYS:
                     payload[key] = value
+
+        # Generic structured-output passthrough. The adapter never inspects the
+        # schema's business property names; it only maps the caller's JSON Schema
+        # to the OpenAI-compatible Responses transport. This deliberately runs
+        # after provider_payload merge so an explicit caller schema overrides any
+        # legacy/fallback json_object setting.
+        try:
+            apply_openai_responses_structured_output(
+                payload,
+                request_snapshot,
+                fallback_name=str(request_snapshot.get("stage") or "structured_output"),
+            )
+        except StructuredOutputError as exc:
+            raise ProviderRequestError(exc.code, exc.message) from exc
 
         base_url = (
             ((request_snapshot.get("upstream") or {}).get("base_url"))

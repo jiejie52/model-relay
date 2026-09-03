@@ -435,7 +435,7 @@ python -m app.worker
 7. `continue_session` 只向 Dify 暴露 session id，不暴露 encrypted history。
 8. Relay 不可用时不要让 Dify 自动回退到直连大响应模型调用。
 
-## 7. Provider-Neutral Fusion Runtime (v0.2.1-fusion-schema)
+## 7. Provider-Neutral Fusion Runtime (v0.2.2-structured-output-passthrough)
 
 This package now accepts the same `/v1/jobs` control plane for answer-fusion jobs.
 Normal `normal_inference` session behavior is unchanged.
@@ -515,3 +515,14 @@ Raw provider responses remain in Relay job storage.
 - Added bounded container-shape normalization (singleton object -> singleton array) for known canonical array fields before strict validation.
 - Added duplicate-key rejection when parsing model JSON.
 - No semantic values, candidate identities, evidence refs, or conflict decisions are invented during normalization.
+
+
+### v0.2.2-structured-output-passthrough
+
+- Adds generic caller JSON Schema passthrough to the OpenAI-compatible `/responses` `text.format` transport.
+- Accepts both top-level `structured_output` and the current Dify-compatible `payload.output_schema_mode + payload.output_schema` form.
+- Caller schemas are treated as opaque business data; Railway does not inspect application property names.
+- When a caller schema is present, legacy Fusion `canonical_output_contract`, bounded business normalization, and stage-specific business validation are bypassed.
+- Generic JSON-Schema validation remains in Railway as a transport-integrity check.
+- Caller-provided `instructions` are no longer replaced for Fusion model stages.
+- No SQL migration is required. See `STRUCTURED_OUTPUT_PASSTHROUGH.md`.

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from .config import get_settings
 from .fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
-from .providers.base import ProviderHTTPError
+from .providers.base import ProviderHTTPError, ProviderRequestError
 from .providers.openai_compatible import OpenAICompatibleResponsesProvider
 from .providers.registry import ProviderRegistry
 from .repository import RelayRepository
@@ -90,6 +90,8 @@ class RelayWorker:
             )
         except ProviderHTTPError as exc:
             await self._store_provider_error(updated, exc)
+        except ProviderRequestError as exc:
+            await self._fail_job(updated, exc.code, exc.message)
         except FusionRuntimeError as exc:
             await self._store_fusion_error(updated, exc)
         except SupabaseError as exc:
