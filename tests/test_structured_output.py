@@ -126,6 +126,96 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertIn("Array items must be unique", provider_schema["properties"]["ids"]["description"])
         self.assertIn("Do not emit properties", provider_schema["description"])
 
+    def test_gemini_projection_drops_optional_array_without_items(self):
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "GeminiUntypedOptionalArray",
+            "type": "object",
+            "required": ["question"],
+            "properties": {
+                "question": {"type": "string"},
+                "reference_assessment": {"type": "array"},
+                "common_points": {"type": "array"},
+                "unique_strengths": {"type": "array"},
+                "candidate_omissions": {"type": "array"},
+                "unanswered_questions": {"type": "array"},
+            },
+            "additionalProperties": True,
+        }
+        projection = project_schema_for_provider(
+            schema, provider="gemini", model="gemini-3.1-flash-lite"
+        )
+        provider_schema = projection.schema
+        self.assertEqual(provider_schema["required"], ["question"])
+        self.assertEqual(set(provider_schema["properties"]), {"question"})
+        self.assertTrue(
+            all(
+                f"$.properties.{name}:optional_property" in projection.dropped_keywords
+                for name in (
+                    "reference_assessment",
+                    "common_points",
+                    "unique_strengths",
+                    "candidate_omissions",
+                    "unanswered_questions",
+                )
+            )
+        )
+
+    def test_gemini_projection_fails_closed_for_required_array_without_items(self):
+        schema = {
+            "type": "object",
+            "required": ["rows"],
+            "properties": {
+                "rows": {"type": "array"},
+            },
+        }
+        with self.assertRaises(StructuredOutputError) as ctx:
+            project_schema_for_provider(
+                schema, provider="gemini", model="gemini-3.1-flash-lite"
+            )
+        self.assertEqual(
+            ctx.exception.code, "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED"
+        )
+        self.assertIn("$.properties.rows", ctx.exception.message)
+        self.assertIn("requires ARRAY schemas to declare items", ctx.exception.message)
+
+    def test_gemini_projected_schema_never_contains_array_without_items(self):
+        schema = {
+            "type": "object",
+            "required": ["typed"],
+            "properties": {
+                "typed": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "optional_untyped": {"type": "array"},
+            },
+        }
+        provider_schema = project_schema_for_provider(
+            schema, provider="gemini", model="gemini-3.1-flash-lite"
+        ).schema
+
+        missing_items = []
+
+        def walk(node, path="$"):
+            if not isinstance(node, dict):
+                return
+            if node.get("type") == "array" and "items" not in node:
+                missing_items.append(path)
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                for name, child in properties.items():
+                    walk(child, f"{path}.properties.{name}")
+            if "items" in node:
+                walk(node["items"], f"{path}.items")
+            any_of = node.get("anyOf")
+            if isinstance(any_of, list):
+                for index, child in enumerate(any_of):
+                    walk(child, f"{path}.anyOf[{index}]")
+
+        walk(provider_schema)
+        self.assertEqual(missing_items, [])
+
     def test_gemini_transport_uses_projected_schema_but_returns_canonical_spec(self):
         schema = {
             "$schema": "https://json-schema.org/draft/2020-12/schema",

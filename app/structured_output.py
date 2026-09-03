@@ -281,6 +281,12 @@ def _project_gemini_response_schema(
     rewritten: set[str] = set()
     resolving_refs: set[str] = set()
 
+    class _GeminiProjectionUnsupported(Exception):
+        def __init__(self, path: str, reason: str) -> None:
+            super().__init__(reason)
+            self.path = path
+            self.reason = reason
+
     def project(node: Any, path: str = "$", root: dict[str, Any] | None = None) -> Any:
         root = schema if root is None else root
 
@@ -344,13 +350,44 @@ def _project_gemini_response_schema(
             out["type"] = raw_type
 
         # Native structural recursion. Property names are data, not schema
-        # keywords, so they are retained exactly.
+        # keywords, so they are retained exactly. Gemini native responseSchema
+        # requires every ARRAY schema to declare `items`. Canonical JSON Schema
+        # allows an unconstrained array (`{"type":"array"}`), so an optional
+        # property with that shape is omitted only from the provider-facing copy.
+        # A required unprojectable property fails closed instead of inventing an
+        # item type that could change the caller's contract.
         properties = node.get("properties")
+        required_raw = node.get("required")
+        required_names = {
+            str(name)
+            for name in required_raw
+            if isinstance(name, str)
+        } if isinstance(required_raw, list) else set()
         if isinstance(properties, dict):
-            out["properties"] = {
-                str(name): project(child, f"{path}.properties.{name}", root)
-                for name, child in properties.items()
-            }
+            projected_properties: dict[str, Any] = {}
+            for name, child in properties.items():
+                property_name = str(name)
+                child_path = f"{path}.properties.{property_name}"
+                try:
+                    projected_child = project(child, child_path, root)
+                except _GeminiProjectionUnsupported as exc:
+                    if property_name in required_names:
+                        raise
+                    dropped.add(f"{child_path}:optional_property")
+                    dropped.add(f"{exc.path}:provider_unrepresentable")
+                    continue
+                projected_properties[property_name] = projected_child
+            if projected_properties:
+                out["properties"] = projected_properties
+
+            if isinstance(required_raw, list):
+                projected_required = [
+                    str(name)
+                    for name in required_raw
+                    if isinstance(name, str) and str(name) in projected_properties
+                ]
+                if projected_required:
+                    out["required"] = projected_required
 
         if "items" in node:
             out["items"] = project(node.get("items"), f"{path}.items", root)
@@ -391,10 +428,17 @@ def _project_gemini_response_schema(
             )
             rewritten.add(f"{path}:prefixItems->items")
 
+        if out.get("type") == "array" and "items" not in out:
+            raise _GeminiProjectionUnsupported(
+                path,
+                "Gemini native responseSchema requires ARRAY schemas to declare items",
+            )
+
         # Copy scalar/list keywords that Gemini's native Schema object accepts.
         handled = {
             "type",
             "properties",
+            "required",
             "items",
             "anyOf",
             "oneOf",
@@ -444,7 +488,13 @@ def _project_gemini_response_schema(
 
         return out
 
-    projected = project(schema)
+    try:
+        projected = project(schema)
+    except _GeminiProjectionUnsupported as exc:
+        raise StructuredOutputError(
+            "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED",
+            f"Gemini responseSchema cannot represent caller schema at {exc.path}: {exc.reason}",
+        ) from exc
     if not isinstance(projected, dict) or not projected:
         raise StructuredOutputError(
             "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED",
