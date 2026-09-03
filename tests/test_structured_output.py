@@ -7,6 +7,7 @@ from app.models import JobSubmitRequest
 from app.structured_output import (
     StructuredOutputError,
     apply_openai_responses_structured_output,
+    project_schema_for_provider,
     resolve_structured_output,
     validate_against_schema,
 )
@@ -67,12 +68,14 @@ class StructuredOutputTests(unittest.TestCase):
         spec = resolve_structured_output(req.model_dump(mode="json"))
         self.assertEqual(spec.schema, SCHEMA)
 
-    def test_openai_responses_mapping_preserves_schema_exactly(self):
+    def test_non_gemini_responses_mapping_preserves_schema_exactly(self):
         request = {
+            "provider": "grok",
+            "model": "grok-4.6",
             "payload": {
                 "output_schema_mode": "strict_json_schema",
                 "output_schema": SCHEMA,
-            }
+            },
         }
         provider_payload = {
             "temperature": 0,
@@ -89,15 +92,82 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertEqual(fmt["schema"], SCHEMA)
         self.assertTrue(fmt["strict"])
 
+    def test_gemini_projection_removes_native_response_schema_unsupported_keywords(self):
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "GeminiProjection",
+            "type": "object",
+            "required": ["ids", "name"],
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "items": {"type": "string", "pattern": "^SS-[A-Z0-9]+$"},
+                },
+                "name": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        }
+        projection = project_schema_for_provider(
+            schema, provider="gemini", model="gemini-3.1-flash-lite"
+        )
+        provider_schema = projection.schema
+        rendered = json.dumps(provider_schema, ensure_ascii=False)
+        self.assertEqual(projection.provider_family, "gemini")
+        self.assertNotIn('"uniqueItems"', rendered)
+        self.assertNotIn('"$schema"', rendered)
+        self.assertNotIn('"additionalProperties"', rendered)
+        self.assertEqual(provider_schema["properties"]["ids"]["minItems"], 1)
+        self.assertEqual(
+            provider_schema["properties"]["ids"]["items"]["pattern"],
+            "^SS-[A-Z0-9]+$",
+        )
+        self.assertIn("Array items must be unique", provider_schema["properties"]["ids"]["description"])
+        self.assertIn("Do not emit properties", provider_schema["description"])
+
+    def test_gemini_transport_uses_projected_schema_but_returns_canonical_spec(self):
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "GeminiTransport",
+            "type": "object",
+            "properties": {
+                "ids": {
+                    "type": "array",
+                    "uniqueItems": True,
+                    "items": {"type": "string"},
+                }
+            },
+            "additionalProperties": False,
+        }
+        request = {
+            "provider": "gemini",
+            "model": "gemini-3.1-flash-lite",
+            "payload": {
+                "output_schema_mode": "strict_json_schema",
+                "output_schema": schema,
+            },
+        }
+        provider_payload = {}
+        spec = apply_openai_responses_structured_output(
+            provider_payload, request, fallback_name="stage"
+        )
+        self.assertEqual(spec.schema, schema)
+        sent_schema = provider_payload["text"]["format"]["schema"]
+        self.assertNotEqual(sent_schema, schema)
+        self.assertNotIn("uniqueItems", sent_schema["properties"]["ids"])
+
     def test_fusion_provider_payload_uses_caller_schema_instead_of_json_object(self):
         runtime = FusionRuntime(
             SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace()
         )
         snapshot = {
+            "provider": "grok",
+            "model": "grok-4.6",
             "payload": {
                 "output_schema_mode": "strict_json_schema",
                 "output_schema": SCHEMA,
-            }
+            },
         }
         payload = runtime._provider_payload("global_adjudication", snapshot)
         self.assertEqual(payload["text"]["format"]["type"], "json_schema")
@@ -313,5 +383,8 @@ class ProviderStructuredOutputIntegrationTests(unittest.TestCase):
             asyncio.run(provider.execute(request, session=None, material_prefix=None, history=[]))
         fmt = _HTTPClient.captured_json["text"]["format"]
         self.assertEqual(fmt["type"], "json_schema")
-        self.assertEqual(fmt["schema"], SCHEMA)
+        rendered = json.dumps(fmt["schema"], ensure_ascii=False)
+        self.assertNotEqual(fmt["schema"], SCHEMA)
+        self.assertNotIn('"$schema"', rendered)
+        self.assertNotIn('"additionalProperties"', rendered)
         self.assertTrue(fmt["strict"])

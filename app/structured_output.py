@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -27,9 +28,55 @@ class StructuredOutputSpec:
     schema_hash: str | None = None
 
 
+@dataclass(frozen=True)
+class ProviderSchemaProjection:
+    """Provider-facing projection of the caller's canonical JSON Schema.
+
+    `schema` is only the schema sent upstream. The caller's full schema remains in
+    StructuredOutputSpec and is therefore still used for deterministic post-call
+    validation. Dropping a provider-unsupported keyword never weakens Relay's
+    canonical validation contract.
+    """
+
+    schema: dict[str, Any]
+    provider_family: str
+    dropped_keywords: tuple[str, ...] = ()
+    rewritten_keywords: tuple[str, ...] = ()
+
+
 _SCHEMA_MODES = {"json_schema", "strict_json_schema", "schema"}
 _OBJECT_MODES = {"json_object", "object"}
 _DISABLED_MODES = {"", "none", "text", "plain_text", "disabled"}
+
+# AIHubMix currently translates OpenAI-compatible Responses `text.format.schema`
+# for Gemini models to Gemini native GenerationConfig.responseSchema. That field
+# accepts the Gemini `Schema` object (OpenAPI 3.0 subset), not arbitrary Draft
+# 2020-12 JSON Schema. Keep this list intentionally aligned to the native Schema
+# object rather than trying to infer Dify/Fusion business semantics.
+_GEMINI_RESPONSE_SCHEMA_KEYS = {
+    "type",
+    "format",
+    "title",
+    "description",
+    "nullable",
+    "enum",
+    "maxItems",
+    "minItems",
+    "properties",
+    "required",
+    "minProperties",
+    "maxProperties",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "example",
+    "anyOf",
+    "propertyOrdering",
+    "default",
+    "items",
+    "minimum",
+    "maximum",
+}
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -131,8 +178,9 @@ def resolve_structured_output(
       3. compatibility form used by current Dify builders:
          payload.output_schema_mode + payload.output_schema
 
-    The schema body is never interpreted for business fields; it is validated only
-    as JSON Schema and then passed to the provider adapter unchanged.
+    The canonical schema body is never interpreted for business fields. It is
+    validated as Draft 2020-12 here, projected only for provider transport, and
+    retained unchanged for deterministic post-call validation.
     """
 
     explicit = _parse_candidate(
@@ -171,7 +219,275 @@ def resolve_structured_output(
     return None
 
 
-def openai_responses_text_format(spec: StructuredOutputSpec) -> dict[str, Any]:
+def _provider_family(provider: Any, model: Any) -> str:
+    provider_name = str(provider or "").strip().lower()
+    model_name = str(model or "").strip().lower()
+    if provider_name in {"gemini", "google", "google_ai", "google-ai"} or model_name.startswith(
+        "gemini-"
+    ):
+        return "gemini"
+    if provider_name in {"grok", "xai"} or model_name.startswith("grok-"):
+        return "grok"
+    if provider_name in {"openai", "openai_compatible", "openai-compatible"}:
+        return "openai_compatible"
+    return provider_name or "openai_compatible"
+
+
+def _json_pointer_get(root: Any, ref: str) -> Any:
+    if not ref.startswith("#/"):
+        raise StructuredOutputError(
+            "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED",
+            f"Gemini responseSchema projection cannot dereference external JSON Schema ref: {ref}",
+        )
+    current = root
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            raise StructuredOutputError(
+                "STRUCTURED_OUTPUT_SCHEMA_INVALID",
+                f"Local JSON Schema ref does not resolve: {ref}",
+            )
+        current = current[part]
+    return current
+
+
+def _merge_description(existing: Any, notes: list[str]) -> str | None:
+    clean_notes = [str(note).strip() for note in notes if str(note).strip()]
+    prefix = str(existing or "").strip()
+    if not clean_notes:
+        return prefix or None
+    suffix = "Provider projection guidance: " + " ".join(clean_notes)
+    return f"{prefix}\n\n{suffix}" if prefix else suffix
+
+
+def _project_gemini_response_schema(
+    schema: dict[str, Any],
+) -> ProviderSchemaProjection:
+    """Project Draft 2020-12 JSON Schema to Gemini native responseSchema.
+
+    AIHubMix's current Gemini `/responses` compatibility layer maps the schema into
+    `generation_config.response_schema`, whose wire type is Gemini's `Schema`
+    object. Unsupported JSON-Schema keywords are removed only from the provider
+    copy. The full caller schema is still enforced after generation.
+
+    A few common constraints are converted into equivalent/best-effort native
+    guidance (`const` -> `enum`, nullable type arrays -> `nullable`, `oneOf` ->
+    `anyOf`). Unsupported enforcement-only constraints such as `uniqueItems` and
+    `additionalProperties` are represented as generic description guidance while
+    remaining authoritative in post-call validation.
+    """
+
+    dropped: set[str] = set()
+    rewritten: set[str] = set()
+    resolving_refs: set[str] = set()
+
+    def project(node: Any, path: str = "$", root: dict[str, Any] | None = None) -> Any:
+        root = schema if root is None else root
+
+        if isinstance(node, bool):
+            # Gemini native Schema has no boolean-schema form. `true` imposes no
+            # native constraint; `false` cannot be represented and therefore only
+            # remains enforceable by the canonical post-call validator.
+            dropped.add(f"{path}:boolean_schema")
+            return {}
+        if not isinstance(node, dict):
+            return deepcopy(node)
+
+        # Resolve local refs before filtering because native responseSchema has no
+        # $ref/$defs mechanism. Sibling keywords in Draft 2020-12 are preserved by
+        # overlaying them on the referenced target before projection.
+        if isinstance(node.get("$ref"), str):
+            ref = node["$ref"]
+            if ref in resolving_refs:
+                raise StructuredOutputError(
+                    "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED",
+                    f"Gemini responseSchema projection cannot inline cyclic ref: {ref}",
+                )
+            resolving_refs.add(ref)
+            target = _json_pointer_get(root, ref)
+            if not isinstance(target, dict):
+                raise StructuredOutputError(
+                    "STRUCTURED_OUTPUT_SCHEMA_INVALID",
+                    f"JSON Schema ref must resolve to an object for Gemini projection: {ref}",
+                )
+            merged = deepcopy(target)
+            for key, value in node.items():
+                if key != "$ref":
+                    merged[key] = value
+            rewritten.add(f"{path}:$ref->inline")
+            try:
+                return project(merged, path, root)
+            finally:
+                resolving_refs.remove(ref)
+
+        out: dict[str, Any] = {}
+        guidance: list[str] = []
+
+        raw_type = node.get("type")
+        if isinstance(raw_type, list):
+            types = [str(item) for item in raw_type]
+            non_null = [item for item in types if item != "null"]
+            has_null = len(non_null) != len(types)
+            if len(non_null) == 1:
+                out["type"] = non_null[0]
+                if has_null:
+                    out["nullable"] = True
+                    rewritten.add(f"{path}:type-nullable")
+            elif non_null:
+                out["anyOf"] = [{"type": item} for item in non_null]
+                if has_null:
+                    out["nullable"] = True
+                rewritten.add(f"{path}:type-array->anyOf")
+            else:
+                dropped.add(f"{path}:type")
+        elif isinstance(raw_type, str):
+            out["type"] = raw_type
+
+        # Native structural recursion. Property names are data, not schema
+        # keywords, so they are retained exactly.
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            out["properties"] = {
+                str(name): project(child, f"{path}.properties.{name}", root)
+                for name, child in properties.items()
+            }
+
+        if "items" in node:
+            out["items"] = project(node.get("items"), f"{path}.items", root)
+
+        any_of = node.get("anyOf")
+        if isinstance(any_of, list):
+            out["anyOf"] = [
+                project(child, f"{path}.anyOf[{index}]", root)
+                for index, child in enumerate(any_of)
+            ]
+
+        one_of = node.get("oneOf")
+        if isinstance(one_of, list):
+            projected = [
+                project(child, f"{path}.oneOf[{index}]", root)
+                for index, child in enumerate(one_of)
+            ]
+            if "anyOf" in out:
+                out["anyOf"].extend(projected)
+            else:
+                out["anyOf"] = projected
+            rewritten.add(f"{path}:oneOf->anyOf")
+
+        prefix_items = node.get("prefixItems")
+        if isinstance(prefix_items, list) and prefix_items:
+            projected_prefix = [
+                project(child, f"{path}.prefixItems[{index}]", root)
+                for index, child in enumerate(prefix_items)
+            ]
+            if "items" not in out:
+                out["items"] = (
+                    projected_prefix[0]
+                    if len(projected_prefix) == 1
+                    else {"anyOf": projected_prefix}
+                )
+            guidance.append(
+                "Tuple-position constraints from prefixItems remain subject to canonical post-validation."
+            )
+            rewritten.add(f"{path}:prefixItems->items")
+
+        # Copy scalar/list keywords that Gemini's native Schema object accepts.
+        handled = {
+            "type",
+            "properties",
+            "items",
+            "anyOf",
+            "oneOf",
+            "prefixItems",
+            "$ref",
+            "description",
+        }
+        for key in _GEMINI_RESPONSE_SCHEMA_KEYS - handled:
+            if key in node:
+                out[key] = deepcopy(node[key])
+
+        if "const" in node:
+            if "enum" not in out:
+                out["enum"] = [deepcopy(node["const"])]
+                rewritten.add(f"{path}:const->enum")
+            else:
+                dropped.add(f"{path}:const")
+
+        if node.get("uniqueItems") is True:
+            guidance.append("Array items must be unique.")
+            dropped.add(f"{path}:uniqueItems")
+        elif "uniqueItems" in node:
+            dropped.add(f"{path}:uniqueItems")
+
+        if "additionalProperties" in node:
+            additional = node.get("additionalProperties")
+            if additional is False and isinstance(properties, dict):
+                guidance.append("Do not emit properties other than the named properties in this object.")
+            elif isinstance(additional, dict):
+                guidance.append(
+                    "Additional-property values remain subject to the caller's canonical schema."
+                )
+            dropped.add(f"{path}:additionalProperties")
+
+        # Track every unsupported keyword at schema nodes. `$defs`/`definitions`
+        # are intentionally not emitted after any local refs have been inlined.
+        for key in node:
+            if key in handled or key in _GEMINI_RESPONSE_SCHEMA_KEYS:
+                continue
+            if key in {"const", "uniqueItems", "additionalProperties"}:
+                continue
+            dropped.add(f"{path}:{key}")
+
+        description = _merge_description(node.get("description"), guidance)
+        if description:
+            out["description"] = description
+
+        return out
+
+    projected = project(schema)
+    if not isinstance(projected, dict) or not projected:
+        raise StructuredOutputError(
+            "STRUCTURED_OUTPUT_PROVIDER_SCHEMA_UNSUPPORTED",
+            "Caller JSON Schema cannot be projected to Gemini native responseSchema",
+        )
+
+    return ProviderSchemaProjection(
+        schema=projected,
+        provider_family="gemini",
+        dropped_keywords=tuple(sorted(dropped)),
+        rewritten_keywords=tuple(sorted(rewritten)),
+    )
+
+
+def project_schema_for_provider(
+    schema: dict[str, Any],
+    *,
+    provider: Any = None,
+    model: Any = None,
+) -> ProviderSchemaProjection:
+    """Return the provider-facing schema without changing the canonical schema.
+
+    Gemini is projected to the native `responseSchema` subset because the current
+    AIHubMix compatibility layer targets that field. Other OpenAI-compatible
+    providers keep the caller schema unchanged; dedicated projections can be added
+    here later without changing Dify's request contract.
+    """
+
+    family = _provider_family(provider, model)
+    if family == "gemini":
+        return _project_gemini_response_schema(schema)
+    return ProviderSchemaProjection(
+        schema=deepcopy(schema),
+        provider_family=family,
+    )
+
+
+def openai_responses_text_format(
+    spec: StructuredOutputSpec,
+    *,
+    provider: Any = None,
+    model: Any = None,
+) -> dict[str, Any]:
     if spec.mode == "json_object":
         return {"type": "json_object"}
     if spec.mode != "json_schema" or not isinstance(spec.schema, dict):
@@ -179,10 +495,16 @@ def openai_responses_text_format(spec: StructuredOutputSpec) -> dict[str, Any]:
             "STRUCTURED_OUTPUT_MODE_UNSUPPORTED",
             f"Cannot map structured-output mode to Responses API: {spec.mode}",
         )
+
+    projection = project_schema_for_provider(
+        spec.schema,
+        provider=provider,
+        model=model,
+    )
     return {
         "type": "json_schema",
         "name": spec.name or "structured_output",
-        "schema": spec.schema,
+        "schema": projection.schema,
         "strict": bool(spec.strict),
     }
 
@@ -192,24 +514,34 @@ def apply_openai_responses_structured_output(
     request_snapshot: dict[str, Any],
     *,
     fallback_name: str = "structured_output",
+    provider: Any = None,
+    model: Any = None,
 ) -> StructuredOutputSpec | None:
-    """Apply caller-requested structured output to an OpenAI-compatible payload.
+    """Apply caller structured output to an OpenAI-compatible `/responses` payload.
 
-    Only the transport-level `text.format` field is changed. Existing unrelated
-    `text` options are preserved. A resolved caller schema is authoritative over a
-    legacy/fallback json_object transport setting.
+    The request contract remains provider-neutral. The provider adapter may project
+    the canonical JSON Schema to a provider-native subset before transport, but it
+    never interprets business property names. The original StructuredOutputSpec is
+    returned so downstream validation always uses the full caller schema.
     """
 
     spec = resolve_structured_output(request_snapshot, fallback_name=fallback_name)
     if spec is None:
         return None
 
+    provider = request_snapshot.get("provider") if provider is None else provider
+    model = request_snapshot.get("model") if model is None else model
+
     text = provider_payload.get("text")
     if not isinstance(text, dict):
         text = {}
     else:
         text = dict(text)
-    text["format"] = openai_responses_text_format(spec)
+    text["format"] = openai_responses_text_format(
+        spec,
+        provider=provider,
+        model=model,
+    )
     provider_payload["text"] = text
     return spec
 
