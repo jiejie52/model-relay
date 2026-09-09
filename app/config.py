@@ -19,12 +19,6 @@ class Settings(BaseSettings):
 
     aihubmix_api_key: SecretStr
     aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
-    # Relay-owned infrastructure routing. Every model request must resolve to an
-    # explicitly configured AIHubMix channel, so AIHubMix cannot silently move a
-    # session/request to another physical provider. Exact model mappings win over
-    # provider-family mappings. Values are AIHubMix channel IDs from the console.
-    aihubmix_official_model_channels: dict[str, int] = Field(default_factory=dict)
-    aihubmix_official_provider_channels: dict[str, int] = Field(default_factory=dict)
 
     supabase_url: str
     supabase_secret_key: SecretStr

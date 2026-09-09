@@ -97,13 +97,11 @@ class OpenAICompatibleResponsesProvider:
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
 
-        # Physical-provider routing is Relay-owned and fail-closed. Dify may
-        # describe the logical provider/model, but it cannot select or override
-        # the upstream facility. Every request is pinned to an explicitly
-        # configured AIHubMix channel via /v1/proxy/{channel_id}/responses.
-        self._validate_upstream_hint(request_snapshot)
-        channel_id = self._official_channel_id(provider, model)
-        url = f"{self.settings.aihubmix_root}/proxy/{channel_id}/responses"
+        base_url = (
+            ((request_snapshot.get("upstream") or {}).get("base_url"))
+            or self.settings.aihubmix_root
+        ).rstrip("/")
+        url = f"{base_url}/responses"
 
         timeout = httpx.Timeout(
             connect=self.settings.upstream_connect_timeout_seconds,
@@ -147,48 +145,6 @@ class OpenAICompatibleResponsesProvider:
             cached_tokens=cached_tokens,
             response_output=output,
         )
-
-    def _official_channel_id(self, provider: str, model: str) -> int:
-        model_key = str(model or "").strip().lower()
-        provider_key = str(provider or "").strip().lower()
-
-        model_channels = {
-            str(key).strip().lower(): int(value)
-            for key, value in (getattr(self.settings, "aihubmix_official_model_channels", {}) or {}).items()
-        }
-        provider_channels = {
-            str(key).strip().lower(): int(value)
-            for key, value in (getattr(self.settings, "aihubmix_official_provider_channels", {}) or {}).items()
-        }
-
-        channel_id = model_channels.get(model_key)
-        if channel_id is None:
-            channel_id = provider_channels.get(provider_key)
-
-        if channel_id is None or channel_id <= 0:
-            raise ProviderRequestError(
-                "OFFICIAL_UPSTREAM_CHANNEL_NOT_CONFIGURED",
-                (
-                    "No official AIHubMix channel is configured for "
-                    f"provider={provider_key or '<empty>'}, model={model_key or '<empty>'}. "
-                    "Configure AIHUBMIX_OFFICIAL_MODEL_CHANNELS or "
-                    "AIHUBMIX_OFFICIAL_PROVIDER_CHANNELS."
-                ),
-            )
-        return channel_id
-
-    def _validate_upstream_hint(self, request_snapshot: dict[str, Any]) -> None:
-        upstream = request_snapshot.get("upstream")
-        if not isinstance(upstream, dict):
-            return
-        requested = str(upstream.get("base_url") or "").strip().rstrip("/")
-        if not requested:
-            return
-        if requested != self.settings.aihubmix_root:
-            raise ProviderRequestError(
-                "UPSTREAM_OVERRIDE_FORBIDDEN",
-                "Upstream facility routing is owned by Relay and cannot be overridden by the caller.",
-            )
 
     @staticmethod
     def make_user_item(text: str) -> dict[str, Any]:

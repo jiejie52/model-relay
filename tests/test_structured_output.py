@@ -426,7 +426,6 @@ class _HTTPResponse:
 
 class _HTTPClient:
     captured_json = None
-    captured_url = None
 
     def __init__(self, *args, **kwargs):
         pass
@@ -438,7 +437,6 @@ class _HTTPClient:
         return False
 
     async def post(self, url, headers=None, json=None):
-        type(self).captured_url = url
         type(self).captured_json = json
         return _HTTPResponse()
 
@@ -456,8 +454,6 @@ class ProviderStructuredOutputIntegrationTests(unittest.TestCase):
             upstream_connect_timeout_seconds=1.0,
             upstream_write_timeout_seconds=1.0,
             upstream_pool_timeout_seconds=1.0,
-            aihubmix_official_model_channels={"any-model": 77},
-            aihubmix_official_provider_channels={},
         )
         provider = OpenAICompatibleResponsesProvider(settings)
         request = {
@@ -475,7 +471,6 @@ class ProviderStructuredOutputIntegrationTests(unittest.TestCase):
         }
         with patch("app.providers.openai_compatible.httpx.AsyncClient", _HTTPClient):
             asyncio.run(provider.execute(request, session=None, material_prefix=None, history=[]))
-        self.assertEqual(_HTTPClient.captured_url, "https://example.invalid/v1/proxy/77/responses")
         fmt = _HTTPClient.captured_json["text"]["format"]
         self.assertEqual(fmt["type"], "json_schema")
         rendered = json.dumps(fmt["schema"], ensure_ascii=False)
