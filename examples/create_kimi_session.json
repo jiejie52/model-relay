@@ -1,0 +1,14 @@
+{
+  "tenant_id": "example-app",
+  "conversation_hash": "example-conversation-hash",
+  "provider": "moonshot",
+  "upstream_profile": "moonshot-official",
+  "history_mode": "append",
+  "defaults": {
+    "model": "kimi-k3"
+  },
+  "context": null,
+  "metadata": {
+    "purpose": "smoke-test"
+  }
+}

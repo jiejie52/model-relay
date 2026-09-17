@@ -1,22 +1,26 @@
+from __future__ import annotations
+
 import asyncio
-import json
 import logging
 import os
 import socket
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 from .config import get_settings
-from .fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
-from .providers.base import ProviderHTTPError, ProviderRequestError
-from .providers.openai_compatible import OpenAICompatibleResponsesProvider
+from .error_contract import dependency_http_error_meta, provider_http_error_meta, relay_error_meta, transport_error_meta
+from .providers.base import (
+    ProviderHTTPError,
+    ProviderRequestError,
+    ProviderTransportError,
+)
 from .providers.registry import ProviderRegistry
 from .repository import RelayRepository
 from .storage_paths import job_object_path, session_history_version_path
 from .supabase import SupabaseBackend, SupabaseError
-from .utils import compact_error_excerpt, json_bytes, truncate_utf8, utcnow
+from .utils import json_bytes, truncate_utf8, utcnow
 
 
 settings = get_settings()
@@ -25,20 +29,23 @@ logger = logging.getLogger("model-relay-worker")
 
 
 class RelayWorker:
+    """Provider-neutral Relay Core worker.
+
+    Fusion business stages are intentionally not imported here. Legacy Fusion
+    jobs are consumed by `python -m app.application.fusion_worker`.
+    """
+
     def __init__(self) -> None:
         self.backend = SupabaseBackend(settings)
         self.repo = RelayRepository(self.backend, settings)
         self.providers = ProviderRegistry(settings)
-        self.fusion = FusionRuntime(self.backend, self.repo, self.providers, settings)
-        self.worker_id = (
-            f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
-        )
+        self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
 
     async def close(self) -> None:
         await self.backend.close()
 
     async def run_forever(self) -> None:
-        logger.info("worker_started id=%s", self.worker_id)
+        logger.info("core_worker_started id=%s", self.worker_id)
         while True:
             try:
                 job = await self.repo.claim_job(self.worker_id)
@@ -49,12 +56,19 @@ class RelayWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("worker_loop_error")
+                logger.exception("core_worker_loop_error")
                 await asyncio.sleep(settings.worker_poll_seconds)
 
     async def process_job(self, job: dict[str, Any]) -> None:
-        job_id = job["id"]
-        logger.info("job_claimed job_id=%s stage=%s", job_id, job.get("stage"))
+        job_id = str(job["id"])
+        fence = int(job.get("lease_fence") or 0)
+        logger.info(
+            "job_claimed job_id=%s engine=%s provider=%s fence=%s",
+            job_id,
+            job.get("execution_engine"),
+            job.get("provider"),
+            fence,
+        )
 
         current = await self.repo.get_job(job_id)
         if not current or current.get("status") == "cancelled":
@@ -68,6 +82,7 @@ class RelayWorker:
                 "heartbeat_at": utcnow().isoformat(),
             },
             lease_owner=self.worker_id,
+            lease_fence=fence,
         )
         if not updated:
             logger.warning("job_lost_before_start job_id=%s", job_id)
@@ -75,37 +90,58 @@ class RelayWorker:
 
         stop_heartbeat = asyncio.Event()
         heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(job_id, stop_heartbeat)
+            self._heartbeat_loop(job_id, fence, stop_heartbeat)
         )
         try:
             await asyncio.wait_for(
-                self._execute_job(updated),
-                timeout=settings.worker_max_runtime_seconds,
+                self._execute_job(updated), timeout=settings.worker_max_runtime_seconds
             )
-        except asyncio.TimeoutError:
-            await self._fail_job(
-                updated,
-                "UPSTREAM_TIMEOUT",
-                f"Model execution exceeded {settings.worker_max_runtime_seconds} seconds",
+        except asyncio.TimeoutError as exc:
+            meta = transport_error_meta(
+                provider=str(updated.get("provider") or "") or None,
+                service="provider-execution",
+                exception_type=type(exc).__name__,
+                message=f"Model execution exceeded {settings.worker_max_runtime_seconds} seconds",
+                cause_chain=[],
             )
+            await self._fail_job(updated, meta)
         except ProviderHTTPError as exc:
             await self._store_provider_error(updated, exc)
+        except ProviderTransportError as exc:
+            meta = transport_error_meta(
+                provider=exc.provider,
+                service=exc.service,
+                exception_type=exc.exception_type,
+                message=exc.message,
+                cause_chain=exc.cause_chain,
+            )
+            await self._fail_job(updated, meta)
         except ProviderRequestError as exc:
-            await self._fail_job(updated, exc.code, exc.message)
-        except FusionRuntimeError as exc:
-            await self._store_fusion_error(updated, exc)
+            await self._fail_job(updated, relay_error_meta(exc.code, exc.message))
         except SupabaseError as exc:
-            await self._store_supabase_error(updated, exc)
+            meta = dependency_http_error_meta(
+                service="supabase",
+                http_status=exc.status_code,
+                response_headers=exc.headers,
+                body=exc.body,
+            )
+            meta["exception"] = {"type": type(exc).__name__, "message": str(exc)}
+            await self._fail_job(updated, meta, code="SUPABASE_ERROR", message=str(exc))
         except Exception as exc:
             logger.exception("job_failed_unexpected job_id=%s", job_id)
-            await self._fail_job(updated, "WORKER_ERROR", str(exc)[:2000])
+            await self._fail_job(
+                updated,
+                relay_error_meta("WORKER_ERROR", f"{type(exc).__name__}: {exc}"),
+            )
         finally:
             stop_heartbeat.set()
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
-    async def _heartbeat_loop(self, job_id: str, stop: asyncio.Event) -> None:
+    async def _heartbeat_loop(
+        self, job_id: str, lease_fence: int, stop: asyncio.Event
+    ) -> None:
         while not stop.is_set():
             try:
                 await asyncio.wait_for(
@@ -113,131 +149,112 @@ class RelayWorker:
                 )
                 return
             except asyncio.TimeoutError:
-                ok = await self.repo.renew_lease(job_id, self.worker_id)
+                ok = await self.repo.renew_lease(
+                    job_id, self.worker_id, lease_fence
+                )
                 if not ok:
-                    logger.warning("lease_renew_failed job_id=%s", job_id)
+                    logger.warning(
+                        "lease_renew_failed job_id=%s fence=%s", job_id, lease_fence
+                    )
                     return
 
     async def _execute_job(self, job: dict[str, Any]) -> None:
-        request_snapshot = await self.backend.storage_get_json(
-            job["request_object_path"]
-        )
+        snapshot = await self.backend.storage_get_json(job["request_object_path"])
+        if not isinstance(snapshot, dict):
+            raise ProviderRequestError(
+                "REQUEST_SNAPSHOT_INVALID", "Relay request snapshot is not an object"
+            )
 
-        if is_fusion_stage(job.get("stage")):
-            await self._execute_fusion_job(job, request_snapshot)
-            return
-
-        session = None
-        material_prefix = request_snapshot.get("material_prefix")
+        session: dict[str, Any] | None = None
+        context = snapshot.get("material_prefix")
         history: list[dict[str, Any]] = []
         expected_history_version = int(
-            request_snapshot.get("expected_history_version") or 0
+            snapshot.get("expected_history_version")
+            if snapshot.get("expected_history_version") is not None
+            else job.get("expected_history_version")
+            or 0
         )
+        history_mode = str(snapshot.get("history_mode") or "append")
 
         if job.get("relay_session_id"):
             session = await self.repo.get_session(job["relay_session_id"])
             if not session:
-                await self._fail_job(job, "SESSION_MISSING", "Relay session not found")
-                return
+                raise ProviderRequestError("SESSION_MISSING", "Relay session not found")
+            if str(session.get("provider") or "") != str(job.get("provider") or ""):
+                raise ProviderRequestError(
+                    "SESSION_PROVIDER_MISMATCH",
+                    "Relay session provider cannot change across continuation",
+                )
+            adapter = self.providers.get(str(job["provider"]))
+            if session.get("protocol") and session.get("protocol") != adapter.protocol:
+                raise ProviderRequestError(
+                    "SESSION_PROTOCOL_MISMATCH",
+                    "Relay session protocol does not match provider adapter",
+                )
+            if session.get("history_codec") and session.get("history_codec") != adapter.history_codec:
+                raise ProviderRequestError(
+                    "SESSION_HISTORY_CODEC_MISMATCH",
+                    "Relay session history codec does not match provider adapter",
+                )
+            history_mode = str(session.get("history_mode") or history_mode or "append")
 
             signed_expiry = session.get("signed_url_expires_at")
             if signed_expiry:
-                from datetime import datetime
-
-                expiry = datetime.fromisoformat(signed_expiry.replace("Z", "+00:00"))
+                expiry = datetime.fromisoformat(
+                    str(signed_expiry).replace("Z", "+00:00")
+                )
                 if expiry <= utcnow() + timedelta(
                     seconds=settings.session_expiry_safety_seconds
                 ):
-                    await self._fail_job(
-                        job,
+                    raise ProviderRequestError(
                         "RELAY_SESSION_MATERIAL_EXPIRING",
                         "Material signed URLs are expiring; establish a new session",
                     )
-                    return
 
-            prefix_path = session.get("material_prefix_object_path")
-            if prefix_path:
-                material_prefix = await self.backend.storage_get_json(prefix_path)
+            context_path = (
+                snapshot.get("context_object_path")
+                or session.get("context_object_path")
+                or session.get("material_prefix_object_path")
+            )
+            if context_path:
+                context = await self.backend.storage_get_json(context_path)
 
-            history_path = session.get("history_object_path")
-            if history_path:
-                loaded = await self.backend.storage_get_json(history_path)
-                if isinstance(loaded, list):
-                    history = loaded
+            if history_mode == "append":
+                history_path = session.get("history_object_path")
+                if history_path:
+                    loaded = await self.backend.storage_get_json(history_path)
+                    if isinstance(loaded, list):
+                        history = loaded
 
-        provider = self.providers.get(job["provider"])
+        provider = self.providers.get(str(job["provider"]))
         result = await provider.execute(
-            request_snapshot,
+            snapshot,
             session=session,
-            material_prefix=material_prefix,
+            material_prefix=context,
             history=history,
         )
 
-        tenant_id = job["tenant_id"]
-        conversation_hash = job["conversation_hash"]
+        tenant_id = str(job["tenant_id"])
+        conversation_hash = str(job["conversation_hash"])
         raw_path = job_object_path(
-            settings, tenant_id, conversation_hash, job["id"], "raw-response.json"
+            settings, tenant_id, conversation_hash, str(job["id"]), "raw-response.json"
         )
         output_path = job_object_path(
             settings,
             tenant_id,
             conversation_hash,
-            job["id"],
+            str(job["id"]),
             "response-output.json",
         )
         await self.backend.storage_put(raw_path, result.raw_bytes)
-        await self.backend.storage_put(output_path, json_bytes(result.response_output))
+        await self.backend.storage_put(
+            output_path, json_bytes(result.response_output)
+        )
 
-        # Cancellation after the upstream call must not mutate session history.
         latest = await self.repo.get_job(job["id"])
         if not latest or latest.get("status") == "cancelled":
             logger.info("job_cancelled_after_upstream job_id=%s", job["id"])
             return
-
-        history_committed = False
-        if session:
-            prefix_has_query = bool(
-                request_snapshot.get("material_prefix_includes_current_query")
-            )
-            user_item = None
-            if not (request_snapshot.get("mode") == "new_session" and prefix_has_query):
-                user_item = OpenAICompatibleResponsesProvider.make_user_item(
-                    str(request_snapshot["current_query"])
-                )
-            new_history = list(history)
-            new_history.append(
-                {
-                    "job_id": job["id"],
-                    "created_at": utcnow().isoformat(),
-                    "user_item": user_item,
-                    "response_id": result.response_id,
-                    "response_output": result.response_output,
-                }
-            )
-            history_path = session_history_version_path(
-                settings,
-                tenant_id,
-                conversation_hash,
-                session["id"],
-                expected_history_version + 1,
-                job["id"],
-            )
-            await self.backend.storage_put(history_path, json_bytes(new_history))
-            history_committed = await self.repo.commit_session_history(
-                session_id=session["id"],
-                expected_history_version=expected_history_version,
-                history_object_path=history_path,
-                provider=job["provider"],
-                model=job["model"],
-            )
-            if not history_committed:
-                await self._fail_job(
-                    job,
-                    "SESSION_CONFLICT",
-                    "Session history changed while this job was running; result was archived but not committed",
-                    raw_path=raw_path,
-                )
-                return
 
         full_text_path = None
         text = result.text
@@ -247,32 +264,28 @@ class RelayWorker:
                 settings,
                 tenant_id,
                 conversation_hash,
-                job["id"],
+                str(job["id"]),
                 "visible-result.json",
             )
-            await self.backend.storage_put(
-                full_text_path,
-                json_bytes({"text": text}),
-            )
+            await self.backend.storage_put(full_text_path, json_bytes({"text": text}))
             text = truncate_utf8(text, settings.relay_result_preview_bytes)
             text_truncated = True
 
         compact_result = {
-            "job_id": job["id"],
+            "job_id": str(job["id"]),
             "status": "succeeded",
             "relay_session_id": job.get("relay_session_id"),
             "text": text,
             "response_id": result.response_id,
             "usage": result.usage,
             "cached_tokens": result.cached_tokens,
-            "history_committed": history_committed if session else False,
+            "finish_reason": result.finish_reason,
+            "history_committed": False,
             "raw_response_stored": True,
             "text_truncated": text_truncated,
             "full_text_available": bool(full_text_path),
             "full_text_object_id": full_text_path,
         }
-
-        # Defensive compact-result cap before it ever reaches Dify.
         if len(json_bytes(compact_result)) > settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
                 str(compact_result.get("text") or ""),
@@ -280,11 +293,85 @@ class RelayWorker:
             )
             compact_result["text_truncated"] = True
 
+        if session and history_mode == "append":
+            record = result.history_record
+            if record is None:
+                # Compatibility fallback for adapters/jobs created before v2.
+                record = {
+                    "codec": str(session.get("history_codec") or "legacy"),
+                    "job_id": str(job["id"]),
+                    "response_id": result.response_id,
+                    "response_output": result.response_output,
+                }
+            record = dict(record)
+            record.setdefault("job_id", str(job["id"]))
+            record.setdefault("created_at", utcnow().isoformat())
+            new_history = list(history)
+            new_history.append(record)
+            history_path = session_history_version_path(
+                settings,
+                tenant_id,
+                conversation_hash,
+                str(session["id"]),
+                expected_history_version + 1,
+                str(job["id"]),
+            )
+            await self.backend.storage_put(history_path, json_bytes(new_history))
+            compact_result["history_committed"] = True
+
+            # New jobs reserve active_job_id. The RPC validates session version,
+            # lease owner and fence before atomically closing Session+Job.
+            if str(session.get("active_job_id") or "") == str(job["id"]):
+                ok = await self.repo.commit_session_and_job_success(
+                    session_id=str(session["id"]),
+                    job_id=str(job["id"]),
+                    expected_history_version=expected_history_version,
+                    history_object_path=history_path,
+                    provider=str(job["provider"]),
+                    model=str(job["model"]),
+                    lease_owner=self.worker_id,
+                    lease_fence=int(job.get("lease_fence") or 0),
+                    raw_response_object_path=raw_path,
+                    response_output_object_path=output_path,
+                    compact_result=compact_result,
+                    provider_response_id=result.response_id,
+                )
+                if not ok:
+                    await self._fail_job(
+                        job,
+                        relay_error_meta(
+                            "SESSION_CONFLICT",
+                            "Session history or lease changed before atomic success commit",
+                        ),
+                        raw_response_path=raw_path,
+                    )
+                    return
+                logger.info("job_succeeded_atomic job_id=%s", job["id"])
+                return
+
+            # Historical jobs created before active-job reservation use the old CAS
+            # so their existing job_id remains resumable after upgrade.
+            committed = await self.repo.commit_session_history(
+                session_id=str(session["id"]),
+                expected_history_version=expected_history_version,
+                history_object_path=history_path,
+                provider=str(job["provider"]),
+                model=str(job["model"]),
+            )
+            if not committed:
+                await self._fail_job(
+                    job,
+                    relay_error_meta(
+                        "SESSION_CONFLICT",
+                        "Session history changed while this legacy job was running",
+                    ),
+                    raw_response_path=raw_path,
+                )
+                return
+
         latest = await self.repo.get_job(job["id"])
         if not latest or latest.get("status") == "cancelled":
-            logger.info("job_cancelled_before_commit job_id=%s", job["id"])
             return
-
         await self.repo.update_job(
             job["id"],
             {
@@ -292,168 +379,104 @@ class RelayWorker:
                 "raw_response_object_path": raw_path,
                 "response_output_object_path": output_path,
                 "compact_result": compact_result,
+                "provider_response_id": result.response_id,
                 "completed_at": utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
                 "error_code": None,
                 "error_message": None,
+                "raw_error_object_path": None,
+                "raw_error_meta": None,
             },
             lease_owner=self.worker_id,
+            lease_fence=int(job.get("lease_fence") or 0),
         )
         logger.info("job_succeeded job_id=%s", job["id"])
-
-    async def _execute_fusion_job(
-        self, job: dict[str, Any], request_snapshot: dict[str, Any]
-    ) -> None:
-        result = await self.fusion.execute(job, request_snapshot)
-        tenant_id = job["tenant_id"]
-        conversation_hash = job["conversation_hash"]
-        raw_path = job_object_path(
-            settings, tenant_id, conversation_hash, job["id"], "raw-response.json"
-        )
-        output_path = job_object_path(
-            settings, tenant_id, conversation_hash, job["id"], "response-output.json"
-        )
-        await self.backend.storage_put(raw_path, result.raw_bytes)
-        await self.backend.storage_put(output_path, json_bytes(result.response_output))
-
-        latest = await self.repo.get_job(job["id"])
-        if not latest or latest.get("status") == "cancelled":
-            logger.info("fusion_job_cancelled_before_commit job_id=%s", job["id"])
-            return
-
-        compact_result = {
-            "job_id": job["id"],
-            "status": "succeeded",
-            "stage": job.get("stage"),
-            "fusion_corpus_id": request_snapshot.get("fusion_corpus_id"),
-            "artifact_id": result.artifact_id,
-            "payload": result.payload,
-            "response_id": result.response_id,
-            "usage": result.usage or {},
-            "cached_tokens": result.cached_tokens,
-            "raw_response_stored": True,
-        }
-        compact_result.update(result.artifact_aliases)
-        if len(json_bytes(compact_result)) > settings.relay_result_hard_limit_bytes:
-            raise FusionRuntimeError(
-                "FUSION_COMPACT_RESULT_TOO_LARGE",
-                "Fusion compact result exceeded the configured hard limit; store a smaller artifact payload",
-            )
-
-        await self.repo.update_job(
-            job["id"],
-            {
-                "status": "succeeded",
-                "raw_response_object_path": raw_path,
-                "response_output_object_path": output_path,
-                "compact_result": compact_result,
-                "completed_at": utcnow().isoformat(),
-                "heartbeat_at": utcnow().isoformat(),
-                "error_code": None,
-                "error_message": None,
-            },
-            lease_owner=self.worker_id,
-        )
-        logger.info(
-            "fusion_job_succeeded job_id=%s stage=%s artifact_id=%s",
-            job["id"],
-            job.get("stage"),
-            result.artifact_id,
-        )
-
-    async def _store_fusion_error(
-        self, job: dict[str, Any], exc: FusionRuntimeError
-    ) -> None:
-        raw_path = None
-        if exc.raw_bytes:
-            raw_path = job_object_path(
-                settings,
-                job["tenant_id"],
-                job["conversation_hash"],
-                job["id"],
-                "fusion-error-response.json",
-            )
-            try:
-                await self.backend.storage_put(raw_path, exc.raw_bytes)
-            except Exception:
-                raw_path = None
-        await self._fail_job(job, exc.code, exc.message, raw_path=raw_path)
-
-    async def _store_supabase_error(
-        self, job: dict[str, Any], exc: SupabaseError
-    ) -> None:
-        path = job_object_path(
-            settings,
-            job["tenant_id"],
-            job["conversation_hash"],
-            job["id"],
-            "supabase-error.json",
-        )
-        raw = json_bytes(
-            {
-                "status_code": exc.status_code,
-                "message": str(exc),
-                "body": str(exc.body or "")[:8192],
-            }
-        )
-        try:
-            await self.backend.storage_put(path, raw)
-        except Exception:
-            path = None
-        message = f"Supabase HTTP {exc.status_code}: {str(exc.body or str(exc))[:4096]}"
-        await self._fail_job(job, "SUPABASE_ERROR", message, raw_path=path)
 
     async def _store_provider_error(
         self, job: dict[str, Any], exc: ProviderHTTPError
     ) -> None:
         path = job_object_path(
             settings,
-            job["tenant_id"],
-            job["conversation_hash"],
-            job["id"],
-            "raw-error.json",
+            str(job["tenant_id"]),
+            str(job["conversation_hash"]),
+            str(job["id"]),
+            "raw-error.bin",
         )
-        await self.backend.storage_put(
-            path,
-            exc.body,
-            content_type="application/json",
+        content_type = exc.content_type or "application/octet-stream"
+        storage_error: str | None = None
+        try:
+            await self.backend.storage_put(path, exc.body, content_type=content_type)
+        except Exception as store_exc:
+            # Storage failure must not replace the original provider failure.
+            storage_error = f"{type(store_exc).__name__}: {store_exc}"
+            path = None
+
+        meta = provider_http_error_meta(
+            provider=exc.provider or str(job.get("provider") or "") or None,
+            service=exc.service,
+            http_status=exc.status_code,
+            response_headers=exc.headers,
+            body_ref="raw-error" if path else "raw-error-unavailable",
+            body=exc.body,
+            request_id=exc.request_id,
+            received_complete=True,
         )
-        if 400 <= exc.status_code < 500:
-            code = "UPSTREAM_BAD_REQUEST"
-        elif exc.status_code >= 500:
-            code = "UPSTREAM_SERVER_ERROR"
-        else:
-            code = "UPSTREAM_HTTP_ERROR"
-        message = (
-            f"Upstream HTTP {exc.status_code}: "
-            f"{compact_error_excerpt(exc.body, 4096)}"
+        if storage_error:
+            meta["archive_error"] = storage_error
+            # Inline body is still not stored in DB to avoid silently truncating
+            # large provider errors. The metadata truthfully reports unavailability.
+            meta["body_ref"] = None
+        await self._fail_job(
+            job,
+            meta,
+            raw_error_path=path,
+            code=None,
+            message=None,
         )
-        await self._fail_job(job, code, message, raw_path=path)
 
     async def _fail_job(
         self,
         job: dict[str, Any],
-        code: str,
-        message: str,
+        meta: dict[str, Any],
         *,
-        raw_path: str | None = None,
+        raw_error_path: str | None = None,
+        raw_response_path: str | None = None,
+        code: str | None = None,
+        message: str | None = None,
     ) -> None:
         latest = await self.repo.get_job(job["id"])
         if latest and latest.get("status") == "cancelled":
             return
+
+        if meta.get("origin") == "relay":
+            code = code if code is not None else meta.get("relay_code")
+            message = message if message is not None else meta.get("relay_message")
+
         await self.repo.update_job(
             job["id"],
             {
                 "status": "failed",
                 "error_code": code,
-                "error_message": message[:6000],
-                "raw_response_object_path": raw_path,
+                "error_message": message,
+                "raw_error_object_path": raw_error_path,
+                "raw_error_meta": meta,
+                "raw_response_object_path": raw_response_path,
                 "completed_at": utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
             },
             lease_owner=self.worker_id,
+            lease_fence=int(job.get("lease_fence") or 0),
         )
-        logger.error("job_failed job_id=%s code=%s", job["id"], code)
+        if job.get("relay_session_id"):
+            await self.repo.release_session_job(
+                session_id=str(job["relay_session_id"]), job_id=str(job["id"])
+            )
+        logger.error(
+            "job_failed job_id=%s origin=%s http_status=%s",
+            job["id"],
+            meta.get("origin"),
+            meta.get("http_status"),
+        )
 
 
 async def main() -> None:

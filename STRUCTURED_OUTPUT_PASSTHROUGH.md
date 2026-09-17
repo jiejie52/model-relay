@@ -1,4 +1,4 @@
-# Generic Structured Output Passthrough — Railway Model Relay v0.2.2
+# Generic Structured Output Passthrough — Model Relay v0.3
 
 ## Goal
 
@@ -46,7 +46,7 @@ The Relay resolves these forms in this order:
 
 ## Provider mapping
 
-For the current OpenAI-compatible `/responses` adapter, a JSON Schema request maps to:
+For the OpenAI-compatible `/responses` adapter, a JSON Schema request maps to:
 
 ```json
 {
@@ -63,11 +63,13 @@ For the current OpenAI-compatible `/responses` adapter, a JSON Schema request ma
 
 The `schema` object is passed through unchanged.
 
-If the caller explicitly requests `json_object`, it maps to:
+If the caller explicitly requests `json_object`, the Responses adapter maps it to:
 
 ```json
 {"text":{"format":{"type":"json_object"}}}
 ```
+
+For the Moonshot/Kimi Chat Completions adapter, Relay maps the same provider-neutral contract to Chat Completions `response_format` while retaining the original canonical schema for post-response validation. The wire mapping is protocol-specific; the schema semantics remain caller-owned.
 
 If the caller requests no structured output, the legacy Fusion fallback remains `json_object` for backward compatibility.
 
@@ -81,7 +83,7 @@ When a caller schema is present:
 - Railway runs generic JSON-Schema validation only;
 - Railway never silently falls back from requested `json_schema` to `json_object`.
 
-If the upstream provider rejects the provider-native schema request, the Job fails with the existing upstream HTTP error path. The Relay does not weaken the contract.
+If the upstream provider rejects the provider-native schema request, the Job fails through the Raw Error Contract. The provider HTTP status/body are preserved; Relay does not weaken the schema or normalize the provider error.
 
 ## Caller instructions
 
@@ -100,18 +102,7 @@ These errors contain no Dify business semantics.
 
 ## Deployment
 
-No SQL migration is required.
-
-Redeploy:
-
-- `relay-api`
-- `relay-worker`
-
-Both services should use the same source revision. `/health` reports:
-
-```text
-0.2.2-structured-output-passthrough
-```
+For an existing 0.2 deployment, apply `sql/003_core_v2_kimi.sql` before enabling `/v2` jobs. Redeploy API and Core Worker from the same revision. `/health` reports `0.3.0-session-core-kimi`.
 
 ## Regression command
 

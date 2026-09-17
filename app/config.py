@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,8 +17,14 @@ class Settings(BaseSettings):
 
     relay_api_token: SecretStr
 
-    aihubmix_api_key: SecretStr
+    # Existing AIHubMix/OpenAI-compatible provider. Optional so a Kimi-only
+    # deployment does not have to configure credentials it never uses.
+    aihubmix_api_key: SecretStr | None = None
     aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
+
+    # Official Kimi/Moonshot endpoint profile.
+    moonshot_api_key: SecretStr | None = None
+    moonshot_base_url: str = "https://api.moonshot.ai/v1"
 
     supabase_url: str
     supabase_secret_key: SecretStr
@@ -39,11 +45,20 @@ class Settings(BaseSettings):
     relay_result_hard_limit_bytes: int = 786432
     relay_result_preview_bytes: int = 307200
 
+    # Raw provider errors are never normalized or summarized. Small errors can be
+    # returned inline; larger ones are delivered by the authenticated raw endpoint.
+    relay_raw_error_inline_limit_bytes: int = 262144
+
     upstream_connect_timeout_seconds: float = 30.0
     upstream_write_timeout_seconds: float = 120.0
     upstream_pool_timeout_seconds: float = 30.0
 
     supabase_timeout_seconds: float = 60.0
+
+    # Engine names allow rolling upgrade without old workers claiming new jobs.
+    core_execution_engine: str = "core-v2"
+    legacy_core_execution_engine: str = "core-legacy-v1"
+    legacy_fusion_execution_engine: str = "fusion-legacy-v1"
 
     @property
     def supabase_root(self) -> str:
@@ -52,6 +67,10 @@ class Settings(BaseSettings):
     @property
     def aihubmix_root(self) -> str:
         return self.aihubmix_openai_base_url.rstrip("/")
+
+    @property
+    def moonshot_root(self) -> str:
+        return self.moonshot_base_url.rstrip("/")
 
 
 @lru_cache

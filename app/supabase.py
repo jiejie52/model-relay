@@ -8,10 +8,26 @@ from .config import Settings
 
 
 class SupabaseError(RuntimeError):
-    def __init__(self, status_code: int, message: str, body: str = "") -> None:
+    """Supabase HTTP error with the original response preserved losslessly."""
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        body: bytes = b"",
+        *,
+        headers: list[tuple[str, str]] | None = None,
+        content_type: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body = body
+        self.headers = headers or []
+        self.content_type = content_type
+
+    @property
+    def body_text(self) -> str:
+        return self.body.decode("utf-8", errors="replace")
 
 
 class SupabaseBackend:
@@ -62,11 +78,18 @@ class SupabaseBackend:
         )
         ok = expected or set(range(200, 300))
         if response.status_code not in ok:
-            body = response.text[:8192]
+            # Do not truncate dependency errors. Callers decide whether to persist
+            # or inline the bytes, but this transport layer must preserve them.
+            body = response.content
             raise SupabaseError(
                 response.status_code,
                 f"Supabase request failed: {method} {url}",
                 body,
+                headers=[
+                    (name.decode("latin-1"), value.decode("latin-1"))
+                    for name, value in response.headers.raw
+                ],
+                content_type=response.headers.get("content-type"),
             )
         return response
 

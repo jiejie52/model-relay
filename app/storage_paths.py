@@ -12,9 +12,16 @@ def _root(settings: Settings, tenant_id: str, conversation_hash: str) -> str:
     )
 
 
+def session_context_path(
+    settings: Settings, tenant_id: str, conversation_hash: str, session_id: str
+) -> str:
+    return f"{_root(settings, tenant_id, conversation_hash)}/sessions/{session_id}/context.json"
+
+
 def session_material_prefix_path(
     settings: Settings, tenant_id: str, conversation_hash: str, session_id: str
 ) -> str:
+    # Legacy alias retained so existing sessions/checkpoints remain readable.
     return f"{_root(settings, tenant_id, conversation_hash)}/sessions/{session_id}/material-prefix.json"
 
 
@@ -51,48 +58,3 @@ def job_object_path(
     filename: str,
 ) -> str:
     return f"{_root(settings, tenant_id, conversation_hash)}/jobs/{job_id}/{filename}"
-
-
-def _fusion_root(settings: Settings, tenant_id: str, conversation_hash: str, corpus_id: str) -> str:
-    return "/".join(
-        [
-            "fusion",
-            safe_segment(tenant_id),
-            safe_segment(conversation_hash),
-            safe_segment(corpus_id),
-        ]
-    )
-
-
-def fusion_corpus_manifest_path(
-    settings: Settings, tenant_id: str, conversation_hash: str, corpus_id: str
-) -> str:
-    return f"{_fusion_root(settings, tenant_id, conversation_hash, corpus_id)}/corpus/manifest.json"
-
-
-def fusion_material_object_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    corpus_id: str,
-    material_id: str,
-    filename: str,
-) -> str:
-    return (
-        f"{_fusion_root(settings, tenant_id, conversation_hash, corpus_id)}/"
-        f"materials/{safe_segment(material_id)}/{safe_segment(filename)}"
-    )
-
-
-def fusion_artifact_object_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    corpus_id: str,
-    artifact_id: str,
-    filename: str,
-) -> str:
-    return (
-        f"{_fusion_root(settings, tenant_id, conversation_hash, corpus_id)}/"
-        f"artifacts/{safe_segment(artifact_id)}/{safe_segment(filename)}"
-    )

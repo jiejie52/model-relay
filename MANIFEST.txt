@@ -1,0 +1,50 @@
+Model Relay 0.3 — Kimi/Session Core package
+Generated: 2026-09-17
+
+Start here:
+  README.md
+  docs/OPERATION_GUIDE.md
+  docs/API_V2.md
+  docs/MIGRATION_CHECKLIST.md
+
+Core implementation:
+  app/api.py
+  app/core_api.py
+  app/core_models.py
+  app/core_service.py
+  app/error_contract.py
+  app/repository.py
+  app/worker.py
+
+Provider layer:
+  app/providers/base.py
+  app/providers/registry.py
+  app/providers/openai_compatible.py
+  app/providers/moonshot.py
+
+Compatibility/application boundary:
+  app/compat/v1_jobs.py
+  app/compat/dify_gateway.py
+  app/application/fusion_runtime.py
+  app/application/fusion_worker.py
+
+Database:
+  sql/001_relay_schema.sql
+  sql/002_fusion_runtime.sql
+  sql/003_core_v2_kimi.sql
+
+Examples/scripts:
+  examples/create_kimi_session.json
+  examples/kimi_job.json
+  examples/kimi_job_k26.json
+  scripts/check.sh
+  scripts/smoke_kimi.py
+
+Verification/diff:
+  TEST_RESULTS.txt
+  SOURCE_DIFF_KIMI_V2.patch
+
+Design references:
+  docs/reference/Model_Relay_技术架构与恢复机制说明_20260904_双层恢复修订版.docx
+  docs/reference/Relay改造方案.md
+  docs/reference/README_SOURCE.md
