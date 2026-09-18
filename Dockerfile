@@ -11,6 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-# Railway relay-api uses this default command.
-# Railway relay-worker overrides Start Command with: python -m app.worker
+# Default: compatibility API + V2 API.
+# V2 Worker: python -m app.worker
+# Material URL Worker: python -m app.material_worker
+# Legacy/Fusion Worker during coexistence: python -m app.legacy_worker
+# Core-only API alternative: uvicorn app.api_v2_app:app --host 0.0.0.0 --port $PORT
 CMD ["sh", "-c", "uvicorn app.api:app --host 0.0.0.0 --port ${PORT:-8000}"]
