@@ -8,4 +8,3 @@ __pycache__
 *.pyd
 .pytest_cache
 README.md
-sql
