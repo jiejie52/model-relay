@@ -1,7 +1,12 @@
-"""Deprecated import shim.
+"""Legacy import compatibility for the Fusion application runtime.
 
-Fusion is an application runtime, not part of Relay Core. New code should import
-`app.application.fusion_runtime`.
+Business logic lives in app.applications.fusion_runtime so V2 Core modules do not
+need to import or recognize Fusion stages.
 """
-from .application.fusion_runtime import *  # noqa: F401,F403
-from .application.fusion_runtime import _normalize_stage_output  # noqa: F401
+from .applications.fusion_runtime import *  # noqa: F401,F403
+from .applications import fusion_runtime as _impl
+
+# Private helpers are re-exported only for existing tests/legacy callers.
+_normalize_stage_output = _impl._normalize_stage_output
+_canonical_hash = _impl._canonical_hash
+_stable_corpus_value = _impl._stable_corpus_value

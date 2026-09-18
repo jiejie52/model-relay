@@ -1,54 +1,124 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
 from contextlib import suppress
-from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 from .config import get_settings
-from .error_contract import dependency_http_error_meta, provider_http_error_meta, relay_error_meta, transport_error_meta
+from .errors.service import RawErrorService
+from .materials.resolver import MaterialResolver
 from .providers.base import (
     ProviderHTTPError,
     ProviderRequestError,
+    ProviderResult,
     ProviderTransportError,
 )
 from .providers.registry import ProviderRegistry
 from .repository import RelayRepository
-from .storage_paths import job_object_path, session_history_version_path
+from .storage.execution_archive import ExecutionArchiveStore
+from .storage.uploaded_files import UploadedFileStore
+from .storage_paths import (
+    job_object_path,
+    v2_history_path,
+    v2_job_attempt_result_path,
+    v2_job_normalized_result_path,
+)
+from .structured_output import (
+    StructuredOutputError,
+    resolve_structured_output,
+    validate_against_schema,
+)
 from .supabase import SupabaseBackend, SupabaseError
-from .utils import json_bytes, truncate_utf8, utcnow
-
+from .utils import json_bytes, utcnow
 
 settings = get_settings()
 logging.basicConfig(level=settings.log_level)
-logger = logging.getLogger("model-relay-worker")
+logger = logging.getLogger("model-relay-v2-worker")
+
+
+class DuplicateJSONKeyError(ValueError):
+    pass
+
+
+def _strict_json_loads(text: str) -> Any:
+    def hook(pairs):
+        out = {}
+        for key, value in pairs:
+            if key in out:
+                raise DuplicateJSONKeyError(f"duplicate JSON key: {key}")
+            out[key] = value
+        return out
+
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def _result_archive_dict(result: ProviderResult) -> dict[str, Any]:
+    return {
+        "text": result.text,
+        "response_id": result.response_id,
+        "usage": result.usage,
+        "cached_tokens": result.cached_tokens,
+        "response_output": result.response_output,
+        "history_delta": result.history_delta,
+        "finish_reason": result.finish_reason,
+        "result_type": result.result_type,
+        "wire_request_hash": result.wire_request_hash,
+        "applied_generation": result.applied_generation,
+        "provider_metadata": result.provider_metadata,
+    }
+
+
+def _result_from_archive(raw_bytes: bytes, archived: dict[str, Any]) -> ProviderResult:
+    try:
+        raw_json = json.loads(raw_bytes.decode("utf-8"))
+    except Exception:
+        raw_json = {}
+    return ProviderResult(
+        raw_bytes=raw_bytes,
+        raw_json=raw_json if isinstance(raw_json, dict) else {},
+        text=str(archived.get("text") or ""),
+        response_id=archived.get("response_id"),
+        usage=archived.get("usage") if isinstance(archived.get("usage"), dict) else {},
+        cached_tokens=archived.get("cached_tokens") if isinstance(archived.get("cached_tokens"), int) else None,
+        response_output=archived.get("response_output") if isinstance(archived.get("response_output"), list) else [],
+        history_delta=archived.get("history_delta"),
+        finish_reason=archived.get("finish_reason"),
+        result_type=str(archived.get("result_type") or "message"),
+        wire_request_hash=archived.get("wire_request_hash"),
+        applied_generation=archived.get("applied_generation") if isinstance(archived.get("applied_generation"), dict) else {},
+        provider_metadata=archived.get("provider_metadata") if isinstance(archived.get("provider_metadata"), dict) else {},
+    )
 
 
 class RelayWorker:
-    """Provider-neutral Relay Core worker.
+    """V2 core worker.
 
-    Fusion business stages are intentionally not imported here. Legacy Fusion
-    jobs are consumed by `python -m app.application.fusion_worker`.
+    It never imports Fusion/Dify application modules. Legacy/Fusion jobs are
+    consumed by app.legacy_worker after 003_relay_v2_schema.sql separates claims.
     """
 
     def __init__(self) -> None:
         self.backend = SupabaseBackend(settings)
         self.repo = RelayRepository(self.backend, settings)
+        self.archive = ExecutionArchiveStore(self.backend)
+        self.errors = RawErrorService(self.repo, self.archive, settings)
         self.providers = ProviderRegistry(settings)
+        self.material_store = UploadedFileStore(settings)
         self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
 
     async def close(self) -> None:
         await self.backend.close()
 
     async def run_forever(self) -> None:
-        logger.info("core_worker_started id=%s", self.worker_id)
+        logger.info("v2_worker_started id=%s engine=%s", self.worker_id, settings.execution_engine)
         while True:
             try:
-                job = await self.repo.claim_job(self.worker_id)
+                job = await self.repo.claim_job_v2(self.worker_id)
                 if not job:
                     await asyncio.sleep(settings.worker_poll_seconds)
                     continue
@@ -56,427 +126,491 @@ class RelayWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("core_worker_loop_error")
+                logger.exception("v2_worker_loop_error")
                 await asyncio.sleep(settings.worker_poll_seconds)
 
     async def process_job(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
-        fence = int(job.get("lease_fence") or 0)
-        logger.info(
-            "job_claimed job_id=%s engine=%s provider=%s fence=%s",
-            job_id,
-            job.get("execution_engine"),
-            job.get("provider"),
-            fence,
-        )
-
-        current = await self.repo.get_job(job_id)
-        if not current or current.get("status") == "cancelled":
+        lease_token = str(job.get("lease_token") or "")
+        if not lease_token:
+            logger.error("v2_job_without_lease_token job_id=%s", job_id)
             return
-
-        updated = await self.repo.update_job(
+        updated = await self.repo.update_job_v2_fenced(
             job_id,
             {
                 "status": "running",
-                "started_at": current.get("started_at") or utcnow().isoformat(),
+                "started_at": job.get("started_at") or utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
             },
-            lease_owner=self.worker_id,
-            lease_fence=fence,
+            worker_id=self.worker_id,
+            lease_token=lease_token,
         )
         if not updated:
-            logger.warning("job_lost_before_start job_id=%s", job_id)
             return
 
-        stop_heartbeat = asyncio.Event()
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(job_id, fence, stop_heartbeat)
-        )
+        stop = asyncio.Event()
+        heartbeat = asyncio.create_task(self._heartbeat_loop(job_id, lease_token, stop))
         try:
             await asyncio.wait_for(
-                self._execute_job(updated), timeout=settings.worker_max_runtime_seconds
+                self._execute_job(updated, lease_token),
+                timeout=settings.worker_max_runtime_seconds,
             )
-        except asyncio.TimeoutError as exc:
-            meta = transport_error_meta(
-                provider=str(updated.get("provider") or "") or None,
-                service="provider-execution",
-                exception_type=type(exc).__name__,
-                message=f"Model execution exceeded {settings.worker_max_runtime_seconds} seconds",
-                cause_chain=[],
-            )
-            await self._fail_job(updated, meta)
-        except ProviderHTTPError as exc:
-            await self._store_provider_error(updated, exc)
-        except ProviderTransportError as exc:
-            meta = transport_error_meta(
-                provider=exc.provider,
-                service=exc.service,
-                exception_type=exc.exception_type,
-                message=exc.message,
-                cause_chain=exc.cause_chain,
-            )
-            await self._fail_job(updated, meta)
-        except ProviderRequestError as exc:
-            await self._fail_job(updated, relay_error_meta(exc.code, exc.message))
-        except SupabaseError as exc:
-            meta = dependency_http_error_meta(
-                service="supabase",
-                http_status=exc.status_code,
-                response_headers=exc.headers,
-                body=exc.body,
-            )
-            meta["exception"] = {"type": type(exc).__name__, "message": str(exc)}
-            await self._fail_job(updated, meta, code="SUPABASE_ERROR", message=str(exc))
-        except Exception as exc:
-            logger.exception("job_failed_unexpected job_id=%s", job_id)
-            await self._fail_job(
+        except asyncio.TimeoutError:
+            await self._handle_timeout(updated, lease_token)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("v2_job_unhandled job_id=%s", job_id)
+            await self._record_native_failure(
                 updated,
-                relay_error_meta("WORKER_ERROR", f"{type(exc).__name__}: {exc}"),
+                lease_token,
+                code="WORKER_ERROR",
+                message="Unexpected Relay worker exception; inspect server logs",
+                phase="worker_error",
             )
         finally:
-            stop_heartbeat.set()
-            heartbeat_task.cancel()
+            stop.set()
+            heartbeat.cancel()
             with suppress(asyncio.CancelledError):
-                await heartbeat_task
+                await heartbeat
 
-    async def _heartbeat_loop(
-        self, job_id: str, lease_fence: int, stop: asyncio.Event
-    ) -> None:
+    async def _heartbeat_loop(self, job_id: str, lease_token: str, stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=settings.job_heartbeat_seconds
-                )
+                await asyncio.wait_for(stop.wait(), timeout=settings.job_heartbeat_seconds)
                 return
             except asyncio.TimeoutError:
-                ok = await self.repo.renew_lease(
-                    job_id, self.worker_id, lease_fence
-                )
+                ok = await self.repo.renew_lease_v2(job_id, self.worker_id, lease_token)
                 if not ok:
-                    logger.warning(
-                        "lease_renew_failed job_id=%s fence=%s", job_id, lease_fence
-                    )
+                    logger.warning("v2_lease_lost job_id=%s", job_id)
                     return
 
-    async def _execute_job(self, job: dict[str, Any]) -> None:
-        snapshot = await self.backend.storage_get_json(job["request_object_path"])
-        if not isinstance(snapshot, dict):
-            raise ProviderRequestError(
-                "REQUEST_SNAPSHOT_INVALID", "Relay request snapshot is not an object"
-            )
-
-        session: dict[str, Any] | None = None
-        context = snapshot.get("material_prefix")
-        history: list[dict[str, Any]] = []
-        expected_history_version = int(
-            snapshot.get("expected_history_version")
-            if snapshot.get("expected_history_version") is not None
-            else job.get("expected_history_version")
-            or 0
-        )
-        history_mode = str(snapshot.get("history_mode") or "append")
-
-        if job.get("relay_session_id"):
-            session = await self.repo.get_session(job["relay_session_id"])
-            if not session:
-                raise ProviderRequestError("SESSION_MISSING", "Relay session not found")
-            if str(session.get("provider") or "") != str(job.get("provider") or ""):
-                raise ProviderRequestError(
-                    "SESSION_PROVIDER_MISMATCH",
-                    "Relay session provider cannot change across continuation",
-                )
-            adapter = self.providers.get(str(job["provider"]))
-            if session.get("protocol") and session.get("protocol") != adapter.protocol:
-                raise ProviderRequestError(
-                    "SESSION_PROTOCOL_MISMATCH",
-                    "Relay session protocol does not match provider adapter",
-                )
-            if session.get("history_codec") and session.get("history_codec") != adapter.history_codec:
-                raise ProviderRequestError(
-                    "SESSION_HISTORY_CODEC_MISMATCH",
-                    "Relay session history codec does not match provider adapter",
-                )
-            history_mode = str(session.get("history_mode") or history_mode or "append")
-
-            signed_expiry = session.get("signed_url_expires_at")
-            if signed_expiry:
-                expiry = datetime.fromisoformat(
-                    str(signed_expiry).replace("Z", "+00:00")
-                )
-                if expiry <= utcnow() + timedelta(
-                    seconds=settings.session_expiry_safety_seconds
-                ):
-                    raise ProviderRequestError(
-                        "RELAY_SESSION_MATERIAL_EXPIRING",
-                        "Material signed URLs are expiring; establish a new session",
-                    )
-
-            context_path = (
-                snapshot.get("context_object_path")
-                or session.get("context_object_path")
-                or session.get("material_prefix_object_path")
-            )
-            if context_path:
-                context = await self.backend.storage_get_json(context_path)
-
-            if history_mode == "append":
-                history_path = session.get("history_object_path")
-                if history_path:
-                    loaded = await self.backend.storage_get_json(history_path)
-                    if isinstance(loaded, list):
-                        history = loaded
-
-        provider = self.providers.get(str(job["provider"]))
-        result = await provider.execute(
-            snapshot,
-            session=session,
-            material_prefix=context,
-            history=history,
-        )
-
+    async def _execute_job(self, job: dict[str, Any], lease_token: str) -> None:
+        job_id = str(job["id"])
         tenant_id = str(job["tenant_id"])
         conversation_hash = str(job["conversation_hash"])
-        raw_path = job_object_path(
-            settings, tenant_id, conversation_hash, str(job["id"]), "raw-response.json"
-        )
-        output_path = job_object_path(
-            settings,
-            tenant_id,
-            conversation_hash,
-            str(job["id"]),
-            "response-output.json",
-        )
-        await self.backend.storage_put(raw_path, result.raw_bytes)
-        await self.backend.storage_put(
-            output_path, json_bytes(result.response_output)
-        )
-
-        latest = await self.repo.get_job(job["id"])
-        if not latest or latest.get("status") == "cancelled":
-            logger.info("job_cancelled_after_upstream job_id=%s", job["id"])
+        session_id = str(job.get("relay_session_id") or "")
+        if not session_id:
+            await self._record_native_failure(job, lease_token, code="SESSION_MISSING", message="V2 job has no session", phase="validation")
             return
 
-        full_text_path = None
-        text = result.text
-        text_truncated = False
-        if len(text.encode("utf-8")) > settings.relay_result_soft_limit_bytes:
-            full_text_path = job_object_path(
-                settings,
-                tenant_id,
-                conversation_hash,
-                str(job["id"]),
-                "visible-result.json",
-            )
-            await self.backend.storage_put(full_text_path, json_bytes({"text": text}))
-            text = truncate_utf8(text, settings.relay_result_preview_bytes)
-            text_truncated = True
+        request_snapshot = await self.archive.get_json(job["request_object_path"])
+        session = await self.repo.get_session(
+            session_id,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+        )
+        if not session or session.get("schema_version") != "relay-session/2.0":
+            await self._record_native_failure(job, lease_token, code="SESSION_MISSING", message="V2 session was not found", phase="validation")
+            return
 
-        compact_result = {
-            "job_id": str(job["id"]),
+        profile_name = str(session.get("upstream_profile") or "")
+        try:
+            profile = self.providers.validate_session_model(profile_name, str(session["provider"]), str(job["model"]))
+            adapter = self.providers.get_v2(profile_name)
+        except (KeyError, ValueError) as exc:
+            await self._record_native_failure(job, lease_token, code="PROVIDER_PROFILE_INVALID", message=str(exc), phase="validation")
+            return
+
+        context: list[dict[str, Any]] = []
+        if session.get("context_object_path"):
+            loaded = await self.archive.get_json(session["context_object_path"])
+            if isinstance(loaded, list):
+                context = loaded
+        history: Any = []
+        if session.get("history_object_path"):
+            history = await self.archive.get_json(session["history_object_path"])
+
+        resolver = MaterialResolver(
+            self.repo,
+            self.material_store,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+            session_id=session_id,
+            lease_owner=f"{self.worker_id}:{job_id}",
+            binding_wait_seconds=settings.binding_prepare_wait_seconds,
+        )
+
+        # A prior worker may have archived the provider response and died before
+        # the DB transaction. Recover that artifact before considering a send.
+        recovered = await self._try_recover_archived(job, request_snapshot, session, history, adapter, lease_token)
+        if recovered:
+            return
+
+        latest = await self.repo.get_job(job_id, tenant_id=tenant_id, conversation_hash=conversation_hash)
+        if latest and latest.get("execution_phase") == "dispatch_started":
+            # There is no archived response to prove the outcome. Do not blind retry.
+            await self._record_native_failure(
+                latest,
+                lease_token,
+                code="DELIVERY_OUTCOME_UNKNOWN",
+                message="Provider dispatch started but no complete response was durably archived; automatic resend is disabled",
+                phase="delivery_unknown",
+                delivery_status="unknown",
+            )
+            return
+
+        dispatched = False
+
+        async def before_dispatch(wire_request_hash: str) -> None:
+            nonlocal dispatched
+            updated = await self.repo.update_job_v2_fenced(
+                job_id,
+                {
+                    "execution_phase": "dispatch_started",
+                    "delivery_status": "dispatch_started",
+                    "wire_request_hash": wire_request_hash,
+                    "heartbeat_at": utcnow().isoformat(),
+                },
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+            )
+            if not updated:
+                raise ProviderRequestError("LEASE_LOST", "Worker lost its lease before provider dispatch")
+            dispatched = True
+
+        await self.repo.update_job_v2_fenced(
+            job_id,
+            {"execution_phase": "preparing_provider", "delivery_status": "not_sent"},
+            worker_id=self.worker_id,
+            lease_token=lease_token,
+        )
+        try:
+            result = await adapter.execute_v2(
+                request_snapshot,
+                session=session,
+                context=context,
+                history=history,
+                material_resolver=resolver,
+                before_dispatch=before_dispatch,
+            )
+        except ProviderHTTPError as exc:
+            error_row = await self.errors.capture_provider_http(
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                exc=exc,
+                provider=profile.provider,
+            )
+            await self.repo.record_job_failure_v2(
+                job_id=job_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+                error_id=error_row.get("id"),
+                error_code=self._native_error_code(exc.body),
+                error_message=self._native_error_message(exc.body),
+                execution_phase="provider_error",
+                delivery_status="response_received",
+            )
+            return
+        except ProviderTransportError as exc:
+            error_row = await self.errors.capture_transport(
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                exc=exc,
+                provider=profile.provider,
+            )
+            await self.repo.record_job_failure_v2(
+                job_id=job_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+                error_id=error_row.get("id"),
+                error_code=None,
+                error_message=str(exc),
+                execution_phase="delivery_unknown" if dispatched else "provider_prepare_failed",
+                delivery_status="unknown" if dispatched else "not_sent",
+            )
+            return
+        except ProviderRequestError as exc:
+            await self._record_native_failure(
+                job,
+                lease_token,
+                code=exc.code,
+                message=exc.message,
+                phase="provider_prepare_failed" if not dispatched else "provider_validation_failed",
+                delivery_status="unknown" if dispatched else "not_sent",
+            )
+            return
+
+        raw_path = job_object_path(settings, tenant_id, conversation_hash, job_id, "raw-response.json")
+        attempt_path = v2_job_attempt_result_path(settings, tenant_id, conversation_hash, job_id)
+        try:
+            await self.archive.put_bytes(raw_path, result.raw_bytes, content_type="application/json", upsert=True)
+            await self.archive.put_json(attempt_path, _result_archive_dict(result), upsert=True)
+            fenced = await self.repo.update_job_v2_fenced(
+                job_id,
+                {
+                    "execution_phase": "response_archived",
+                    "delivery_status": "response_archived",
+                    "raw_response_object_path": raw_path,
+                    "wire_request_hash": result.wire_request_hash,
+                },
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+            )
+            if not fenced:
+                logger.warning("response_archived_but_lease_lost job_id=%s", job_id)
+                return
+        except SupabaseError as exc:
+            error_row = await self.errors.capture_supabase(
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                exc=exc,
+            )
+            await self.repo.record_job_failure_v2(
+                job_id=job_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+                error_id=error_row.get("id"),
+                error_code=None,
+                error_message=str(exc),
+                execution_phase="delivery_unknown",
+                delivery_status="unknown",
+            )
+            return
+
+        await self._validate_and_commit(job, request_snapshot, session, history, result, raw_path, lease_token)
+
+    async def _try_recover_archived(
+        self,
+        job: dict[str, Any],
+        request_snapshot: dict[str, Any],
+        session: dict[str, Any],
+        history: Any,
+        adapter: Any,
+        lease_token: str,
+    ) -> bool:
+        phase = str(job.get("execution_phase") or "")
+        delivery = str(job.get("delivery_status") or "")
+        if phase not in {"response_archived", "validating", "dispatch_started"} and delivery != "response_archived":
+            return False
+        tenant_id = str(job["tenant_id"])
+        conversation_hash = str(job["conversation_hash"])
+        job_id = str(job["id"])
+        raw_path = job_object_path(settings, tenant_id, conversation_hash, job_id, "raw-response.json")
+        attempt_path = v2_job_attempt_result_path(settings, tenant_id, conversation_hash, job_id)
+        try:
+            raw = await self.archive.get_bytes(raw_path)
+            archived = await self.archive.get_json(attempt_path)
+        except SupabaseError as exc:
+            if exc.status_code in {400, 404}:
+                return False
+            raise
+        if not isinstance(archived, dict):
+            return False
+        result = _result_from_archive(raw, archived)
+        await self.repo.update_job_v2_fenced(
+            job_id,
+            {"execution_phase": "response_archived", "delivery_status": "response_archived", "raw_response_object_path": raw_path},
+            worker_id=self.worker_id,
+            lease_token=lease_token,
+        )
+        await self._validate_and_commit(job, request_snapshot, session, history, result, raw_path, lease_token)
+        return True
+
+    async def _validate_and_commit(
+        self,
+        job: dict[str, Any],
+        request_snapshot: dict[str, Any],
+        session: dict[str, Any],
+        history: Any,
+        result: ProviderResult,
+        raw_path: str,
+        lease_token: str,
+    ) -> None:
+        job_id = str(job["id"])
+        tenant_id = str(job["tenant_id"])
+        conversation_hash = str(job["conversation_hash"])
+        session_id = str(session["id"])
+        await self.repo.update_job_v2_fenced(
+            job_id,
+            {"execution_phase": "validating"},
+            worker_id=self.worker_id,
+            lease_token=lease_token,
+        )
+        try:
+            spec = resolve_structured_output(request_snapshot, fallback_name="relay_output")
+            structured_value = None
+            if spec is not None:
+                if not result.text.strip():
+                    raise StructuredOutputError("STRUCTURED_OUTPUT_EMPTY", "Provider returned no structured-output text")
+                try:
+                    structured_value = _strict_json_loads(result.text)
+                except DuplicateJSONKeyError as exc:
+                    raise StructuredOutputError("STRUCTURED_OUTPUT_DUPLICATE_KEY", str(exc)) from exc
+                except json.JSONDecodeError as exc:
+                    raise StructuredOutputError("STRUCTURED_OUTPUT_INVALID_JSON", str(exc)) from exc
+                if spec.mode == "json_object" and not isinstance(structured_value, dict):
+                    raise StructuredOutputError("STRUCTURED_OUTPUT_VALIDATION_FAILED", "Provider JSON output is not an object")
+                validate_against_schema(structured_value, spec)
+        except StructuredOutputError as exc:
+            diagnostic = json_bytes({"code": exc.code, "message": exc.message, "raw_response_object_path": raw_path})
+            error_row = await self.errors.capture_http(
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                origin="relay",
+                provider=str(job["provider"]),
+                service="structured_output_validation",
+                status_code=None,
+                headers=[],
+                body=diagnostic,
+                content_type="application/json",
+                content_encoding=None,
+                received_complete=True,
+            )
+            await self.repo.record_job_failure_v2(
+                job_id=job_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                worker_id=self.worker_id,
+                lease_token=lease_token,
+                error_id=error_row.get("id"),
+                error_code=exc.code,
+                error_message=exc.message,
+                execution_phase="validation_failed",
+                delivery_status="response_archived",
+                raw_response_object_path=raw_path,
+            )
+            return
+
+        normalized = {
+            "job_id": job_id,
+            "session_id": session_id,
             "status": "succeeded",
-            "relay_session_id": job.get("relay_session_id"),
-            "text": text,
+            "provider": job["provider"],
+            "model": job["model"],
+            "text": result.text,
+            "structured": structured_value,
             "response_id": result.response_id,
             "usage": result.usage,
             "cached_tokens": result.cached_tokens,
             "finish_reason": result.finish_reason,
-            "history_committed": False,
-            "raw_response_stored": True,
-            "text_truncated": text_truncated,
-            "full_text_available": bool(full_text_path),
-            "full_text_object_id": full_text_path,
+            "result_type": result.result_type,
+            "applied_generation": result.applied_generation,
+            "provider_metadata": result.provider_metadata,
         }
-        if len(json_bytes(compact_result)) > settings.relay_result_hard_limit_bytes:
-            compact_result["text"] = truncate_utf8(
-                str(compact_result.get("text") or ""),
-                min(settings.relay_result_preview_bytes, 196608),
-            )
-            compact_result["text_truncated"] = True
+        normalized_path = v2_job_normalized_result_path(settings, tenant_id, conversation_hash, job_id)
+        await self.archive.put_json(normalized_path, normalized, upsert=True)
 
-        if session and history_mode == "append":
-            record = result.history_record
-            if record is None:
-                # Compatibility fallback for adapters/jobs created before v2.
-                record = {
-                    "codec": str(session.get("history_codec") or "legacy"),
-                    "job_id": str(job["id"]),
-                    "response_id": result.response_id,
-                    "response_output": result.response_output,
-                }
-            record = dict(record)
-            record.setdefault("job_id", str(job["id"]))
-            record.setdefault("created_at", utcnow().isoformat())
-            new_history = list(history)
-            new_history.append(record)
-            history_path = session_history_version_path(
+        history_path: str | None = None
+        if str(session.get("history_mode") or "append") == "append":
+            new_history = list(history) if isinstance(history, list) else []
+            if isinstance(result.history_delta, list):
+                new_history.extend(result.history_delta)
+            elif result.history_delta is not None:
+                new_history.append(result.history_delta)
+            history_path = v2_history_path(
                 settings,
                 tenant_id,
                 conversation_hash,
-                str(session["id"]),
-                expected_history_version + 1,
-                str(job["id"]),
+                session_id,
+                int(job.get("expected_history_version") or 0) + 1,
+                job_id,
             )
-            await self.backend.storage_put(history_path, json_bytes(new_history))
-            compact_result["history_committed"] = True
+            await self.archive.put_json(history_path, new_history, upsert=True)
 
-            # New jobs reserve active_job_id. The RPC validates session version,
-            # lease owner and fence before atomically closing Session+Job.
-            if str(session.get("active_job_id") or "") == str(job["id"]):
-                ok = await self.repo.commit_session_and_job_success(
-                    session_id=str(session["id"]),
-                    job_id=str(job["id"]),
-                    expected_history_version=expected_history_version,
-                    history_object_path=history_path,
-                    provider=str(job["provider"]),
-                    model=str(job["model"]),
-                    lease_owner=self.worker_id,
-                    lease_fence=int(job.get("lease_fence") or 0),
-                    raw_response_object_path=raw_path,
-                    response_output_object_path=output_path,
-                    compact_result=compact_result,
-                    provider_response_id=result.response_id,
-                )
-                if not ok:
-                    await self._fail_job(
-                        job,
-                        relay_error_meta(
-                            "SESSION_CONFLICT",
-                            "Session history or lease changed before atomic success commit",
-                        ),
-                        raw_response_path=raw_path,
-                    )
-                    return
-                logger.info("job_succeeded_atomic job_id=%s", job["id"])
-                return
-
-            # Historical jobs created before active-job reservation use the old CAS
-            # so their existing job_id remains resumable after upgrade.
-            committed = await self.repo.commit_session_history(
-                session_id=str(session["id"]),
-                expected_history_version=expected_history_version,
-                history_object_path=history_path,
-                provider=str(job["provider"]),
-                model=str(job["model"]),
-            )
-            if not committed:
-                await self._fail_job(
-                    job,
-                    relay_error_meta(
-                        "SESSION_CONFLICT",
-                        "Session history changed while this legacy job was running",
-                    ),
-                    raw_response_path=raw_path,
-                )
-                return
-
-        latest = await self.repo.get_job(job["id"])
-        if not latest or latest.get("status") == "cancelled":
-            return
-        await self.repo.update_job(
-            job["id"],
-            {
-                "status": "succeeded",
-                "raw_response_object_path": raw_path,
-                "response_output_object_path": output_path,
-                "compact_result": compact_result,
-                "provider_response_id": result.response_id,
-                "completed_at": utcnow().isoformat(),
-                "heartbeat_at": utcnow().isoformat(),
-                "error_code": None,
-                "error_message": None,
-                "raw_error_object_path": None,
-                "raw_error_meta": None,
-            },
-            lease_owner=self.worker_id,
-            lease_fence=int(job.get("lease_fence") or 0),
+        compact = {
+            "job_id": job_id,
+            "status": "succeeded",
+            "response_id": result.response_id,
+            "finish_reason": result.finish_reason,
+            "result_type": result.result_type,
+            "result_object_path": normalized_path,
+        }
+        committed = await self.repo.commit_job_result_v2(
+            job_id=job_id,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+            worker_id=self.worker_id,
+            lease_token=lease_token,
+            expected_history_version=int(job.get("expected_history_version") or 0),
+            history_object_path=history_path,
+            raw_response_object_path=raw_path,
+            response_output_object_path=normalized_path,
+            compact_result=compact,
+            wire_request_hash=result.wire_request_hash,
         )
-        logger.info("job_succeeded job_id=%s", job["id"])
+        if committed.get("outcome") != "committed":
+            logger.warning("v2_commit_not_authoritative job_id=%s outcome=%s", job_id, committed.get("outcome"))
+        else:
+            logger.info("v2_job_succeeded job_id=%s", job_id)
 
-    async def _store_provider_error(
-        self, job: dict[str, Any], exc: ProviderHTTPError
-    ) -> None:
-        path = job_object_path(
-            settings,
-            str(job["tenant_id"]),
-            str(job["conversation_hash"]),
-            str(job["id"]),
-            "raw-error.bin",
-        )
-        content_type = exc.content_type or "application/octet-stream"
-        storage_error: str | None = None
-        try:
-            await self.backend.storage_put(path, exc.body, content_type=content_type)
-        except Exception as store_exc:
-            # Storage failure must not replace the original provider failure.
-            storage_error = f"{type(store_exc).__name__}: {store_exc}"
-            path = None
-
-        meta = provider_http_error_meta(
-            provider=exc.provider or str(job.get("provider") or "") or None,
-            service=exc.service,
-            http_status=exc.status_code,
-            response_headers=exc.headers,
-            body_ref="raw-error" if path else "raw-error-unavailable",
-            body=exc.body,
-            request_id=exc.request_id,
-            received_complete=True,
-        )
-        if storage_error:
-            meta["archive_error"] = storage_error
-            # Inline body is still not stored in DB to avoid silently truncating
-            # large provider errors. The metadata truthfully reports unavailability.
-            meta["body_ref"] = None
-        await self._fail_job(
-            job,
-            meta,
-            raw_error_path=path,
-            code=None,
-            message=None,
+    async def _handle_timeout(self, job: dict[str, Any], lease_token: str) -> None:
+        latest = await self.repo.get_job(str(job["id"]), tenant_id=job["tenant_id"], conversation_hash=job["conversation_hash"])
+        dispatched = bool(latest and latest.get("execution_phase") in {"dispatch_started", "response_archived", "validating"})
+        await self._record_native_failure(
+            latest or job,
+            lease_token,
+            code="JOB_DEADLINE_EXCEEDED",
+            message=f"Job exceeded {settings.worker_max_runtime_seconds} seconds",
+            phase="delivery_unknown" if dispatched else "deadline_exceeded",
+            delivery_status="unknown" if dispatched else "not_sent",
         )
 
-    async def _fail_job(
+    async def _record_native_failure(
         self,
         job: dict[str, Any],
-        meta: dict[str, Any],
+        lease_token: str,
         *,
-        raw_error_path: str | None = None,
-        raw_response_path: str | None = None,
-        code: str | None = None,
-        message: str | None = None,
+        code: str | None,
+        message: str | None,
+        phase: str,
+        delivery_status: str = "not_sent",
     ) -> None:
-        latest = await self.repo.get_job(job["id"])
-        if latest and latest.get("status") == "cancelled":
-            return
-
-        if meta.get("origin") == "relay":
-            code = code if code is not None else meta.get("relay_code")
-            message = message if message is not None else meta.get("relay_message")
-
-        await self.repo.update_job(
-            job["id"],
-            {
-                "status": "failed",
-                "error_code": code,
-                "error_message": message,
-                "raw_error_object_path": raw_error_path,
-                "raw_error_meta": meta,
-                "raw_response_object_path": raw_response_path,
-                "completed_at": utcnow().isoformat(),
-                "heartbeat_at": utcnow().isoformat(),
-            },
-            lease_owner=self.worker_id,
-            lease_fence=int(job.get("lease_fence") or 0),
+        await self.repo.record_job_failure_v2(
+            job_id=str(job["id"]),
+            session_id=str(job.get("relay_session_id")) if job.get("relay_session_id") else None,
+            tenant_id=str(job["tenant_id"]),
+            conversation_hash=str(job["conversation_hash"]),
+            worker_id=self.worker_id,
+            lease_token=lease_token,
+            error_id=None,
+            error_code=code,
+            error_message=message,
+            execution_phase=phase,
+            delivery_status=delivery_status,
         )
-        if job.get("relay_session_id"):
-            await self.repo.release_session_job(
-                session_id=str(job["relay_session_id"]), job_id=str(job["id"])
-            )
-        logger.error(
-            "job_failed job_id=%s origin=%s http_status=%s",
-            job["id"],
-            meta.get("origin"),
-            meta.get("http_status"),
-        )
+
+    @staticmethod
+    def _native_error_code(body: bytes) -> str | None:
+        try:
+            obj = json.loads(body.decode("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        error = obj.get("error")
+        if isinstance(error, dict):
+            value = error.get("code") or error.get("type")
+            return str(value) if value is not None else None
+        value = obj.get("code") or obj.get("type")
+        return str(value) if value is not None else None
+
+    @staticmethod
+    def _native_error_message(body: bytes) -> str | None:
+        try:
+            obj = json.loads(body.decode("utf-8"))
+        except Exception:
+            return body.decode("utf-8", errors="replace") or None
+        if not isinstance(obj, dict):
+            return str(obj)
+        error = obj.get("error")
+        if isinstance(error, dict) and error.get("message") is not None:
+            return str(error.get("message"))
+        for key in ("message", "detail"):
+            if obj.get(key) is not None:
+                return str(obj.get(key))
+        return None
 
 
 async def main() -> None:

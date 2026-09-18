@@ -140,12 +140,11 @@ class FusionContractTests(unittest.TestCase):
         self.assertIsInstance(normalized["conflicts"], list)
         self.assertTrue(any("material_alignment" in x for x in notes))
 
-    def test_fusion_provider_payload_does_not_encode_provider_wire_format(self):
+    def test_fusion_provider_payload_forces_json_object_transport(self):
         runtime = FusionRuntime(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
         payload = runtime._provider_payload("global_adjudication", {})
-        self.assertEqual(payload, {"temperature": 0})
-        self.assertNotIn("text", payload)
-        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
+        self.assertEqual(payload["temperature"], 0)
 
     def test_corpus_hash_ignores_volatile_signed_urls(self):
         backend = FakeBackend()

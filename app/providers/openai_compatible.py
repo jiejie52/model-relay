@@ -1,33 +1,23 @@
-from __future__ import annotations
-
 import json
 from typing import Any
 
 import httpx
 
 from ..config import Settings
+from .base import ProviderHTTPError, ProviderRequestError, ProviderResult, ProviderTransportError
 from ..structured_output import (
     StructuredOutputError,
     apply_openai_responses_structured_output,
 )
-from .base import (
-    ProviderHTTPError,
-    ProviderRequestError,
-    ProviderResult,
-    ProviderTransportError,
-)
 
 
 class OpenAICompatibleResponsesProvider:
-    """AIHubMix/OpenAI-compatible `/responses` adapter.
+    """OpenAI-compatible /responses adapter.
 
-    Provider-specific behavior remains in this adapter. Relay Core only persists
-    the request snapshot, provider-native history record and output references.
+    The Relay infrastructure is model-agnostic. Current special handling is kept
+    inside this provider adapter, including Grok store=false, encrypted reasoning
+    replay, prompt_cache_key and reasoning.effort mapping.
     """
-
-    provider_id = "openai-compatible"
-    protocol = "openai-responses"
-    history_codec = "openai-responses/1"
 
     _PROTECTED_OVERRIDE_KEYS = {
         "model",
@@ -41,10 +31,6 @@ class OpenAICompatibleResponsesProvider:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    @staticmethod
-    def capability_profile_version(model: str) -> str:
-        return "openai-compatible-responses/1"
-
     async def execute(
         self,
         request_snapshot: dict[str, Any],
@@ -53,12 +39,6 @@ class OpenAICompatibleResponsesProvider:
         material_prefix: Any,
         history: list[dict[str, Any]],
     ) -> ProviderResult:
-        if self.settings.aihubmix_api_key is None:
-            raise ProviderRequestError(
-                "AIHUBMIX_CREDENTIAL_MISSING",
-                "AIHUBMIX_API_KEY is not configured for this provider profile",
-            )
-
         provider = str(request_snapshot.get("provider", "")).lower()
         model = str(request_snapshot["model"])
         think_level = str(request_snapshot.get("think_level") or "auto").lower()
@@ -67,28 +47,22 @@ class OpenAICompatibleResponsesProvider:
         input_items.extend(self._material_items(material_prefix))
 
         for turn in history:
-            if not isinstance(turn, dict):
-                continue
-            request_items = turn.get("request_items")
-            if isinstance(request_items, list):
-                input_items.extend(request_items)
-            else:
-                user_item = turn.get("user_item")
-                if user_item:
-                    input_items.append(user_item)
-            previous_output = turn.get("response_output") or turn.get("assistant_output") or []
+            user_item = turn.get("user_item")
+            if user_item:
+                input_items.append(user_item)
+            previous_output = turn.get("response_output") or []
             if isinstance(previous_output, list):
                 input_items.extend(previous_output)
 
-        current_items = self._current_request_items(request_snapshot)
+        current_user_item = self.make_user_item(str(request_snapshot["current_query"]))
         prefix_has_query = bool(request_snapshot.get("material_prefix_includes_current_query"))
-        if request_snapshot.get("mode") == "new_session" and prefix_has_query:
-            current_items = []
-        input_items.extend(current_items)
+        if not (request_snapshot.get("mode") == "new_session" and prefix_has_query):
+            input_items.append(current_user_item)
 
         payload: dict[str, Any] = {
             "model": model,
             "input": input_items,
+            # This Relay is intentionally responsible for external history.
             "store": False,
         }
 
@@ -96,20 +70,11 @@ class OpenAICompatibleResponsesProvider:
         if instructions:
             payload["instructions"] = instructions
 
-        generation = request_snapshot.get("generation")
-        if isinstance(generation, dict):
-            for key, value in generation.items():
-                if key not in self._PROTECTED_OVERRIDE_KEYS and key not in {"reasoning"}:
-                    payload[key] = value
-
         if self._is_grok(provider, model):
             payload["include"] = ["reasoning.encrypted_content"]
             if session and session.get("prompt_cache_key"):
                 payload["prompt_cache_key"] = session["prompt_cache_key"]
-            reasoning = generation.get("reasoning") if isinstance(generation, dict) else None
-            if isinstance(reasoning, dict) and reasoning.get("effort"):
-                payload["reasoning"] = {"effort": str(reasoning["effort"])}
-            elif think_level in {"low", "medium", "high", "xhigh"}:
+            if think_level in {"low", "medium", "high", "xhigh"}:
                 payload["reasoning"] = {"effort": think_level}
 
         provider_payload = request_snapshot.get("provider_payload") or {}
@@ -118,21 +83,20 @@ class OpenAICompatibleResponsesProvider:
                 if key not in self._PROTECTED_OVERRIDE_KEYS:
                     payload[key] = value
 
+        # Generic structured-output passthrough. The adapter never inspects the
+        # schema's business property names; it only maps the caller's JSON Schema
+        # to the OpenAI-compatible Responses transport. This deliberately runs
+        # after provider_payload merge so an explicit caller schema overrides any
+        # legacy/fallback json_object setting.
         try:
             apply_openai_responses_structured_output(
                 payload,
                 request_snapshot,
-                fallback_name=str(
-                    request_snapshot.get("stage")
-                    or request_snapshot.get("label")
-                    or "structured_output"
-                ),
+                fallback_name=str(request_snapshot.get("stage") or "structured_output"),
             )
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
 
-        # Legacy v1 may still supply upstream.base_url. New v2 requests use the
-        # server-side profile and do not expose arbitrary credential-bearing URLs.
         base_url = (
             ((request_snapshot.get("upstream") or {}).get("base_url"))
             or self.settings.aihubmix_root
@@ -145,6 +109,8 @@ class OpenAICompatibleResponsesProvider:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
+        if self.settings.aihubmix_api_key is None:
+            raise ProviderRequestError("PROVIDER_CREDENTIAL_MISSING", "AIHUBMIX_API_KEY is not configured")
         headers = {
             "Authorization": f"Bearer {self.settings.aihubmix_api_key.get_secret_value()}",
             "Content-Type": "application/json",
@@ -152,27 +118,26 @@ class OpenAICompatibleResponsesProvider:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+            async with httpx.AsyncClient(timeout=timeout, verify=True, follow_redirects=False) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 raw = await response.aread()
         except httpx.HTTPError as exc:
             raise ProviderTransportError(
                 str(exc),
-                provider=provider or "openai-compatible",
-                service="aihubmix",
+                provider=provider or None,
+                service="responses",
                 exception_type=type(exc).__name__,
-                cause_chain=self._cause_chain(exc),
             ) from exc
 
         if response.status_code < 200 or response.status_code >= 300:
             raise ProviderHTTPError(
                 response.status_code,
                 raw,
-                headers=self._headers_raw(response),
+                headers=list(response.headers.multi_items()),
                 content_type=response.headers.get("content-type"),
-                provider=provider or "openai-compatible",
-                service="aihubmix",
-                request_id=self._request_id(response),
+                content_encoding=response.headers.get("content-encoding"),
+                provider=provider or None,
+                service="responses",
             )
 
         try:
@@ -181,12 +146,12 @@ class OpenAICompatibleResponsesProvider:
             raise ProviderHTTPError(
                 response.status_code,
                 raw,
-                headers=self._headers_raw(response),
+                "Upstream response was not valid JSON",
+                headers=list(response.headers.multi_items()),
                 content_type=response.headers.get("content-type"),
-                provider=provider or "openai-compatible",
-                service="aihubmix",
-                request_id=self._request_id(response),
-                message="Upstream success response was not valid JSON",
+                content_encoding=response.headers.get("content-encoding"),
+                provider=provider or None,
+                service="responses",
             ) from exc
 
         text = self.extract_visible_text(data)
@@ -202,12 +167,6 @@ class OpenAICompatibleResponsesProvider:
             usage=usage,
             cached_tokens=cached_tokens,
             response_output=output,
-            history_record={
-                "codec": self.history_codec,
-                "request_items": current_items,
-                "response_id": data.get("id"),
-                "response_output": output,
-            },
         )
 
     @staticmethod
@@ -216,41 +175,6 @@ class OpenAICompatibleResponsesProvider:
             "role": "user",
             "content": [{"type": "input_text", "text": text}],
         }
-
-    @classmethod
-    def _current_request_items(cls, request_snapshot: dict[str, Any]) -> list[Any]:
-        value = request_snapshot.get("input")
-        if isinstance(value, list):
-            out: list[Any] = []
-            for item in value:
-                if isinstance(item, str):
-                    out.append(cls.make_user_item(item))
-                elif isinstance(item, dict):
-                    out.append(cls._normalize_v2_message(item))
-            return out
-        query = request_snapshot.get("current_query")
-        if query is None:
-            return []
-        return [cls.make_user_item(str(query))]
-
-    @classmethod
-    def _normalize_v2_message(cls, item: dict[str, Any]) -> dict[str, Any]:
-        if "role" not in item:
-            return item
-        content = item.get("content")
-        if isinstance(content, str):
-            return {"role": item.get("role"), "content": [{"type": "input_text", "text": content}]}
-        if isinstance(content, list):
-            normalized = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    normalized.append({"type": "input_text", "text": str(part.get("text") or "")})
-                else:
-                    normalized.append(part)
-            clone = dict(item)
-            clone["content"] = normalized
-            return clone
-        return item
 
     @classmethod
     def _material_items(cls, material_prefix: Any) -> list[Any]:
@@ -264,8 +188,10 @@ class OpenAICompatibleResponsesProvider:
             maybe_input = material_prefix.get("input")
             if isinstance(maybe_input, list):
                 return maybe_input
+            # Already an input/message item.
             if "role" in material_prefix or "type" in material_prefix:
                 return [material_prefix]
+            # Generic wrapper for structured material supplied by Dify.
             return [
                 cls.make_user_item(
                     "[Relay material prefix JSON]\n"
@@ -317,27 +243,3 @@ class OpenAICompatibleResponsesProvider:
             if isinstance(value, int):
                 return value
         return None
-
-    @staticmethod
-    def _headers_raw(response: httpx.Response) -> list[tuple[str, str]]:
-        return [
-            (name.decode("latin-1"), value.decode("latin-1"))
-            for name, value in response.headers.raw
-        ]
-
-    @staticmethod
-    def _request_id(response: httpx.Response) -> str | None:
-        for name in ("x-request-id", "request-id", "x-correlation-id"):
-            value = response.headers.get(name)
-            if value:
-                return value
-        return None
-
-    @staticmethod
-    def _cause_chain(exc: BaseException) -> list[str]:
-        out: list[str] = []
-        current: BaseException | None = exc
-        while current is not None and len(out) < 8:
-            out.append(f"{type(current).__name__}: {current}")
-            current = current.__cause__ or current.__context__
-        return out

@@ -48,3 +48,23 @@ def require_owner_headers(
         )
 
     return x_tenant_id, x_conversation_hash
+
+
+def require_v2_owner(
+    owner: tuple[str, str] = Depends(require_owner_headers),
+) -> tuple[str, str]:
+    """V2 owner guard.
+
+    Existing deployments use one server-to-server Relay token. Operators can bind
+    that token to a tenant with RELAY_ALLOWED_TENANT_ID so X-Tenant-Id is not
+    accepted solely on caller assertion. Conversation ownership is still enforced
+    on every repository/RPC query.
+    """
+    tenant_id, conversation_hash = owner
+    allowed = get_settings().relay_allowed_tenant_id
+    if allowed and not secrets.compare_digest(tenant_id, allowed):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Relay token is not authorized for this tenant",
+        )
+    return tenant_id, conversation_hash

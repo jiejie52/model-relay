@@ -230,8 +230,6 @@ def _provider_family(provider: Any, model: Any) -> str:
         return "grok"
     if provider_name in {"openai", "openai_compatible", "openai-compatible"}:
         return "openai_compatible"
-    if provider_name in {"moonshot", "kimi"} or model_name.startswith("kimi-"):
-        return "moonshot"
     return provider_name or "openai_compatible"
 
 
@@ -597,62 +595,6 @@ def apply_openai_responses_structured_output(
     provider_payload["text"] = text
     return spec
 
-
-
-def openai_chat_response_format(
-    spec: StructuredOutputSpec,
-    *,
-    provider: Any = None,
-    model: Any = None,
-) -> dict[str, Any]:
-    """Map the canonical contract to an OpenAI-compatible Chat response_format.
-
-    Moonshot/Kimi documents the standard `response_format` shape, including
-    `json_object` and `json_schema`. The canonical schema remains authoritative
-    for Relay post-validation; this function only builds the provider wire form.
-    """
-
-    if spec.mode == "json_object":
-        return {"type": "json_object"}
-    if spec.mode != "json_schema" or not isinstance(spec.schema, dict):
-        raise StructuredOutputError(
-            "STRUCTURED_OUTPUT_MODE_UNSUPPORTED",
-            f"Cannot map structured-output mode to Chat Completions: {spec.mode}",
-        )
-    projection = project_schema_for_provider(
-        spec.schema,
-        provider=provider,
-        model=model,
-    )
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": spec.name or "structured_output",
-            "schema": projection.schema,
-            "strict": bool(spec.strict),
-        },
-    }
-
-
-def apply_openai_chat_structured_output(
-    provider_payload: dict[str, Any],
-    request_snapshot: dict[str, Any],
-    *,
-    fallback_name: str = "structured_output",
-    provider: Any = None,
-    model: Any = None,
-) -> StructuredOutputSpec | None:
-    spec = resolve_structured_output(request_snapshot, fallback_name=fallback_name)
-    if spec is None:
-        return None
-    provider = request_snapshot.get("provider") if provider is None else provider
-    model = request_snapshot.get("model") if model is None else model
-    provider_payload["response_format"] = openai_chat_response_format(
-        spec,
-        provider=provider,
-        model=model,
-    )
-    return spec
 
 def validate_against_schema(value: Any, spec: StructuredOutputSpec) -> None:
     if spec.mode != "json_schema" or not isinstance(spec.schema, dict):

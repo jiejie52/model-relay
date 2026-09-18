@@ -247,7 +247,7 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertNotEqual(sent_schema, schema)
         self.assertNotIn("uniqueItems", sent_schema["properties"]["ids"])
 
-    def test_fusion_provider_payload_is_transport_neutral(self):
+    def test_fusion_provider_payload_uses_caller_schema_instead_of_json_object(self):
         runtime = FusionRuntime(
             SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace()
         )
@@ -260,16 +260,15 @@ class StructuredOutputTests(unittest.TestCase):
             },
         }
         payload = runtime._provider_payload("global_adjudication", snapshot)
-        self.assertEqual(payload, {"temperature": 0})
-        self.assertNotIn("text", payload)
-        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["text"]["format"]["type"], "json_schema")
+        self.assertEqual(payload["text"]["format"]["schema"], SCHEMA)
 
-    def test_legacy_fusion_provider_payload_keeps_only_generation_defaults(self):
+    def test_legacy_fusion_transport_still_defaults_to_json_object(self):
         runtime = FusionRuntime(
             SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), SimpleNamespace()
         )
         payload = runtime._provider_payload("global_adjudication", {})
-        self.assertEqual(payload, {"temperature": 0})
+        self.assertEqual(payload["text"], {"format": {"type": "json_object"}})
 
     def test_caller_schema_disables_legacy_global_output_contract_in_prompt(self):
         runtime = FusionRuntime(

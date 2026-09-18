@@ -8,26 +8,22 @@ from .config import Settings
 
 
 class SupabaseError(RuntimeError):
-    """Supabase HTTP error with the original response preserved losslessly."""
-
     def __init__(
         self,
         status_code: int,
         message: str,
-        body: bytes = b"",
+        body: str = "",
         *,
+        body_bytes: bytes | None = None,
         headers: list[tuple[str, str]] | None = None,
-        content_type: str | None = None,
+        received_complete: bool = True,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.body = body
-        self.headers = headers or []
-        self.content_type = content_type
-
-    @property
-    def body_text(self) -> str:
-        return self.body.decode("utf-8", errors="replace")
+        self.body_bytes = body_bytes if body_bytes is not None else body.encode("utf-8", errors="replace")
+        self.body = body if body else self.body_bytes.decode("utf-8", errors="replace")
+        self.headers = list(headers or [])
+        self.received_complete = received_complete
 
 
 class SupabaseBackend:
@@ -41,6 +37,8 @@ class SupabaseBackend:
         self.headers = {
             "apikey": key,
             "Accept": "application/json",
+            # Ask dependencies not to transform error bodies before capture.
+            "Accept-Encoding": "identity",
         }
         if not key.startswith("sb_secret_"):
             self.headers["Authorization"] = f"Bearer {key}"
@@ -78,18 +76,14 @@ class SupabaseBackend:
         )
         ok = expected or set(range(200, 300))
         if response.status_code not in ok:
-            # Do not truncate dependency errors. Callers decide whether to persist
-            # or inline the bytes, but this transport layer must preserve them.
-            body = response.content
+            raw = response.content
             raise SupabaseError(
                 response.status_code,
                 f"Supabase request failed: {method} {url}",
-                body,
-                headers=[
-                    (name.decode("latin-1"), value.decode("latin-1"))
-                    for name, value in response.headers.raw
-                ],
-                content_type=response.headers.get("content-type"),
+                raw.decode("utf-8", errors="replace"),
+                body_bytes=raw,
+                headers=list(response.headers.multi_items()),
+                received_complete=True,
             )
         return response
 

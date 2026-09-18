@@ -11,8 +11,8 @@ from xml.etree import ElementTree as ET
 from ..config import Settings
 from ..providers.base import ProviderResult
 from ..providers.registry import ProviderRegistry
-from .fusion_repository import FusionRepository
-from .fusion_storage_paths import (
+from ..repository import RelayRepository
+from ..storage_paths import (
     fusion_artifact_object_path,
     fusion_corpus_manifest_path,
     fusion_material_object_path,
@@ -21,6 +21,7 @@ from ..supabase import SupabaseBackend, SupabaseError
 from ..structured_output import (
     StructuredOutputError,
     StructuredOutputSpec,
+    apply_openai_responses_structured_output,
     resolve_structured_output,
     validate_against_schema,
 )
@@ -363,7 +364,7 @@ class FusionRuntime:
     def __init__(
         self,
         backend: SupabaseBackend,
-        repo: FusionRepository,
+        repo: RelayRepository,
         providers: ProviderRegistry,
         settings: Settings,
     ) -> None:
@@ -642,12 +643,10 @@ class FusionRuntime:
         synthetic["current_query"] = current_query
         synthetic["instructions"] = instructions
         synthetic["material_prefix_includes_current_query"] = False
-        synthetic["provider_payload"] = self._provider_payload(stage, request_snapshot)
-        if structured_spec is None:
-            # Legacy Fusion stages historically required a JSON object even
-            # without an explicit caller schema. Express that as the generic
-            # Relay contract; each Provider Adapter chooses its own wire format.
-            synthetic["structured_output"] = {"mode": "json_object"}
+        try:
+            synthetic["provider_payload"] = self._provider_payload(stage, request_snapshot)
+        except StructuredOutputError as exc:
+            raise FusionRuntimeError(exc.code, exc.message) from exc
 
         provider = self.providers.get(job["provider"])
         provider_result = await provider.execute(
@@ -969,25 +968,26 @@ class FusionRuntime:
         return instructions, json.dumps(context, ensure_ascii=False, separators=(",", ":"))
 
     def _provider_payload(self, stage: str, request_snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Return only provider-neutral generation overrides.
+        payload = dict(request_snapshot.get("provider_payload") or {}) if isinstance(request_snapshot.get("provider_payload"), dict) else {}
+        payload.setdefault("temperature", 0 if stage not in {"direct_final_synthesis", "final_draft_generation", "evidence_grounded_repair"} else 0.05)
 
-        The legacy Fusion application runtime may choose business defaults such
-        as temperature, but it must not construct an OpenAI Responses-specific
-        structured-output wire shape. Provider transport projection belongs in
-        the Provider Adapter.
-        """
-        payload = (
-            dict(request_snapshot.get("provider_payload") or {})
-            if isinstance(request_snapshot.get("provider_payload"), dict)
-            else {}
+        # Caller-requested structured output is authoritative and is mapped
+        # generically to the provider transport. The schema body is opaque to
+        # Railway; no Fusion/Dify property names are inspected here.
+        spec = apply_openai_responses_structured_output(
+            payload, request_snapshot, fallback_name=stage or "structured_output"
         )
-        payload.setdefault(
-            "temperature",
-            0
-            if stage
-            not in {"direct_final_synthesis", "final_draft_generation", "evidence_grounded_repair"}
-            else 0.05,
-        )
+        if spec is None:
+            # Backward-compatible legacy default only when the caller did not
+            # request a structured-output mode and did not already supply a
+            # provider-specific text.format.
+            text = payload.get("text")
+            if not isinstance(text, dict):
+                text = {}
+            else:
+                text = dict(text)
+            text.setdefault("format", {"type": "json_object"})
+            payload["text"] = text
         return payload
 
     def _validate_stage_output(self, stage: str, obj: dict[str, Any], manifest: dict[str, Any]) -> None:
