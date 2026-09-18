@@ -6,9 +6,29 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Copy dependency/build identity inputs first so Railway logs prove exactly
+# which source tree is being built before dependency installation starts.
+COPY BUILD_INFO.txt ./
 COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements.txt \
+
+RUN echo "=== MODEL RELAY BUILD MARKER ===" \
+    && cat BUILD_INFO.txt \
+    && echo "=== requirements.txt ===" \
+    && cat requirements.txt \
+    && echo "=== boto requirements ===" \
+    && grep -E '^(boto3|botocore)' requirements.txt
+
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Install the Railway S3 client explicitly instead of relying only on the
+# requirements-file layer. This is intentionally duplicated in requirements.txt:
+# if Railway ever builds with a stale/mismatched requirements snapshot, the
+# material-storage client still gets installed by this Dockerfile.
+RUN python -m pip install --no-cache-dir "boto3>=1.40,<2" "botocore>=1.40,<2" \
+    && python -m pip show boto3 botocore \
+    && python -c "import boto3, botocore; print('material storage client OK', boto3.__version__, botocore.__version__)"
+
+RUN python -m pip install --no-cache-dir -r requirements.txt \
     && python -c "import boto3, botocore, fastapi, httpx, pydantic; print('runtime dependencies OK')"
 
 COPY app ./app
