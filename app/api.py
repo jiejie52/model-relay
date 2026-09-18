@@ -59,7 +59,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="2.0.1-v2-material-session-hotfix1", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="2.0.5-hotfix5", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -103,11 +103,12 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "2.0.1-v2-material-session-hotfix1",
+        "version": "2.0.5-hotfix5",
         "v2": True,
         "material_storage": {
             "configured": bool(settings.material_store_configured),
             "ready": getattr(app.state, "material_store", None) is not None,
+            "missing_fields": settings.material_store_missing_fields,
             "error": getattr(app.state, "material_store_error", None),
         },
     }

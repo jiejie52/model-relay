@@ -1,4 +1,4 @@
-> Current packaged build: **2.0.2-hotfix2** (Railway build-context fix: `sql/` and `scripts/` included in Docker build context).
+> Current packaged build: **2.0.5-hotfix5** (Railway Storage Bucket environment-name compatibility + runtime diagnostics).
 
 # model-relay V2
 
@@ -96,7 +96,10 @@ sql/003_relay_v2_schema.sql
 
 ## 测试与验证边界
 
-本包在生成时通过 Python compileall 与 28 个单元测试。由于当前环境没有你的 Railway Bucket、Supabase 实例和 Provider 生产凭据，数据库 migration 以及 Moonshot/Gemini/Grok 的真实网络合同需要在部署环境继续执行验收矩阵。架构实现不能替代部署账户的 endpoint/model/file/schema 能力验证。
+本包在生成时通过 Python compileall 与 37 个单元测试。由于当前环境没有你的 Railway Bucket、Supabase 实例和 Provider 生产凭据，数据库 migration 以及 Moonshot/Gemini/Grok 的真实网络合同需要在部署环境继续执行验收矩阵。架构实现不能替代部署账户的 endpoint/model/file/schema 能力验证。
 
 ### Railway build identity / boto3 hardening (2.0.3-hotfix3)
 The Docker build now prints its build identity and installs boto3/botocore in a dedicated layer before installing the full requirements file. This makes a stale or mismatched Railway build context immediately visible and prevents Material S3 support from depending on a single requirements-file installation path.
+
+### Railway Storage Bucket variable compatibility (2.0.5-hotfix5)
+V2 now accepts the explicit `MATERIAL_S3_*` contract and Railway-provided bucket references/AWS-compatible names. Explicit `MATERIAL_S3_*` values take precedence. The Worker still fails closed if endpoint, bucket, access key, or secret key is genuinely absent.

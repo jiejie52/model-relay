@@ -129,7 +129,7 @@ async def create_material(
     tenant_id, conversation_hash = owner
     repo, archive, _, errors, store, settings = _services(request)
     if store is None:
-        return _json_response(503, error={"origin": "dependency", "service": "railway_storage", "code": "MATERIAL_STORAGE_NOT_CONFIGURED", "message": "MATERIAL_S3_* configuration is required"})
+        return _json_response(503, error={"origin": "dependency", "service": "railway_storage", "code": "MATERIAL_STORAGE_NOT_CONFIGURED", "message": "Railway material storage configuration is required (MATERIAL_S3_* or supported Railway/AWS bucket variable aliases)"})
     service = MaterialService(repo, store, errors, settings)
     content_type = (request.headers.get("content-type") or "").lower()
 
@@ -269,7 +269,7 @@ async def delete_material(
     tenant_id, conversation_hash = owner
     repo, _, _, _, store, _ = _services(request)
     if store is None:
-        return _json_response(503, error={"origin": "dependency", "service": "railway_storage", "code": "MATERIAL_STORAGE_NOT_CONFIGURED", "message": "MATERIAL_S3_* configuration is required"})
+        return _json_response(503, error={"origin": "dependency", "service": "railway_storage", "code": "MATERIAL_STORAGE_NOT_CONFIGURED", "message": "Railway material storage configuration is required (MATERIAL_S3_* or supported Railway/AWS bucket variable aliases)"})
     result = await repo.request_material_delete_v2(
         material_id=material_id,
         tenant_id=tenant_id,

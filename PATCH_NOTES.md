@@ -82,3 +82,19 @@ Changes:
 - keep build marker, dependency import checks, preflight, compileall, and app import smoke tests.
 
 If Railway prints `WARN: boto3/botocore not present in build-context requirements.txt`, the image can still build, but that warning proves the deployment source contains mixed versions and should be cleaned up after service recovery.
+
+## 2.0.5-hotfix5 - Railway Storage Bucket runtime variable compatibility
+
+Observed runtime failure after a successful image build: `app.worker` instantiated `UploadedFileStore` and failed with `Railway material storage is not configured; set MATERIAL_S3_* variables`.
+
+Changes:
+- preserve the explicit V2 `MATERIAL_S3_*` configuration contract;
+- additionally accept Railway Bucket references `ENDPOINT/BUCKET/REGION/ACCESS_KEY_ID/SECRET_ACCESS_KEY`;
+- additionally accept Railway CLI/AWS-compatible names `AWS_ENDPOINT_URL/AWS_S3_BUCKET_NAME/AWS_DEFAULT_REGION/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_S3_URL_STYLE`;
+- explicit `MATERIAL_S3_*` values have highest precedence;
+- default S3 addressing style is now `auto`, with explicit/`AWS_S3_URL_STYLE` override;
+- Worker startup error reports missing logical fields without printing secret values;
+- runtime preflight recognizes all supported naming schemes;
+- added regression tests for explicit, Railway-reference, AWS-compatible, precedence, and missing-field behavior.
+
+This hotfix does not weaken the V2 reliability boundary: the V2 Worker still refuses to run when no complete canonical Material store configuration is available.

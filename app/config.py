@@ -4,7 +4,7 @@ import json
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
         extra="ignore",
     )
 
@@ -50,12 +51,34 @@ class Settings(BaseSettings):
     relay_storage_prefix: str = "relay"
 
     # Railway Storage Bucket (S3-compatible) is only for canonical uploaded files.
-    material_s3_endpoint: str | None = None
-    material_s3_bucket: str | None = None
-    material_s3_region: str = "auto"
-    material_s3_addressing_style: str = "path"
-    material_s3_access_key_id: SecretStr | None = None
-    material_s3_secret_access_key: SecretStr | None = None
+    #
+    # Operators may use the explicit MATERIAL_S3_* contract from the V2 design,
+    # or Railway's current bucket variable references / AWS-compatible names.
+    # Explicit MATERIAL_S3_* names always win when more than one form is present.
+    material_s3_endpoint: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MATERIAL_S3_ENDPOINT", "AWS_ENDPOINT_URL", "ENDPOINT"),
+    )
+    material_s3_bucket: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MATERIAL_S3_BUCKET", "AWS_S3_BUCKET_NAME", "BUCKET"),
+    )
+    material_s3_region: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("MATERIAL_S3_REGION", "AWS_DEFAULT_REGION", "REGION"),
+    )
+    material_s3_addressing_style: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("MATERIAL_S3_ADDRESSING_STYLE", "AWS_S3_URL_STYLE"),
+    )
+    material_s3_access_key_id: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MATERIAL_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"),
+    )
+    material_s3_secret_access_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MATERIAL_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY"),
+    )
     material_s3_presign_seconds: int = 3600
     material_s3_prefix: str = "relay-materials"
 
@@ -125,6 +148,20 @@ class Settings(BaseSettings):
             and self.material_s3_access_key_id
             and self.material_s3_secret_access_key
         )
+
+
+    @property
+    def material_store_missing_fields(self) -> list[str]:
+        missing: list[str] = []
+        if not self.material_s3_endpoint:
+            missing.append("endpoint")
+        if not self.material_s3_bucket:
+            missing.append("bucket")
+        if not self.material_s3_access_key_id:
+            missing.append("access_key_id")
+        if not self.material_s3_secret_access_key:
+            missing.append("secret_access_key")
+        return missing
 
     @property
     def allowed_material_url_ports(self) -> set[int]:

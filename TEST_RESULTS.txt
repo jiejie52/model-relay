@@ -1,20 +1,20 @@
-Model Relay V2 2.0.2-hotfix2 verification
+Model Relay V2 2.0.5-hotfix5 verification
 Date: 2026-09-18
 
 Commands:
-  python -m compileall -q app tests
-  python -m pytest -q
-  python scripts/preflight_runtime.py
-  RELAY_API_TOKEN=build-check SUPABASE_URL=https://example.invalid SUPABASE_SECRET_KEY=build-check python -c "import app.api, app.api_v2_app"
+  PYTHONPATH=. python -m compileall -q app tests scripts
+  PYTHONPATH=. python -m pytest -q
+  Railway/AWS alias preflight with ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY
+  app.api + app.api_v2_app import smoke test
 
 Results:
   compileall: PASS
-  pytest: 31 passed
-  runtime dependency preflight: PASS (configuration variables intentionally absent in packaging environment, reported as WARN)
-  application import smoke test with non-secret build placeholders: PASS
+  pytest: 37 passed
+  runtime dependency preflight: PASS
+  Railway Storage Bucket alias resolution: PASS
+  application import smoke test: PASS
 
-Not verified here:
-  live Railway Docker daemon build
-  live Railway S3 connectivity
-  Supabase migration execution against the deployment database
-  live Moonshot/Gemini/Grok provider contracts
+Not executed here:
+  live Railway Storage Bucket read/write/presign
+  live Supabase migration/RPC execution
+  live Moonshot/Grok/Gemini provider contract tests

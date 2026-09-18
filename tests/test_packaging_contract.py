@@ -27,7 +27,7 @@ def test_dockerfile_has_explicit_runtime_install_and_nonfatal_dependency_diagnos
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     build_info = (ROOT / "BUILD_INFO.txt").read_text(encoding="utf-8")
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert "2.0.4-hotfix4" in build_info
+    assert "2.0.5-hotfix5" in build_info
     assert '"boto3>=1.40,<2"' in dockerfile
     assert '"botocore>=1.40,<2"' in dockerfile
     assert '"python-multipart>=0.0.20,<1"' in dockerfile

@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Model Relay V2 Core API",
-    version="2.0.1-v2-material-session-hotfix1",
+    version="2.0.5-hotfix5",
     lifespan=lifespan,
 )
 app.include_router(relay_v2_router)
@@ -60,10 +60,11 @@ async def health():
     return {
         "ok": True,
         "service": "relay-v2-core",
-        "version": "2.0.1-v2-material-session-hotfix1",
+        "version": "2.0.5-hotfix5",
         "material_storage": {
             "configured": bool(settings.material_store_configured),
             "ready": getattr(app.state, "material_store", None) is not None,
+            "missing_fields": settings.material_store_missing_fields,
             "error": getattr(app.state, "material_store_error", None),
         },
     }

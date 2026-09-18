@@ -55,8 +55,12 @@ class UploadedFileStore:
                 "requirements.txt or Dockerfile is applied."
             ) from _BOTO_IMPORT_ERROR
         if not settings.material_store_configured:
+            missing = ", ".join(settings.material_store_missing_fields) or "unknown"
             raise UploadedFileStoreError(
-                "Railway material storage is not configured; set MATERIAL_S3_* variables"
+                "Railway material storage is not configured; missing logical fields: "
+                f"{missing}. Configure MATERIAL_S3_* variables or Railway/AWS bucket "
+                "references (ENDPOINT/BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY or "
+                "AWS_ENDPOINT_URL/AWS_S3_BUCKET_NAME/AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)."
             )
         self.settings = settings
         assert settings.material_s3_endpoint

@@ -165,3 +165,45 @@ If the first marker is missing, do not debug Python dependencies yet: Railway is
 If the build log shows `Build: 2.0.4-hotfix4` but the printed `requirements.txt` does not list `boto3`/`botocore`, hotfix4 will no longer fail at the diagnostic step. It explicitly installs `boto3`, `botocore`, and `python-multipart` before installing `requirements.txt`.
 
 A healthy build should later print both `material storage/runtime clients OK` and `application imports OK`. A `WARN: boto3/botocore not present...` line means the Railway source tree is mixed-version; deploy the zip as a clean replacement rather than overlaying individual files when convenient.
+
+## Railway Storage Bucket hotfix 2.0.5
+
+If the V2 Worker starts and immediately exits with `Railway material storage is not configured`, the image build has succeeded; the failure is runtime configuration. Hotfix5 accepts any one complete naming scheme:
+
+```text
+# Explicit V2 contract
+MATERIAL_S3_ENDPOINT
+MATERIAL_S3_BUCKET
+MATERIAL_S3_ACCESS_KEY_ID
+MATERIAL_S3_SECRET_ACCESS_KEY
+
+# Railway Bucket variable references
+ENDPOINT
+BUCKET
+ACCESS_KEY_ID
+SECRET_ACCESS_KEY
+REGION                    # optional; defaults to auto
+
+# Railway CLI / AWS-compatible names
+AWS_ENDPOINT_URL
+AWS_S3_BUCKET_NAME
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_DEFAULT_REGION        # optional
+AWS_S3_URL_STYLE          # optional: virtual/path/auto
+```
+
+For Railway, create or select a Storage Bucket and inject/reference its credentials into **every service that uses Material Storage** (at minimum the V2 Worker; also the API and Material Worker if they handle `/v2/materials`). Variables are service-scoped, so configuring only the API service does not configure a separate Worker service.
+
+If you prefer the explicit contract, map Railway references to it in the Worker service:
+
+```text
+MATERIAL_S3_ENDPOINT=${{<bucket>.ENDPOINT}}
+MATERIAL_S3_BUCKET=${{<bucket>.BUCKET}}
+MATERIAL_S3_REGION=${{<bucket>.REGION}}
+MATERIAL_S3_ACCESS_KEY_ID=${{<bucket>.ACCESS_KEY_ID}}
+MATERIAL_S3_SECRET_ACCESS_KEY=${{<bucket>.SECRET_ACCESS_KEY}}
+MATERIAL_S3_ADDRESSING_STYLE=auto
+```
+
+Do not put literal secret values in source control. After variables are present, redeploy/restart the Worker and run `python scripts/preflight_runtime.py`; it should report material storage variables present.
