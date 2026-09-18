@@ -7,9 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && python -c "import boto3, botocore, fastapi, httpx, pydantic; print('runtime dependencies OK')"
 
 COPY app ./app
+COPY sql ./sql
 
 # Default: compatibility API + V2 API.
 # V2 Worker: python -m app.worker

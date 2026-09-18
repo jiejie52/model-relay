@@ -5,11 +5,27 @@ import io
 from dataclasses import dataclass
 from typing import BinaryIO
 
-import boto3
-from botocore.client import Config
-from botocore.exceptions import BotoCoreError, ClientError
-
 from ..config import Settings
+
+# Keep the API importable even when an alternative build path accidentally
+# omits the S3 client dependency. Correct Docker builds still verify boto3 at
+# build time; this guard turns a missing optional runtime dependency into a
+# clear material-storage error instead of crashing uvicorn during module import.
+_BOTO_IMPORT_ERROR: ModuleNotFoundError | None = None
+try:
+    import boto3
+    from botocore.client import Config
+    from botocore.exceptions import BotoCoreError, ClientError
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised in deployment preflight
+    _BOTO_IMPORT_ERROR = exc
+    boto3 = None  # type: ignore[assignment]
+    Config = None  # type: ignore[assignment]
+
+    class BotoCoreError(Exception):
+        pass
+
+    class ClientError(Exception):
+        pass
 
 
 class UploadedFileStoreError(RuntimeError):
@@ -32,6 +48,12 @@ class UploadedFileStore:
     """
 
     def __init__(self, settings: Settings) -> None:
+        if _BOTO_IMPORT_ERROR is not None or boto3 is None or Config is None:
+            raise UploadedFileStoreError(
+                "Railway material storage client is unavailable because boto3/botocore "
+                "is not installed. Rebuild the service from this package's root so "
+                "requirements.txt or Dockerfile is applied."
+            ) from _BOTO_IMPORT_ERROR
         if not settings.material_store_configured:
             raise UploadedFileStoreError(
                 "Railway material storage is not configured; set MATERIAL_S3_* variables"
@@ -99,7 +121,7 @@ class UploadedFileStore:
                 try:
                     self.client.head_object(Bucket=self.bucket, Key=canonical_key)
                 except ClientError as exc:
-                    code = str((exc.response.get("Error") or {}).get("Code") or "")
+                    code = str((getattr(exc, "response", {}).get("Error") or {}).get("Code") or "")
                     if code not in {"404", "NoSuchKey", "NotFound"}:
                         raise
                 else:

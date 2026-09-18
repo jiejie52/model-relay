@@ -18,7 +18,7 @@ from .api_v2 import router as relay_v2_router
 from .errors.service import RawErrorService
 from .providers.registry import ProviderRegistry
 from .storage.execution_archive import ExecutionArchiveStore
-from .storage.uploaded_files import UploadedFileStore
+from .storage.uploaded_files import UploadedFileStore, UploadedFileStoreError
 
 
 settings = get_settings()
@@ -37,7 +37,14 @@ async def lifespan(_: FastAPI):
     archive = ExecutionArchiveStore(backend)
     providers = ProviderRegistry(settings)
     errors = RawErrorService(repo, archive, settings)
-    material_store = UploadedFileStore(settings) if settings.material_store_configured else None
+    material_store = None
+    material_store_error = None
+    if settings.material_store_configured:
+        try:
+            material_store = UploadedFileStore(settings)
+        except UploadedFileStoreError as exc:
+            material_store_error = str(exc)
+            logger.error("Material store unavailable: %s", exc)
     app.state.settings = settings
     app.state.backend = backend
     app.state.repo = repo
@@ -45,13 +52,14 @@ async def lifespan(_: FastAPI):
     app.state.providers = providers
     app.state.errors = errors
     app.state.material_store = material_store
+    app.state.material_store_error = material_store_error
     try:
         yield
     finally:
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="2.0.0-v2-material-session", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="2.0.1-v2-material-session-hotfix1", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -92,7 +100,17 @@ def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "service": "relay-api", "version": "2.0.0-v2-material-session", "v2": True}
+    return {
+        "ok": True,
+        "service": "relay-api",
+        "version": "2.0.1-v2-material-session-hotfix1",
+        "v2": True,
+        "material_storage": {
+            "configured": bool(settings.material_store_configured),
+            "ready": getattr(app.state, "material_store", None) is not None,
+            "error": getattr(app.state, "material_store_error", None),
+        },
+    }
 
 
 @app.post(

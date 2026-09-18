@@ -42,7 +42,7 @@ def _json_response(status_code: int, *, data: Any = None, error: Any = None, req
     return JSONResponse(status_code=status_code, content=_envelope(data, error, request_id=request_id))
 
 
-def _services(request: Request) -> tuple[RelayRepository, ExecutionArchiveStore, ProviderRegistry, RawErrorService, UploadedFileStore, Settings]:
+def _services(request: Request) -> tuple[RelayRepository, ExecutionArchiveStore, ProviderRegistry, RawErrorService, UploadedFileStore | None, Settings]:
     try:
         return (
             request.app.state.repo,
