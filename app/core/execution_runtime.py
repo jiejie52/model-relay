@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+from uuid import uuid4
+
+from ..config import Settings
+from ..materials.resolver import MaterialResolver
+from ..persistence.object_storage import ObjectLocation, StorageRegistry
+from ..providers.registry import ProviderRegistry
+from ..providers.v2_base import V2ExecutionContext
+from ..storage_paths import request_object_path_v2, session_history_request_path
+from ..structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
+from ..utils import json_bytes, truncate_utf8, utcnow
+from ..v2_repository import RelayV2Repository
+
+
+class SessionConflictError(RuntimeError):
+    pass
+
+
+class SharedExecutionRuntime:
+    """Business-agnostic v2 execution runtime used by sync and async paths."""
+
+    def __init__(
+        self,
+        repo: RelayV2Repository,
+        storage: StorageRegistry,
+        providers: ProviderRegistry,
+        materials: MaterialResolver,
+        settings: Settings,
+    ) -> None:
+        self.repo = repo
+        self.storage = storage
+        self.providers = providers
+        self.materials = materials
+        self.settings = settings
+
+    async def execute(
+        self,
+        request_row: dict[str, Any],
+        *,
+        lease_owner: str | None = None,
+        lease_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        session = await self.repo.get_session(
+            request_row["session_id"],
+            tenant_id=request_row["tenant_id"],
+            conversation_hash=request_row["conversation_hash"],
+        )
+        if not session:
+            raise LookupError("Relay session not found")
+        snapshot = await self._load_json_object(
+            request_row["request_object_id"],
+            tenant_id=request_row["tenant_id"],
+            conversation_hash=request_row["conversation_hash"],
+        )
+        history: list[dict[str, Any]] = []
+        if session.get("context_policy") == "conversation" and session.get("history_object_id"):
+            loaded = await self._load_json_object(
+                session["history_object_id"],
+                tenant_id=request_row["tenant_id"],
+                conversation_hash=request_row["conversation_hash"],
+            )
+            if isinstance(loaded, list):
+                history = loaded
+
+        material_ids = list(snapshot.get("material_ids") or [])
+        if session.get("context_policy") == "conversation":
+            base = session.get("material_manifest") or []
+            if isinstance(base, list):
+                material_ids = [str(x) for x in base] + material_ids
+        # Stable order, no duplicate provider binding work.
+        material_ids = list(dict.fromkeys(material_ids))
+
+        adapter = self.providers.get_v2(str(snapshot["connection_id"]))
+        await self.repo.update_request(
+            request_row["id"],
+            {
+                "provider_dispatch_state": "dispatch_started",
+                "started_at": request_row.get("started_at") or utcnow().isoformat(),
+            },
+        )
+        result = await adapter.execute(
+            V2ExecutionContext(
+                snapshot=snapshot,
+                session=session,
+                history=history,
+                material_ids=material_ids,
+                tenant_id=request_row["tenant_id"],
+                conversation_hash=request_row["conversation_hash"],
+            )
+        )
+
+        raw_object_id = await self._store_object(
+            request_row,
+            "raw-response.json",
+            result.raw_bytes,
+            "application/json",
+        )
+        output_object_id = await self._store_object(
+            request_row,
+            "response-output.json",
+            json_bytes(result.response_output),
+            "application/json",
+        )
+        # Persist the upstream success body before any Relay parser/schema gate.
+        # If validation fails, the original 2xx entity remains available for
+        # diagnosis instead of being replaced by a synthetic Relay error.
+        await self.repo.update_request(
+            request_row["id"],
+            {
+                "provisional_result_object_id": raw_object_id,
+                "provisional_output_object_id": output_object_id,
+                "provider_response_id": result.response_id,
+            },
+        )
+
+        spec = resolve_structured_output(snapshot, fallback_name="structured_output")
+        if spec is not None and spec.mode == "json_schema":
+            try:
+                parsed = json.loads(result.text)
+                validate_against_schema(parsed, spec)
+            except Exception as exc:
+                if isinstance(exc, StructuredOutputError):
+                    structured_exc = exc
+                else:
+                    structured_exc = StructuredOutputError(
+                        "STRUCTURED_OUTPUT_INVALID_JSON",
+                        f"Provider output is not valid JSON: {exc}",
+                    )
+                    structured_exc.__cause__ = exc
+                setattr(structured_exc, "provider_success_object_id", raw_object_id)
+                setattr(structured_exc, "provider_output_object_id", output_object_id)
+                raise structured_exc
+
+        full_text_object_id = None
+        visible_text = result.text
+        text_truncated = False
+        if len(visible_text.encode("utf-8")) > self.settings.relay_result_soft_limit_bytes:
+            full_text_object_id = await self._store_object(
+                request_row,
+                "visible-result.json",
+                json_bytes({"text": visible_text}),
+                "application/json",
+            )
+            visible_text = truncate_utf8(visible_text, self.settings.relay_result_preview_bytes)
+            text_truncated = True
+
+        compact_result = {
+            "request_id": request_row["id"],
+            "status": "succeeded",
+            "text": visible_text,
+            "response_id": result.response_id,
+            "usage": result.usage,
+            "cached_tokens": result.cached_tokens,
+            "text_truncated": text_truncated,
+            "full_text_object_id": full_text_object_id,
+            "raw_response_object_id": raw_object_id,
+            "response_output_object_id": output_object_id,
+        }
+        if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
+            compact_result["text"] = truncate_utf8(
+                str(compact_result.get("text") or ""),
+                min(self.settings.relay_result_preview_bytes, 196608),
+            )
+            compact_result["text_truncated"] = True
+
+        history_object_id = None
+        if session.get("context_policy") == "conversation":
+            new_history = list(history)
+            entry = {
+                "request_id": request_row["id"],
+                "created_at": utcnow().isoformat(),
+            }
+            entry.update(result.history_entry)
+            new_history.append(entry)
+            history_object_id = await self._store_history(
+                request_row,
+                new_history,
+                int(request_row["expected_history_version"]) + 1,
+            )
+
+        await self.repo.update_request(
+            request_row["id"],
+            {
+                "provider_dispatch_state": "result_stored",
+                "provisional_result_object_id": raw_object_id,
+                "provisional_output_object_id": output_object_id,
+                "provisional_history_object_id": history_object_id,
+                "provisional_compact_result": compact_result,
+                "provider_response_id": result.response_id,
+            },
+        )
+
+        ok = await self.repo.complete_request(
+            request_id=request_row["id"],
+            session_id=request_row["session_id"],
+            history_object_id=history_object_id,
+            result_object_id=raw_object_id,
+            output_object_id=output_object_id,
+            compact_result=compact_result,
+            provider_response_id=result.response_id,
+            expected_history_version=int(request_row["expected_history_version"]),
+            lease_owner=lease_owner,
+            lease_epoch=lease_epoch,
+        )
+        if not ok:
+            raise SessionConflictError(
+                "Request result was persisted but the atomic Session commit was rejected"
+            )
+        return compact_result
+
+    async def _load_json_object(
+        self, object_id: str, *, tenant_id: str, conversation_hash: str
+    ) -> Any:
+        obj = await self.repo.get_object(
+            object_id,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+        )
+        if not obj:
+            raise LookupError(f"Object not found: {object_id}")
+        data = await self.storage.get(obj["storage_id"]).get_bytes(
+            ObjectLocation(obj["storage_id"], obj["bucket"], obj["object_key"])
+        )
+        return json.loads(data.decode("utf-8"))
+
+    async def _store_object(
+        self,
+        request_row: dict[str, Any],
+        filename: str,
+        data: bytes,
+        content_type: str,
+    ) -> str:
+        import hashlib
+
+        object_id = f"obj_{uuid4().hex}"
+        path = request_object_path_v2(
+            self.settings,
+            request_row["tenant_id"],
+            request_row["conversation_hash"],
+            request_row["session_id"],
+            request_row["id"],
+            filename,
+        )
+        backend = self.storage.get(self.settings.default_storage_id)
+        location = await backend.put_bytes(path, data, content_type=content_type)
+        await self.repo.create_object(
+            {
+                "id": object_id,
+                "tenant_id": request_row["tenant_id"],
+                "conversation_hash": request_row["conversation_hash"],
+                "storage_id": location.storage_id,
+                "bucket": location.bucket,
+                "object_key": location.key,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "content_type": content_type,
+                "created_at": utcnow().isoformat(),
+            }
+        )
+        return object_id
+
+    async def _store_history(
+        self,
+        request_row: dict[str, Any],
+        history: list[dict[str, Any]],
+        next_version: int,
+    ) -> str:
+        import hashlib
+
+        data = json_bytes(history)
+        object_id = f"obj_{uuid4().hex}"
+        path = session_history_request_path(
+            self.settings,
+            request_row["tenant_id"],
+            request_row["conversation_hash"],
+            request_row["session_id"],
+            next_version,
+            request_row["id"],
+        )
+        backend = self.storage.get(self.settings.default_storage_id)
+        location = await backend.put_bytes(path, data, content_type="application/json")
+        await self.repo.create_object(
+            {
+                "id": object_id,
+                "tenant_id": request_row["tenant_id"],
+                "conversation_hash": request_row["conversation_hash"],
+                "storage_id": location.storage_id,
+                "bucket": location.bucket,
+                "object_key": location.key,
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+                "content_type": "application/json",
+                "created_at": utcnow().isoformat(),
+            }
+        )
+        return object_id

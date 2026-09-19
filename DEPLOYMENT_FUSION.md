@@ -1,3 +1,5 @@
+> **Legacy compatibility note:** 本文描述的是旧 `/v1/jobs` / Fusion Runtime 部署方式。Relay v2 主链请以 `QUICKSTART.md` 为准；旧 Fusion 仅作为 compatibility 路径保留。
+
 # Fusion Runtime deployment
 
 1. In Supabase SQL Editor, run `sql/002_fusion_runtime.sql` after the existing `001_relay_schema.sql`.

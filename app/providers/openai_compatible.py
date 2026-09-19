@@ -4,7 +4,8 @@ from typing import Any
 import httpx
 
 from ..config import Settings
-from .base import ProviderHTTPError, ProviderRequestError, ProviderResult, ProviderTransportError
+from .base import ProviderHTTPError, ProviderRequestError, ProviderResult
+from .http_wire import read_raw_response, decode_entity
 from ..structured_output import (
     StructuredOutputError,
     apply_openai_responses_structured_output,
@@ -110,48 +111,49 @@ class OpenAICompatibleResponsesProvider:
             pool=self.settings.upstream_pool_timeout_seconds,
         )
         if self.settings.aihubmix_api_key is None:
-            raise ProviderRequestError("PROVIDER_CREDENTIAL_MISSING", "AIHUBMIX_API_KEY is not configured")
+            raise ProviderRequestError(
+                "CONNECTION_NOT_CONFIGURED",
+                "AIHUBMIX_API_KEY is not configured for this connection",
+            )
         headers = {
             "Authorization": f"Bearer {self.settings.aihubmix_api_key.get_secret_value()}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Accept-Encoding": "identity",
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=timeout, verify=True, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+            if hasattr(client, "stream"):
+                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    raw = await read_raw_response(response)
+                    response_status = response.status_code
+                    response_headers = dict(getattr(response, "headers", {}) or {})
+            else:  # test doubles / older compatible clients
                 response = await client.post(url, headers=headers, json=payload)
                 raw = await response.aread()
-        except httpx.HTTPError as exc:
-            raise ProviderTransportError(
-                str(exc),
-                provider=provider or None,
-                service="responses",
-                exception_type=type(exc).__name__,
-            ) from exc
+                response_status = response.status_code
+                response_headers = dict(getattr(response, "headers", {}) or {})
 
-        if response.status_code < 200 or response.status_code >= 300:
+        if response_status < 200 or response_status >= 300:
             raise ProviderHTTPError(
-                response.status_code,
+                response_status,
                 raw,
-                headers=list(response.headers.multi_items()),
-                content_type=response.headers.get("content-type"),
-                content_encoding=response.headers.get("content-encoding"),
-                provider=provider or None,
-                service="responses",
+                content_type=response_headers.get("content-type"),
+                content_encoding=response_headers.get("content-encoding"),
+                request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
             )
 
         try:
-            data = json.loads(raw.decode("utf-8"))
+            decoded = decode_entity(raw, response_headers.get("content-encoding"))
+            data = json.loads(decoded.decode("utf-8"))
         except Exception as exc:
             raise ProviderHTTPError(
-                response.status_code,
+                response_status,
                 raw,
                 "Upstream response was not valid JSON",
-                headers=list(response.headers.multi_items()),
-                content_type=response.headers.get("content-type"),
-                content_encoding=response.headers.get("content-encoding"),
-                provider=provider or None,
-                service="responses",
+                content_type=response_headers.get("content-type"),
+                content_encoding=response_headers.get("content-encoding"),
+                request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
             ) from exc
 
         text = self.extract_visible_text(data)

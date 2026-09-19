@@ -8,22 +8,25 @@ from .config import Settings
 
 
 class SupabaseError(RuntimeError):
+    """Lossless Supabase HTTP failure.
+
+    `raw_body` is never truncated. `body` is a convenience UTF-8 replacement
+    view retained for legacy call sites; raw_body is authoritative.
+    """
+
     def __init__(
         self,
         status_code: int,
         message: str,
-        body: str = "",
+        raw_body: bytes = b"",
         *,
-        body_bytes: bytes | None = None,
-        headers: list[tuple[str, str]] | None = None,
-        received_complete: bool = True,
+        content_type: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
-        self.body_bytes = body_bytes if body_bytes is not None else body.encode("utf-8", errors="replace")
-        self.body = body if body else self.body_bytes.decode("utf-8", errors="replace")
-        self.headers = list(headers or [])
-        self.received_complete = received_complete
+        self.raw_body = raw_body
+        self.body = raw_body.decode("utf-8", errors="replace")
+        self.content_type = content_type
 
 
 class SupabaseBackend:
@@ -31,14 +34,9 @@ class SupabaseBackend:
         self.settings = settings
         key = settings.supabase_secret_key.get_secret_value()
 
-        # Supabase's current sb_secret_* keys are opaque backend keys and should
-        # be sent in the apikey header. Legacy service_role JWTs additionally use
-        # Authorization: Bearer for backwards compatibility.
         self.headers = {
             "apikey": key,
             "Accept": "application/json",
-            # Ask dependencies not to transform error bodies before capture.
-            "Accept-Encoding": "identity",
         }
         if not key.startswith("sb_secret_"):
             self.headers["Authorization"] = f"Bearer {key}"
@@ -76,14 +74,12 @@ class SupabaseBackend:
         )
         ok = expected or set(range(200, 300))
         if response.status_code not in ok:
-            raw = response.content
+            raw = await response.aread()
             raise SupabaseError(
                 response.status_code,
                 f"Supabase request failed: {method} {url}",
-                raw.decode("utf-8", errors="replace"),
-                body_bytes=raw,
-                headers=list(response.headers.multi_items()),
-                received_complete=True,
+                raw,
+                content_type=response.headers.get("content-type"),
             )
         return response
 
@@ -161,6 +157,14 @@ class SupabaseBackend:
         )
         return response.json()
 
+    async def delete(self, table: str, *, filters: dict[str, str]) -> None:
+        await self._request(
+            "DELETE",
+            f"{self.settings.supabase_root}/rest/v1/{table}",
+            params=filters,
+            headers={"Prefer": "return=minimal"},
+        )
+
     async def rpc(self, function: str, payload: dict[str, Any]) -> Any:
         response = await self._request(
             "POST",
@@ -206,3 +210,44 @@ class SupabaseBackend:
     async def storage_get_json(self, object_path: str) -> Any:
         raw = await self.storage_get(object_path)
         return json.loads(raw.decode("utf-8"))
+
+
+    async def storage_head(self, object_path: str) -> dict[str, Any]:
+        encoded_path = quote(object_path.lstrip("/"), safe="/")
+        bucket = quote(self.settings.supabase_bucket, safe="")
+        response = await self._request(
+            "HEAD",
+            f"{self.settings.supabase_root}/storage/v1/object/{bucket}/{encoded_path}",
+        )
+        return {
+            "content_type": response.headers.get("content-type"),
+            "content_length": response.headers.get("content-length"),
+            "etag": response.headers.get("etag"),
+            "last_modified": response.headers.get("last-modified"),
+        }
+
+    async def storage_sign_read_url(self, object_path: str, *, expires_in: int) -> str:
+        encoded_path = quote(object_path.lstrip("/"), safe="/")
+        bucket = quote(self.settings.supabase_bucket, safe="")
+        response = await self._request(
+            "POST",
+            f"{self.settings.supabase_root}/storage/v1/object/sign/{bucket}/{encoded_path}",
+            headers={"Content-Type": "application/json"},
+            json_body={"expiresIn": int(expires_in)},
+        )
+        data = response.json()
+        signed = data.get("signedURL") or data.get("signedUrl") or data.get("signed_url")
+        if not signed:
+            raise RuntimeError("Supabase did not return a signed URL")
+        if str(signed).startswith("http"):
+            return str(signed)
+        return f"{self.settings.supabase_root}{signed}"
+
+    async def storage_delete(self, object_path: str) -> None:
+        bucket = quote(self.settings.supabase_bucket, safe="")
+        await self._request(
+            "DELETE",
+            f"{self.settings.supabase_root}/storage/v1/object/{bucket}",
+            headers={"Content-Type": "application/json"},
+            json_body={"prefixes": [object_path.lstrip("/")]},
+        )

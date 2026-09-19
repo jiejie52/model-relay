@@ -2,23 +2,31 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
+import base64
+import hashlib
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
 
 from .config import get_settings
 from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
-from .repository import RelayRepository
+from .v2_repository import RelayV2Repository
 from .security import require_owner_headers, require_relay_auth
 from .storage_paths import job_object_path, session_material_prefix_path
 from .supabase import SupabaseBackend, SupabaseError
 from .utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
-from .compatibility.relay_gateway import router as dify_relay_gateway_router
-from .api_v2 import router as relay_v2_router
-from .errors.service import RawErrorService
+from .relay_gateway import router as dify_relay_gateway_router
+from .api_v2.router import router as relay_v2_router
+from .persistence.object_storage import StorageRegistry
+from .persistence.supabase_storage import SupabaseObjectStorage
+from .materials.ingress import MaterialIngress
+from .materials.resolver import MaterialResolver
 from .providers.registry import ProviderRegistry
-from .storage.execution_archive import ExecutionArchiveStore
-from .storage.uploaded_files import UploadedFileStore, UploadedFileStoreError
+from .providers.responses_v2 import ResponsesV2Adapter
+from .providers.moonshot_chat import MoonshotChatAdapter
+from .core.execution_runtime import SharedExecutionRuntime
+from .core.raw_error import RawErrorRecorder
+from .execution.inline_executor import InlineExecutor
 
 
 settings = get_settings()
@@ -26,45 +34,55 @@ logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger("model-relay-api")
 
 backend: SupabaseBackend | None = None
-repo: RelayRepository | None = None
+repo: RelayV2Repository | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global backend, repo
     backend = SupabaseBackend(settings)
-    repo = RelayRepository(backend, settings)
-    archive = ExecutionArchiveStore(backend)
+    repo = RelayV2Repository(backend, settings)
+
+    storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
+    material_ingress = MaterialIngress(repo, storage_registry, settings)
+    material_resolver = MaterialResolver(repo, storage_registry, settings)
     providers = ProviderRegistry(settings)
-    errors = RawErrorService(repo, archive, settings)
-    material_store = None
-    material_store_error = None
-    if settings.material_store_configured:
-        try:
-            material_store = UploadedFileStore(settings)
-        except UploadedFileStoreError as exc:
-            material_store_error = str(exc)
-            logger.error("Material store unavailable: %s", exc)
+    providers.validate_enabled_connections()
+    providers.register_v2(
+        "aihubmix_default",
+        ResponsesV2Adapter(providers.openai_compatible, material_resolver),
+    )
+    providers.register_v2(
+        "moonshot_official",
+        MoonshotChatAdapter(settings, material_resolver, repo),
+    )
+    runtime = SharedExecutionRuntime(
+        repo, storage_registry, providers, material_resolver, settings
+    )
+    raw_errors = RawErrorRecorder(repo, storage_registry, settings)
+    inline_executor = InlineExecutor(runtime, raw_errors, repo, settings)
+
     app.state.settings = settings
-    app.state.backend = backend
-    app.state.repo = repo
-    app.state.archive = archive
-    app.state.providers = providers
-    app.state.errors = errors
-    app.state.material_store = material_store
-    app.state.material_store_error = material_store_error
+    app.state.v2_repo = repo
+    app.state.storage_registry = storage_registry
+    app.state.material_ingress = material_ingress
+    app.state.material_resolver = material_resolver
+    app.state.provider_registry = providers
+    app.state.shared_runtime = runtime
+    app.state.raw_error_recorder = raw_errors
+    app.state.inline_executor = inline_executor
     try:
         yield
     finally:
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="2.0.5-hotfix5", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.3.0-session-request-material", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
 
-def _repo() -> RelayRepository:
+def _repo() -> RelayV2Repository:
     assert repo is not None
     return repo
 
@@ -103,14 +121,10 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "2.0.5-hotfix5",
-        "v2": True,
-        "material_storage": {
-            "configured": bool(settings.material_store_configured),
-            "ready": getattr(app.state, "material_store", None) is not None,
-            "missing_fields": settings.material_store_missing_fields,
-            "error": getattr(app.state, "material_store_error", None),
-        },
+        "version": "0.3.0-session-request-material",
+        "deployment_id": settings.deployment_id,
+        "execution_pool": settings.execution_pool,
+        "enabled_connections": sorted(settings.enabled_connection_set),
     }
 
 
@@ -231,10 +245,6 @@ async def submit_job(
         "idempotency_key": idempotency_key,
         "attempt_count": 0,
         "expires_at": repository.default_job_expiry().isoformat(),
-        "execution_engine": "legacy",
-        "execution_phase": "queued",
-        "delivery_status": "not_sent",
-        "schema_version": "legacy",
     }
 
     try:
@@ -268,11 +278,9 @@ async def get_job_status(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    retryable = job.get("error_code") in {
-        "UPSTREAM_TIMEOUT",
-        "UPSTREAM_SERVER_ERROR",
-        "WORKER_ERROR",
-    }
+    # v2 removes Relay-side provider error classification. Legacy status keeps
+    # this field only for shape compatibility and never derives retry policy.
+    retryable = False
     return JobStatusResponse(
         job_id=job_id,
         relay_session_id=UUID(job["relay_session_id"]) if job.get("relay_session_id") else None,
@@ -287,7 +295,6 @@ async def get_job_status(
         retryable=retryable,
         error_code=job.get("error_code"),
         error_message=job.get("error_message"),
-        error_id=job.get("error_id"),
     )
 
 
@@ -297,7 +304,6 @@ async def get_job_status(
 )
 async def get_job_result(
     job_id: UUID,
-    request: Request,
     view: str = Query(default="dify"),
     owner: tuple[str, str] = Depends(require_owner_headers),
 ) -> Response:
@@ -328,29 +334,42 @@ async def get_job_result(
             raw = json_bytes(safe)
         return Response(content=raw, media_type="application/json", status_code=200)
 
-    if job["status"] in {"failed", "cancelled", "expired"}:
+    if job["status"] in {"failed", "cancelled", "expired", "indeterminate"}:
+        raw_path = job.get("raw_response_object_path")
         raw_error = None
-        error_id = job.get("error_id")
-        if error_id:
-            row = await _repo().get_raw_error(
-                str(error_id),
-                tenant_id=tenant_id,
-                conversation_hash=conversation_hash,
-            )
-            if row:
-                service = getattr(request.app.state, "errors", None)
-                if service is not None:
-                    raw_error = await service.external_view(row, include_body=False)
-                    raw_error["raw_path"] = f"/v2/errors/{error_id}/raw"
+        if raw_path:
+            try:
+                raw = await _backend().storage_get(raw_path)
+                raw_error = {
+                    "body_base64": base64.b64encode(raw).decode("ascii"),
+                    "body_size": len(raw),
+                    "body_sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                try:
+                    raw_error["body_text"] = raw.decode("utf-8")
+                    raw_error["body_encoding"] = "utf-8"
+                except UnicodeDecodeError:
+                    raw_error["body_encoding"] = "binary"
+            except Exception as exc:
+                raw_error = {
+                    "archive_read_error": {
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                }
         payload = {
             "job_id": str(job_id),
             "status": job["status"],
-            "error_code": job.get("error_code"),
-            "error_message": job.get("error_message"),
-            "raw_error_id": error_id,
             "error": raw_error,
-            "raw_error_stored": bool(error_id or job.get("raw_response_object_path")),
         }
+        # Relay-originated failures that never had an HTTP body retain their
+        # exact diagnostic fields; they are not mapped to UPSTREAM_* classes.
+        if raw_error is None and (job.get("error_code") or job.get("error_message")):
+            payload["error"] = {
+                "source": "relay",
+                "code": job.get("error_code"),
+                "message": job.get("error_message"),
+            }
         return Response(content=json_bytes(payload), media_type="application/json", status_code=200)
 
     payload = {

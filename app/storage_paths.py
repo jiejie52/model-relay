@@ -98,84 +98,44 @@ def fusion_artifact_object_path(
     )
 
 
-def raw_error_body_path(
+def relay_object_path(
     settings: Settings,
     tenant_id: str,
     conversation_hash: str,
-    error_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/errors/{safe_segment(error_id)}/body.bin"
-
-
-def raw_error_headers_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    error_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/errors/{safe_segment(error_id)}/headers.json"
-
-
-def v2_session_context_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    session_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/v2/sessions/{safe_segment(session_id)}/context.json"
-
-
-def v2_job_attempt_result_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    job_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/v2/jobs/{safe_segment(job_id)}/attempt-result.json"
-
-
-def v2_job_normalized_result_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    job_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/v2/jobs/{safe_segment(job_id)}/normalized-result.json"
-
-
-def v2_job_request_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    job_id: str,
-) -> str:
-    return f"{_root(settings, tenant_id, conversation_hash)}/v2/jobs/{safe_segment(job_id)}/request.json"
-
-
-def v2_history_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    session_id: str,
-    version: int,
-    job_id: str,
-) -> str:
-    return (
-        f"{_root(settings, tenant_id, conversation_hash)}/v2/sessions/{safe_segment(session_id)}/"
-        f"history/v{version}-{safe_segment(job_id)}.json"
-    )
-
-
-def provider_derived_material_path(
-    settings: Settings,
-    tenant_id: str,
-    conversation_hash: str,
-    material_id: str,
-    provider: str,
-    generation: int,
+    object_id: str,
     filename: str,
 ) -> str:
     return (
-        f"{_root(settings, tenant_id, conversation_hash)}/derived/"
-        f"{safe_segment(material_id)}/{safe_segment(provider)}/g{generation}/{safe_segment(filename)}"
+        f"{_root(settings, tenant_id, conversation_hash)}/objects/"
+        f"{safe_segment(object_id)}/{safe_segment(filename)}"
+    )
+
+
+def request_object_path_v2(
+    settings: Settings,
+    tenant_id: str,
+    conversation_hash: str,
+    session_id: str,
+    request_id: str,
+    filename: str,
+) -> str:
+    return (
+        f"{_root(settings, tenant_id, conversation_hash)}/sessions/"
+        f"{safe_segment(session_id)}/requests/{safe_segment(request_id)}/"
+        f"{safe_segment(filename)}"
+    )
+
+
+def session_history_request_path(
+    settings: Settings,
+    tenant_id: str,
+    conversation_hash: str,
+    session_id: str,
+    next_version: int,
+    request_id: str,
+) -> str:
+    return (
+        f"{_root(settings, tenant_id, conversation_hash)}/sessions/"
+        f"{safe_segment(session_id)}/history/"
+        f"history-v{next_version}-{safe_segment(request_id)}.json"
     )

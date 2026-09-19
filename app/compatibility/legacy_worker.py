@@ -8,17 +8,15 @@ from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
-from .config import get_settings
-from .applications.fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
-from .providers.base import ProviderHTTPError, ProviderRequestError, ProviderTransportError
-from .providers.openai_compatible import OpenAICompatibleResponsesProvider
-from .providers.registry import ProviderRegistry
-from .repository import RelayRepository
-from .storage_paths import job_object_path, session_history_version_path
-from .supabase import SupabaseBackend, SupabaseError
-from .errors.service import RawErrorService
-from .storage.execution_archive import ExecutionArchiveStore
-from .utils import json_bytes, truncate_utf8, utcnow
+from ..config import get_settings
+from ..fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
+from ..providers.base import ProviderHTTPError, ProviderRequestError
+from ..providers.openai_compatible import OpenAICompatibleResponsesProvider
+from ..providers.registry import ProviderRegistry
+from ..repository import RelayRepository
+from ..storage_paths import job_object_path, session_history_version_path
+from ..supabase import SupabaseBackend, SupabaseError
+from ..utils import json_bytes, truncate_utf8, utcnow
 
 
 settings = get_settings()
@@ -32,8 +30,6 @@ class RelayWorker:
         self.repo = RelayRepository(self.backend, settings)
         self.providers = ProviderRegistry(settings)
         self.fusion = FusionRuntime(self.backend, self.repo, self.providers, settings)
-        self.archive = ExecutionArchiveStore(self.backend)
-        self.errors = RawErrorService(self.repo, self.archive, settings)
         self.worker_id = (
             f"{socket.gethostname()}-{os.getpid()}-{str(uuid4())[:8]}"
         )
@@ -94,14 +90,6 @@ class RelayWorker:
             )
         except ProviderHTTPError as exc:
             await self._store_provider_error(updated, exc)
-        except ProviderTransportError as exc:
-            error_row = await self.errors.capture_transport(
-                tenant_id=updated["tenant_id"],
-                conversation_hash=updated["conversation_hash"],
-                exc=exc,
-                provider=updated.get("provider"),
-            )
-            await self._fail_job(updated, None, str(exc), error_id=error_row.get("id"))
         except ProviderRequestError as exc:
             await self._fail_job(updated, exc.code, exc.message)
         except FusionRuntimeError as exc:
@@ -110,7 +98,7 @@ class RelayWorker:
             await self._store_supabase_error(updated, exc)
         except Exception as exc:
             logger.exception("job_failed_unexpected job_id=%s", job_id)
-            await self._fail_job(updated, "WORKER_ERROR", str(exc))
+            await self._fail_job(updated, "WORKER_ERROR", str(exc)[:2000])
         finally:
             stop_heartbeat.set()
             heartbeat_task.cancel()
@@ -376,88 +364,92 @@ class RelayWorker:
     async def _store_fusion_error(
         self, job: dict[str, Any], exc: FusionRuntimeError
     ) -> None:
-        error_id = None
         raw_path = None
-        if exc.raw_bytes is not None:
-            error_row = await self.errors.capture_http(
-                tenant_id=job["tenant_id"],
-                conversation_hash=job["conversation_hash"],
-                origin="relay",
-                provider=job.get("provider"),
-                service="fusion_runtime",
-                status_code=None,
-                headers=[],
-                body=exc.raw_bytes,
-                content_type="application/octet-stream",
-                content_encoding=None,
-                received_complete=True,
+        if exc.raw_bytes:
+            raw_path = job_object_path(
+                settings,
+                job["tenant_id"],
+                job["conversation_hash"],
+                job["id"],
+                "fusion-error-response.json",
             )
-            error_id = error_row.get("id")
-            raw_path = error_row.get("body_object_path")
-        await self._fail_job(
-            job, exc.code, exc.message, raw_path=raw_path, error_id=error_id
-        )
+            try:
+                await self.backend.storage_put(raw_path, exc.raw_bytes)
+            except Exception:
+                raw_path = None
+        await self._fail_job(job, exc.code, exc.message, raw_path=raw_path)
 
     async def _store_supabase_error(
         self, job: dict[str, Any], exc: SupabaseError
     ) -> None:
-        error_row = await self.errors.capture_supabase(
-            tenant_id=job["tenant_id"],
-            conversation_hash=job["conversation_hash"],
-            exc=exc,
+        path = job_object_path(
+            settings,
+            job["tenant_id"],
+            job["conversation_hash"],
+            job["id"],
+            "raw-error.bin",
         )
-        await self._fail_job(
-            job,
-            None,
-            str(exc),
-            error_id=error_row.get("id"),
+        try:
+            await self.backend.storage_put(
+                path,
+                exc.raw_body,
+                content_type=(exc.content_type or "application/octet-stream").split(";", 1)[0],
+            )
+        except Exception:
+            path = None
+        await self.repo.update_job(
+            job["id"],
+            {
+                "status": "failed",
+                "error_code": None,
+                "error_message": None,
+                "raw_response_object_path": path,
+                "completed_at": utcnow().isoformat(),
+                "heartbeat_at": utcnow().isoformat(),
+            },
+            lease_owner=self.worker_id,
         )
 
     async def _store_provider_error(
         self, job: dict[str, Any], exc: ProviderHTTPError
     ) -> None:
-        error_row = await self.errors.capture_provider_http(
-            tenant_id=job["tenant_id"],
-            conversation_hash=job["conversation_hash"],
-            exc=exc,
-            provider=job.get("provider"),
+        path = job_object_path(
+            settings,
+            job["tenant_id"],
+            job["conversation_hash"],
+            job["id"],
+            "raw-error.bin",
         )
-        code = None
-        message = exc.body.decode("utf-8", errors="replace")
         try:
-            parsed = json.loads(message)
-            if isinstance(parsed, dict):
-                err = parsed.get("error")
-                if isinstance(err, dict):
-                    if err.get("code") is not None:
-                        code = str(err.get("code"))
-                    elif err.get("type") is not None:
-                        code = str(err.get("type"))
-                    if err.get("message") is not None:
-                        message = str(err.get("message"))
-                else:
-                    if parsed.get("code") is not None:
-                        code = str(parsed.get("code"))
-                    if parsed.get("message") is not None:
-                        message = str(parsed.get("message"))
+            await self.backend.storage_put(
+                path,
+                exc.body,
+                content_type=(exc.content_type or "application/octet-stream").split(";", 1)[0],
+            )
         except Exception:
-            pass
-        await self._fail_job(
-            job,
-            code,
-            message,
-            error_id=error_row.get("id"),
+            path = None
+        await self.repo.update_job(
+            job["id"],
+            {
+                "status": "failed",
+                "error_code": None,
+                "error_message": None,
+                "raw_response_object_path": path,
+                "completed_at": utcnow().isoformat(),
+                "heartbeat_at": utcnow().isoformat(),
+            },
+            lease_owner=self.worker_id,
         )
+        logger.error("legacy_job_failed_raw_error job_id=%s", job["id"])
 
 
     async def _fail_job(
         self,
         job: dict[str, Any],
-        code: str | None,
-        message: str | None,
+        code: str,
+        message: str,
         *,
         raw_path: str | None = None,
-        error_id: str | None = None,
     ) -> None:
         latest = await self.repo.get_job(job["id"])
         if latest and latest.get("status") == "cancelled":
@@ -468,7 +460,6 @@ class RelayWorker:
                 "status": "failed",
                 "error_code": code,
                 "error_message": message,
-                "error_id": error_id,
                 "raw_response_object_path": raw_path,
                 "completed_at": utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
