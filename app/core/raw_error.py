@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from typing import Any
@@ -8,6 +9,7 @@ from uuid import uuid4
 from ..config import Settings
 from ..persistence.object_storage import StorageRegistry
 from ..providers.base import ProviderHTTPError
+from ..providers.http_wire import decode_entity
 from ..storage_paths import request_object_path_v2
 from ..supabase import SupabaseError
 from ..utils import utcnow
@@ -104,18 +106,38 @@ class RawErrorRecorder:
                 "message": str(archive_exc),
             }
 
+        inline_body = raw_body_inline_fields(
+            raw,
+            content_type=content_type,
+            content_encoding=content_encoding,
+        )
+        body_text = inline_body["body_text"]
+        body_encoding = inline_body["body_encoding"]
+        # body_base64 is the exact upstream entity bytes. body_text is an
+        # additional lossless text view when the declared/textual encoding can
+        # be decoded strictly. Neither representation is truncated.
         result = {
             "source": source,
             "upstream_http_status": upstream_http_status,
             "upstream_request_id": upstream_request_id,
             "content_type": content_type,
             "content_encoding": content_encoding,
-            "body_encoding": "binary",
+            "body_encoding": body_encoding,
             "body_size": body_size,
             "body_sha256": body_sha256,
             "body_object_id": body_object_id,
+            "body_text": body_text,
+            "body_base64": inline_body["body_base64"],
             "exception_type": type(exc).__name__,
-            "message": str(exc),
+            # HTTP error bodies are authoritative. Expose the complete textual
+            # body as message as well so callers that only surface `message`
+            # still receive the provider's original response instead of Relay's
+            # generic ProviderHTTPError label.
+            "message": (
+                body_text
+                if body_text is not None and isinstance(exc, (ProviderHTTPError, SupabaseError))
+                else str(exc)
+            ),
             "archive_error": archive_error,
         }
         provider_success_object_id = getattr(exc, "provider_success_object_id", None)
@@ -125,3 +147,73 @@ class RawErrorRecorder:
         if provider_output_object_id:
             result["provider_output_object_id"] = provider_output_object_id
         return result
+
+
+def raw_body_inline_fields(
+    raw: bytes,
+    *,
+    content_type: str | None,
+    content_encoding: str | None,
+) -> dict[str, Any]:
+    body_text, body_encoding = _decode_body_text(
+        raw,
+        content_type=content_type,
+        content_encoding=content_encoding,
+    )
+    return {
+        "body_encoding": body_encoding,
+        "body_text": body_text,
+        "body_base64": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def _decode_body_text(
+    raw: bytes,
+    *,
+    content_type: str | None,
+    content_encoding: str | None,
+) -> tuple[str | None, str]:
+    """Return a strict, non-lossy text view plus the character encoding.
+
+    The SHA/size/base64 fields always describe the exact raw upstream entity
+    bytes. For textual media types we additionally decode Content-Encoding and
+    then the declared/default character set. If strict decoding fails, callers
+    still receive the exact bytes through body_base64 and body_encoding=binary.
+    """
+    media_type, charset = _parse_content_type(content_type)
+    textual = (
+        media_type.startswith("text/")
+        or media_type == "application/json"
+        or media_type.endswith("+json")
+        or media_type in {"application/xml", "application/javascript", "application/x-www-form-urlencoded"}
+        or media_type.endswith("+xml")
+    )
+    if not textual:
+        return None, "binary"
+
+    try:
+        entity = decode_entity(raw, content_encoding)
+    except Exception:
+        return None, "binary"
+
+    encoding = charset or "utf-8"
+    try:
+        return entity.decode(encoding, errors="strict"), encoding.lower()
+    except (LookupError, UnicodeDecodeError):
+        return None, "binary"
+
+
+def _parse_content_type(content_type: str | None) -> tuple[str, str | None]:
+    if not content_type:
+        return "", None
+    parts = [part.strip() for part in str(content_type).split(";")]
+    media_type = parts[0].lower()
+    charset = None
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip().lower() == "charset":
+            charset = value.strip().strip('"').strip("'") or None
+            break
+    return media_type, charset

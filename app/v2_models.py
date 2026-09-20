@@ -68,6 +68,8 @@ class RawErrorMeta(BaseModel):
     body_size: int | None = None
     body_sha256: str | None = None
     body_object_id: str | None = None
+    body_text: str | None = None
+    body_base64: str | None = None
     exception_type: str | None = None
     message: str | None = None
     provider_success_object_id: str | None = None

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from ..core.idempotency import request_identity, stable_hash
+from ..core.raw_error import raw_body_inline_fields
 from ..persistence.object_storage import ObjectLocation
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -90,6 +91,39 @@ def _request_envelope(row: dict[str, Any]) -> RequestEnvelope:
         error=error,
         poll_after_seconds=5 if row.get("status") in {"queued", "leased", "running"} else None,
     )
+
+
+async def _request_envelope_hydrated(request: Request, row: dict[str, Any]) -> RequestEnvelope:
+    """Hydrate archived 0.3.0 errors so idempotent replay also returns raw body.
+
+    New 0.3.1 failures already persist body_text/body_base64 in relay_requests.error.
+    For an older failed Request that only has body_object_id, load the archived
+    bytes and enrich the response in-memory without requiring a DB migration.
+    """
+    error = row.get("error") if isinstance(row.get("error"), dict) else None
+    if error and error.get("body_object_id") and not error.get("body_base64"):
+        obj = await _repo(request).get_object(
+            error["body_object_id"],
+            tenant_id=row.get("tenant_id"),
+            conversation_hash=row.get("conversation_hash"),
+        )
+        if obj:
+            data = await _storage(request).get(obj["storage_id"]).get_bytes(
+                ObjectLocation(obj["storage_id"], obj["bucket"], obj["object_key"])
+            )
+            enriched = dict(error)
+            enriched.update(
+                raw_body_inline_fields(
+                    data,
+                    content_type=str(error.get("content_type") or obj.get("content_type") or "application/octet-stream"),
+                    content_encoding=error.get("content_encoding"),
+                )
+            )
+            if enriched.get("body_text") is not None and enriched.get("upstream_http_status") is not None:
+                enriched["message"] = enriched["body_text"]
+            row = dict(row)
+            row["error"] = enriched
+    return _request_envelope(row)
 
 
 def _material_response(row: dict[str, Any], obj: dict[str, Any]) -> MaterialResponse:
@@ -358,7 +392,7 @@ async def create_request(
     if existing:
         if existing.get("request_hash") != req_hash:
             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
-        return _request_envelope(existing)
+        return await _request_envelope_hydrated(request, existing)
 
     request_id = uuid4()
     object_id = f"obj_{uuid4().hex}"
@@ -414,7 +448,7 @@ async def create_request(
         row = await _inline(request).execute(row)
         if not row:
             raise HTTPException(status_code=500, detail="Request disappeared after inline execution")
-    return _request_envelope(row)
+    return await _request_envelope_hydrated(request, row)
 
 
 @router.get("/sessions/{session_id}/requests/{request_id}", response_model=RequestEnvelope)
@@ -434,7 +468,7 @@ async def get_request(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
-    return _request_envelope(row)
+    return await _request_envelope_hydrated(request, row)
 
 
 @router.get("/sessions/{session_id}/requests/{request_id}/result")
@@ -454,7 +488,7 @@ async def get_request_result(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Request not found")
-    env = _request_envelope(row).model_dump(mode="json")
+    env = (await _request_envelope_hydrated(request, row)).model_dump(mode="json")
     http_status = 202 if row["status"] in {"queued", "leased", "running"} else 200
     return Response(content=json_bytes(env), media_type="application/json", status_code=http_status)
 
@@ -524,4 +558,4 @@ async def cancel_request(
     if row["status"] not in {"succeeded", "failed", "cancelled"}:
         await repo.cancel_request(str(request_id), str(session_id))
         row = await repo.get_request(request_id)
-    return _request_envelope(row)
+    return await _request_envelope_hydrated(request, row)

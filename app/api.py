@@ -77,7 +77,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.3.0-session-request-material", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.3.1-session-request-material-error-passthrough", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -121,7 +121,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.3.0-session-request-material",
+        "version": "0.3.1-session-request-material-error-passthrough",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "enabled_connections": sorted(settings.enabled_connection_set),

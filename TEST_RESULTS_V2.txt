@@ -1,5 +1,5 @@
-Model Relay v2 validation
-=========================
+Model Relay 0.3.1 verification
+UTC: 2026-09-20T06:55:26Z
 
 $ python -m compileall -q app tests
 compileall: OK
@@ -29,20 +29,20 @@ test_non_gemini_responses_mapping_preserves_schema_exactly (test_structured_outp
 test_top_level_provider_neutral_contract_is_accepted (test_structured_output.StructuredOutputTests.test_top_level_provider_neutral_contract_is_accepted) ... ok
 test_v2_core_has_no_fusion_stage_branching (test_v2_boundaries.V2BoundaryTests.test_v2_core_has_no_fusion_stage_branching) ... ok
 test_v2_error_path_has_no_upstream_error_classification (test_v2_boundaries.V2BoundaryTests.test_v2_error_path_has_no_upstream_error_classification) ... ok
+test_030_archived_error_is_hydrated_for_idempotent_replay (test_v2_core.RelayV2CoreTests.test_030_archived_error_is_hydrated_for_idempotent_replay) ... ok
+test_360_byte_json_provider_error_is_returned_inline_losslessly (test_v2_core.RelayV2CoreTests.test_360_byte_json_provider_error_is_returned_inline_losslessly) ... ok
+test_binary_provider_error_keeps_binary_encoding_and_exact_base64 (test_v2_core.RelayV2CoreTests.test_binary_provider_error_keeps_binary_encoding_and_exact_base64) ... ok
 test_provider_registry_is_connection_scoped (test_v2_core.RelayV2CoreTests.test_provider_registry_is_connection_scoped) ... ok
 test_raw_provider_error_is_archived_without_truncation (test_v2_core.RelayV2CoreTests.test_raw_provider_error_is_archived_without_truncation) ... ok
 test_request_identity_changes_when_execution_relevant_input_changes (test_v2_core.RelayV2CoreTests.test_request_identity_changes_when_execution_relevant_input_changes) ... ok
 test_session_request_allows_sync_without_job_semantics (test_v2_core.RelayV2CoreTests.test_session_request_allows_sync_without_job_semantics) ... ok
 
 ----------------------------------------------------------------------
-Ran 28 tests in 0.017s
+Ran 31 tests in 0.030s
 
 OK
 
-$ API import smoke (Railway + both configured connections)
-version: 0.3.0-session-request-material
+$ API import smoke
+version: 0.3.1-session-request-material-error-passthrough
 v2 routes: 9
-
-$ API import smoke (SAE, Moonshot only; no AIHubMix key)
-version: 0.3.0-session-request-material
-SAE config import: OK
+API import smoke: OK

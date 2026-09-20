@@ -1,5 +1,15 @@
 # Relay v2 改造摘要
 
+## 0.3.1 Error Passthrough 修复
+
+- 修复 v2 Error Envelope 只返回 `body_size/body_sha256/body_object_id`、未返回原始 Provider body 的问题。
+- 文本/JSON 错误新增完整 `body_text`；所有错误新增精确 `body_base64`。
+- `body_encoding` 改为按 Content-Type charset 判定；只有真实二进制或严格解码失败时才为 `binary`。
+- 保留 `/error/raw` 与 Storage 原始字节归档；旧 0.3.0 Error 可在查询时从 `body_object_id` 自动回填正文。
+- Provider/Supabase HTTP 错误的 `message` 同步使用完整原始文本正文，兼容只读取 `error_message` 的 Dify 调用方。
+- 无数据库结构变更。
+
+
 ## 新增
 
 - `/v2/materials`：Material Ingress，临时源立即读入共享 Object Storage，记录 SHA-256/size/storage_id。

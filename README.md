@@ -1,4 +1,4 @@
-# Model Relay 0.3 - Session / Request / Material
+# Model Relay 0.3.1 - Session / Request / Material
 
 本版本在 `model-relay_0903` 的可靠异步 Job 基础上引入 Relay v2：
 
@@ -14,7 +14,7 @@ Material -> Session -> Request -> sync Inline Executor
 - **Request** 是每次模型调用的稳定事实身份；同步/异步请求都有 Request。
 - **Job** 只负责异步调度；同步 Request 不进入 `relay_jobs`。
 - **Material** 是长期事实，Provider file ID / URI / Signed URL 只是可重建 binding。
-- **Error** 原始 body 完整归档并通过 `/error/raw` 交付，不再做 Provider 错误归一化/安全摘要。
+- **Error** 原始 body 不截断：文本错误直接随 Request Error Envelope 返回 `body_text`，同时返回精确 `body_base64`；完整原始字节仍归档并可通过 `/error/raw` 读取。不做 Provider 错误归一化/安全摘要。
 - v2 Core 不解释 Dify/Fusion stage；旧 Fusion 仅存在于 compatibility 路径。
 - Railway 与 Aliyun SAE 使用同一源码，通过 `execution_pool` 和 connection 配置分工。
 - 当前对象存储仍为共享 Supabase，但 v2 对象全部记录 `storage_id`，为后续 R2/OSS 留出替换边界。
@@ -39,4 +39,4 @@ POST /v2/sessions/{session_id}/requests/{request_id}/cancel
 
 ## 验证状态
 
-本代码包已通过本地 Python 编译与单元测试；`sql/003` 尚未在你的实际 Supabase 项目执行，官方 Kimi 文件/视觉/Structured Output、SAE 到 Supabase/Kimi 的真实网络链路也需要在预发布环境做集成验收后再切生产流量。
+本代码包已通过本地 Python 编译与 31 项单元测试；0.3.1 已补充 360 字节 Provider JSON 错误原文透传回归测试。`sql/003` 尚未在你的实际 Supabase 项目执行，官方 Kimi 文件/视觉/Structured Output、SAE 到 Supabase/Kimi 的真实网络链路也需要在预发布环境做集成验收后再切生产流量。

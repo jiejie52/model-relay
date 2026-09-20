@@ -64,7 +64,7 @@ python -m app.worker
 2. `POST /v2/sessions`：创建 Session，固定 provider/connection/model/context policy/material base。
 3. `POST /v2/sessions/{session_id}/requests`：每轮请求都创建 Request；`execution.mode=sync` 不建 Job，`async` 才建 Job。
 4. 查询：`GET .../requests/{request_id}` 或 `/result`。
-5. 错误原文：`GET .../error/raw`。该接口返回归档的完整原始错误 body，不做 `UPSTREAM_*` 归类或摘要。
+5. 错误原文：失败 Request 的 Error Envelope 直接包含完整 `body_text`（可严格解码时）和精确 `body_base64`；`GET .../error/raw` 仍可读取 Storage 中归档的原始字节。不做 `UPSTREAM_*` 归类或摘要。
 6. `indeterminate`：表示 Provider 是否完成未知；系统不会自动再建 Job 重放。先查询/对账，必要时显式取消该 Request 后再发起新的业务请求。
 
 所有 Request 查询/取消仍要求：
@@ -102,3 +102,14 @@ python -m unittest discover -s tests -v
 ```
 
 重点再人工/集成验证：同步超时不创建第二个 Job、同键不同请求返回冲突、Worker 在 Provider dispatch 后崩溃进入 `indeterminate`、`result_stored` 后崩溃只完成 commit 不重新推理、Railway/SAE 不跨 pool 误领、原始错误 hash 与上游 body 一致。
+
+
+## 0.3.0 -> 0.3.1 快速升级
+
+本补丁不修改数据库表结构，不需要重新执行 `003`。替换代码/镜像后同时重启 Relay API 与 Worker，然后访问 `/health`，确认版本为：
+
+```text
+0.3.1-session-request-material-error-passthrough
+```
+
+业务侧重放一个会触发 Provider 4xx 的测试请求，返回 `error.body_size` 应与 `error.body_text` UTF-8 字节数一致（文本 JSON 场景），并可将 `error.body_base64` 解码回完全相同的原始响应字节。

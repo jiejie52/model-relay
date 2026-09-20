@@ -1,17 +1,21 @@
-# Model Relay 0.3.0 Patch Notes
+# Model Relay 0.3.1 Patch Notes
 
-本版本是基于 `model-relay_0903` 的 Session / Request / Material 改造版。
+本版本基于 `model-relay-v2_0.3.0`，修复 v2 Session/Request Error Envelope 丢失 Provider 原始错误正文的问题。
 
-主要变化：
+主要修复：
 
-- 新增 `/v2/materials`、`/v2/sessions`、`/v2/sessions/{session_id}/requests`。
-- Session 作为统一上下文边界；Request 作为同步/异步调用的事实身份；Job 仅承担异步调度。
-- 新增 Material/Object/Provider Binding 数据模型，当前继续使用共享 Supabase Storage，并通过 `storage_id` 为 R2/OSS 预留后端边界。
-- 新增官方 Moonshot/Kimi Chat Adapter；Provider 协议差异仅存在于 Adapter。
-- Error 通道改为保存并交付原始错误 body，不再做 `UPSTREAM_*` 归类、摘要或截断。
-- Worker 增加 `execution_pool`、`lease_epoch` fencing 和 `indeterminate` 恢复边界；Railway 与 Aliyun SAE 使用同一源码、不同配置。
-- 旧 `/v1/jobs`、旧 job_id 与旧 Fusion 执行路径继续保留在 compatibility 层。
+- `RawErrorRecorder` 不再把所有错误硬编码为 `body_encoding="binary"`。
+- 对 `application/json; charset=utf-8`、`text/*`、`+json`、XML 等文本错误，按声明字符集严格解码并返回完整 `body_text`。
+- Error Envelope 新增 `body_base64`，保存并返回未经截断的精确原始响应字节；`body_size`/`body_sha256` 与该原始字节一致。
+- `RawErrorMeta` 增加 `body_text` / `body_base64`，防止 Pydantic 在 API 序列化时过滤原始正文。
+- 对 Provider/Supabase HTTP 错误，`error.message` 也改为完整原始文本正文，避免 Dify 只读取 `error_message` 时仍看到通用占位文案。
+- 对 0.3.0 已失败且已归档 `body_object_id` 的 Request，API 会在查询/幂等重放时从 Storage 回填原文，无需改幂等键或补数据库数据。
+- `/error/raw` 归档读取接口继续保留，Storage 中的原始错误对象及 `body_object_id` 机制不变。
+- 新增 360 字节 JSON Provider 错误回归测试，验证 Recorder -> Pydantic -> Request Envelope 全链路不丢正文。
+- 新增二进制错误测试，确认不可安全解码时仍标记为 `binary`，并通过 Base64 完整交付。
 
-数据库需新增执行：`sql/003_relay_v2_session_request_material.sql`。
+升级说明：
 
-部署步骤、环境变量及最短调用流程见 `QUICKSTART.md`；详细改造摘要见 `CHANGELOG_V2.md`。
+- **无需执行新的 SQL migration**；`relay_requests.error` 已是 JSONB，可直接保存新增字段。
+- 直接用 0.3.1 镜像/源码替换 0.3.0 并重启 API 与 Worker。
+- `/health` 版本应显示 `0.3.1-session-request-material-error-passthrough`。
