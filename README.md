@@ -1,9 +1,18 @@
-# Model Relay 0.5.0 - Route Decoupling + Upload Observability
+# Model Relay 0.5.1 - Default-All Connections + Clear Route Diagnostics
 
-本版本以 `model-relay-v2 0.4.1` 为基线，合并两项改造：
+本版本以 `model-relay-v2 0.5.0` 为基线，修复 connection 可用性与 route 错误诊断问题，同时保留 0.5.0 的路由解耦和上传日志能力。
 
 1. **路由解耦**：Dify 只表达 `provider + model`，Relay 服务端通过 `RouteResolver / RouteCatalog` 解析并冻结内部 `connection_id`。Gemini 在 Railway Relay 上会自动进入 `GeminiNativeAdapter + GeminiAIHubMixFileAdapter`；Kimi 使用 `MoonshotChatAdapter + KimiOfficialFileAdapter`；Grok 使用 `ResponsesV2Adapter`。
 2. **文件上传日志补齐**：完整覆盖 JSON/multipart 解析、参数/policy 校验、Dify/HTTPS source fetch、Material Registry、Provider Files API、Supabase fallback 与 API 最终成功/失败。
+
+
+## 0.5.1 关键变化
+
+- 默认 `CONNECTION_AVAILABILITY_MODE=all`：旧 `ENABLED_CONNECTIONS` 不再默认限制 Route；即使部署环境仍保留 `ENABLED_CONNECTIONS=aihubmix_default`，只要 Gemini 所需服务端配置存在，`provider=gemini + gemini-*` 仍会解析到 Gemini Native route。
+- `RouteCatalog` 定义“有哪些合法 route”，不再由 enabled allowlist 决定 route 是否存在；连接凭据、Adapter 注册和未来 allowlist 是独立的可用性检查。
+- 未配置凭据时返回 `ROUTE_CONNECTION_NOT_CONFIGURED`，Adapter 缺失时返回 `ROUTE_ADAPTER_NOT_REGISTERED` / `ROUTE_FILE_ADAPTER_NOT_REGISTERED`，不再误报 `ROUTE_NOT_FOUND`。
+- `route_resolution_failed` 日志增加 `reason_detail / connection_policy / connection_enabled / connection_configured / configuration_reason / provider_model_patterns / registered_*_connections`。
+- 如未来确实需要限制连接，显式设置 `CONNECTION_AVAILABILITY_MODE=allowlist` 后才使用 `ENABLED_CONNECTIONS`。
 
 ## 关键边界
 
@@ -52,6 +61,6 @@ route_binding_mismatch
 
 ## 数据库
 
-**0.4.1 -> 0.5.0 没有新增 SQL migration。** 路由冻结信息使用现有 `relay_sessions.metadata` 与 Request snapshot 保存。数据库仍需已完成 0.4.0 的 `sql/004_provider_native_file_ingress.sql`。
+**0.5.0 -> 0.5.1 没有新增 SQL migration。** 路由冻结信息使用现有 `relay_sessions.metadata` 与 Request snapshot 保存。数据库仍需已完成 0.4.0 的 `sql/004_provider_native_file_ingress.sql`。
 
 详细部署与调用示例见 `QUICKSTART.md`。

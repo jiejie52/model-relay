@@ -30,8 +30,9 @@ class RouteCatalog:
     """Deployment-local provider/model -> private connection mapping.
 
     The catalog is a Relay implementation detail. Callers never supply or select
-    a connection from this catalog. A deterministic built-in catalog is derived
-    from enabled connections; ROUTE_CATALOG_JSON can replace it without changing
+    a connection from this catalog. Built-in routes are defined independently of
+    runtime availability; adapter/configuration availability is checked later by
+    RouteResolver. ROUTE_CATALOG_JSON can replace the built-ins without changing
     the public API contract.
     """
 
@@ -74,42 +75,36 @@ class RouteCatalog:
             entries = [cls._entry_from_mapping(item, settings.deployment_id) for item in rows]
             return cls(revision=revision, entries=entries)
 
-        entries: list[RouteEntry] = []
-        enabled = settings.enabled_connection_set
+        # Built-in route existence is independent of ENABLED_CONNECTIONS. This
+        # prevents an old deployment variable from making a valid provider route
+        # disappear and turning a configuration problem into ROUTE_NOT_FOUND.
         deployment = settings.deployment_id
-        if settings.aihubmix_gemini_connection_id in enabled:
-            entries.append(
-                RouteEntry(
-                    provider="gemini",
-                    model_pattern=settings.route_gemini_model_pattern,
-                    connection_id=settings.aihubmix_gemini_connection_id,
-                    priority=100,
-                    deployment_id=deployment,
-                    requires_file_adapter=True,
-                )
-            )
-        if "aihubmix_default" in enabled:
-            entries.append(
-                RouteEntry(
-                    provider="grok",
-                    model_pattern=settings.route_grok_model_pattern,
-                    connection_id="aihubmix_default",
-                    priority=100,
-                    deployment_id=deployment,
-                    requires_file_adapter=False,
-                )
-            )
-        if settings.moonshot_connection_id in enabled:
-            entries.append(
-                RouteEntry(
-                    provider="kimi",
-                    model_pattern=settings.route_kimi_model_pattern,
-                    connection_id=settings.moonshot_connection_id,
-                    priority=100,
-                    deployment_id=deployment,
-                    requires_file_adapter=True,
-                )
-            )
+        entries: list[RouteEntry] = [
+            RouteEntry(
+                provider="gemini",
+                model_pattern=settings.route_gemini_model_pattern,
+                connection_id=settings.aihubmix_gemini_connection_id,
+                priority=100,
+                deployment_id=deployment,
+                requires_file_adapter=True,
+            ),
+            RouteEntry(
+                provider="grok",
+                model_pattern=settings.route_grok_model_pattern,
+                connection_id="aihubmix_default",
+                priority=100,
+                deployment_id=deployment,
+                requires_file_adapter=False,
+            ),
+            RouteEntry(
+                provider="kimi",
+                model_pattern=settings.route_kimi_model_pattern,
+                connection_id=settings.moonshot_connection_id,
+                priority=100,
+                deployment_id=deployment,
+                requires_file_adapter=True,
+            ),
+        ]
         return cls(revision=settings.route_revision, entries=entries)
 
     @staticmethod
@@ -151,6 +146,16 @@ class RouteCatalog:
 
     def providers(self) -> list[str]:
         return sorted({entry.provider for entry in self.entries})
+
+
+    def patterns_for_provider(self, provider: str, *, deployment_id: str) -> list[str]:
+        provider_n = str(provider or "").lower()
+        return sorted({
+            entry.model_pattern
+            for entry in self.entries
+            if entry.provider.lower() == provider_n
+            and entry.deployment_id in (None, "*", deployment_id)
+        })
 
     def has_provider(self, provider: str, *, deployment_id: str) -> bool:
         provider_n = str(provider or "").lower()

@@ -53,12 +53,12 @@ async def lifespan(_: FastAPI):
     material_resolver = MaterialResolver(repo, storage_registry, settings)
     fallback_storage = FallbackObjectStorage(repo, storage_registry, settings)
     file_adapters = ProviderFileRegistry()
-    if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+    if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
         file_adapters.register(
             settings.aihubmix_gemini_connection_id,
             GeminiAIHubMixFileAdapter(settings),
         )
-    if settings.moonshot_connection_id in settings.enabled_connection_set:
+    if settings.connection_is_active(settings.moonshot_connection_id):
         file_adapters.register(
             settings.moonshot_connection_id,
             KimiOfficialFileAdapter(settings, repo, storage_registry),
@@ -67,19 +67,19 @@ async def lifespan(_: FastAPI):
     binding_resolver = BindingResolver(repo, fallback_storage, file_adapters)
     providers = ProviderRegistry(settings)
     providers.validate_enabled_connections()
-    if "aihubmix_default" in settings.enabled_connection_set:
+    if settings.connection_is_active("aihubmix_default"):
         providers.register_v2(
             "aihubmix_default",
             ResponsesV2Adapter(providers.openai_compatible, material_resolver),
             provider="grok",
         )
-    if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+    if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
         providers.register_v2(
             settings.aihubmix_gemini_connection_id,
             GeminiNativeAdapter(settings),
             provider="gemini",
         )
-    if settings.moonshot_connection_id in settings.enabled_connection_set:
+    if settings.connection_is_active(settings.moonshot_connection_id):
         providers.register_v2(
             settings.moonshot_connection_id,
             MoonshotChatAdapter(settings, material_resolver, repo),
@@ -116,10 +116,12 @@ async def lifespan(_: FastAPI):
     log_info(
         logger,
         "api_started",
-        version="0.5.0-route-observability",
+        version="0.5.1-route-default-all",
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
-        enabled_connections=sorted(settings.enabled_connection_set),
+        connection_policy=settings.connection_availability_mode,
+        configured_connections=providers.registered_connections(),
+        configured_file_connections=file_adapters.registered_connections(),
         route_revision=route_catalog.revision,
         route_catalog_hash=route_catalog.catalog_hash,
         route_providers=route_catalog.providers(),
@@ -133,7 +135,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.5.0-route-observability", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.5.1-route-default-all", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -210,7 +212,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.5.0-route-observability",
+        "version": "0.5.1-route-default-all",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,

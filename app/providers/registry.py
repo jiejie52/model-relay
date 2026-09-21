@@ -7,9 +7,10 @@ from .openai_compatible import OpenAICompatibleResponsesProvider
 class ProviderRegistry:
     """Connection-aware provider registry.
 
-    Legacy v1 callers still use ``get(provider)``.  v2 resolves by connection_id
-    so provider family, wire protocol and deployment location are no longer the
-    same concept.
+    Legacy v1 callers still use ``get(provider)``. v2 resolves by connection_id
+    after the server-side RouteResolver freezes a route. Since 0.5.1, connection
+    availability defaults to ``all``; explicit ENABLED_CONNECTIONS filtering is
+    applied only when CONNECTION_AVAILABILITY_MODE=allowlist.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -18,18 +19,33 @@ class ProviderRegistry:
         self._v2: dict[str, object] = {}
         self._v2_meta: dict[str, dict[str, str]] = {}
 
+    def _connection_is_enabled(self, connection_id: str) -> bool:
+        checker = getattr(self.settings, "connection_is_enabled", None)
+        if callable(checker):
+            return bool(checker(connection_id))
+        return connection_id in getattr(self.settings, "enabled_connection_set", set())
+
+    def _connection_configuration(self, connection_id: str) -> tuple[bool, str | None]:
+        checker = getattr(self.settings, "connection_configuration", None)
+        if callable(checker):
+            return checker(connection_id)
+        return True, None
 
     def validate_enabled_connections(self) -> None:
-        enabled = self.settings.enabled_connection_set
-        if "aihubmix_default" in enabled and self.settings.aihubmix_api_key is None:
-            raise RuntimeError("AIHUBMIX_API_KEY is required because aihubmix_default is enabled")
-        if self.settings.aihubmix_gemini_connection_id in enabled:
-            if self.settings.aihubmix_api_key is None:
-                raise RuntimeError("AIHUBMIX_API_KEY is required because the Gemini native connection is enabled")
-            if not self.settings.aihubmix_gemini_base_url:
-                raise RuntimeError("AIHUBMIX_GEMINI_BASE_URL is required because the Gemini native connection is enabled")
-        if self.settings.moonshot_connection_id in enabled and self.settings.moonshot_api_key is None:
-            raise RuntimeError("MOONSHOT_API_KEY is required because the Moonshot connection is enabled")
+        """Validate only explicitly restricted allowlist entries.
+
+        In the default ``all`` mode a deployment may omit credentials for
+        providers it does not use yet; those routes fail clearly when selected
+        rather than preventing the whole API/Worker from starting.
+        """
+        if not bool(getattr(self.settings, "connection_restrictions_enabled", False)):
+            return
+        for connection_id in getattr(self.settings, "connection_allowlist_set", set()):
+            configured, reason = self._connection_configuration(connection_id)
+            if not configured:
+                raise RuntimeError(
+                    f"Connection {connection_id!r} is explicitly allowlisted but not configured: {reason}"
+                )
 
     def register_v2(self, connection_id: str, adapter: object, *, provider: str | None = None) -> None:
         self._v2[connection_id] = adapter
@@ -48,11 +64,18 @@ class ProviderRegistry:
         return sorted(self._v2)
 
     def get_v2(self, connection_id: str):
-        if connection_id not in self.settings.enabled_connection_set:
-            raise KeyError(f"Connection is not enabled in this deployment: {connection_id}")
+        if not self._connection_is_enabled(connection_id):
+            raise KeyError(
+                f"Connection is disabled by Relay connection policy: {connection_id}"
+            )
         try:
             return self._v2[connection_id]
         except KeyError as exc:
+            configured, reason = self._connection_configuration(connection_id)
+            if not configured:
+                raise KeyError(
+                    f"Connection is not configured on this deployment: {connection_id} ({reason})"
+                ) from exc
             raise KeyError(f"Connection adapter is not registered: {connection_id}") from exc
 
     def get(self, provider: str):

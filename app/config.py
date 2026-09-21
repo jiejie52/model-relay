@@ -20,12 +20,11 @@ class Settings(BaseSettings):
 
     relay_api_token: SecretStr
 
-    # Connection configuration is optional per deployment.  Railway can enable
-    # the existing AIHubMix connection while SAE can enable official Moonshot.
+    # Provider connection configuration. 0.5.1 defaults to "all" connection
+    # availability: ENABLED_CONNECTIONS is retained only as a future/optional
+    # allowlist and is ignored unless CONNECTION_AVAILABILITY_MODE=allowlist.
     aihubmix_api_key: SecretStr | None = None
     aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
-    # Required only when the native Gemini connection is enabled. Keep this
-    # explicit because AIHubMix Native Proxy base paths can differ by account.
     aihubmix_gemini_base_url: str | None = None
     aihubmix_gemini_connection_id: str = "aihubmix_gemini_native"
 
@@ -33,12 +32,13 @@ class Settings(BaseSettings):
     moonshot_base_url: str = "https://api.moonshot.cn/v1"
     moonshot_connection_id: str = "moonshot_official"
 
-    enabled_connections: str = "aihubmix_default"
+    connection_availability_mode: str = "all"  # all | allowlist
+    enabled_connections: str = "aihubmix_default"  # legacy/future allowlist input
     default_connection_id: str = "aihubmix_default"
 
     # Public routing contract 2.1: callers provide provider/model only. The
     # deployment-local catalog resolves and freezes the private connection_id.
-    route_revision: str = "relay-route-catalog/2026-09-21.1"
+    route_revision: str = "relay-route-catalog/2026-09-21.2"
     route_catalog_json: str | None = None
     route_legacy_hint_mode: str = "warn"  # warn | strict
     route_gemini_model_pattern: str = "gemini-*"
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     session_expiry_safety_seconds: int = 900
 
     # Sync requests are still persisted Relay Requests, but the API process owns
-    # the provider connection.  A timeout never silently creates an async Job.
+    # the provider connection. A timeout never silently creates an async Job.
     sync_request_deadline_seconds: int = 120
 
     relay_result_soft_limit_bytes: int = 524288
@@ -104,8 +104,71 @@ class Settings(BaseSettings):
         return self.moonshot_base_url.rstrip("/")
 
     @property
-    def enabled_connection_set(self) -> set[str]:
+    def connection_allowlist_set(self) -> set[str]:
         return {x.strip() for x in self.enabled_connections.split(",") if x.strip()}
+
+    @property
+    def enabled_connection_set(self) -> set[str]:
+        """Compatibility view used by older code/logging.
+
+        In the default ``all`` mode this returns all built-in connection IDs,
+        regardless of the legacy ENABLED_CONNECTIONS value. This is deliberate:
+        route availability is no longer accidentally controlled by an old env
+        variable. A future deployment can opt into the allowlist explicitly.
+        """
+        if not self.connection_restrictions_enabled:
+            return self.known_connection_ids
+        return self.connection_allowlist_set
+
+    @property
+    def known_connection_ids(self) -> set[str]:
+        return {
+            "aihubmix_default",
+            self.aihubmix_gemini_connection_id,
+            self.moonshot_connection_id,
+        }
+
+    @property
+    def connection_restrictions_enabled(self) -> bool:
+        return str(self.connection_availability_mode or "all").strip().lower() == "allowlist"
+
+    def connection_is_enabled(self, connection_id: str) -> bool:
+        if not self.connection_restrictions_enabled:
+            return True
+        return connection_id in self.connection_allowlist_set
+
+    def connection_configuration(self, connection_id: str) -> tuple[bool, str | None]:
+        """Return whether the built-in connection has enough server config.
+
+        This does not perform network health checks. Unknown/custom connections
+        are considered configuration-neutral and are validated by adapter
+        registration instead.
+        """
+        if connection_id == "aihubmix_default":
+            if self.aihubmix_api_key is None:
+                return False, "AIHUBMIX_API_KEY is not configured"
+            return True, None
+        if connection_id == self.aihubmix_gemini_connection_id:
+            missing: list[str] = []
+            if self.aihubmix_api_key is None:
+                missing.append("AIHUBMIX_API_KEY")
+            if not self.aihubmix_gemini_base_url:
+                missing.append("AIHUBMIX_GEMINI_BASE_URL")
+            if missing:
+                return False, "missing server configuration: " + ", ".join(missing)
+            return True, None
+        if connection_id == self.moonshot_connection_id:
+            if self.moonshot_api_key is None:
+                return False, "MOONSHOT_API_KEY is not configured"
+            return True, None
+        return True, None
+
+    def connection_is_configured(self, connection_id: str) -> bool:
+        configured, _ = self.connection_configuration(connection_id)
+        return configured
+
+    def connection_is_active(self, connection_id: str) -> bool:
+        return self.connection_is_enabled(connection_id) and self.connection_is_configured(connection_id)
 
     @property
     def worker_pool_set(self) -> set[str]:

@@ -401,8 +401,8 @@ class SharedExecutionRuntime:
         adapter_meta = self.providers.describe(expected["connection_id"])
         if adapter_meta is None:
             raise ProviderRequestError(
-                "ROUTE_CONNECTION_DISABLED",
-                "The Session's frozen Relay connection is not available on this worker",
+                "ROUTE_ADAPTER_NOT_REGISTERED",
+                "The Session's frozen Relay route has no registered inference adapter on this worker",
             )
         registered_provider = str(adapter_meta.get("provider") or "")
         # Old pre-route sessions do not carry _relay_route and may have legacy

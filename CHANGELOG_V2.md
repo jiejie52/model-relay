@@ -1,5 +1,15 @@
 # Model Relay Changelog
 
+## 0.5.1 Default-All Connections + Clear Route Diagnostics
+
+- 默认 connection policy 改为 `all`，旧 `ENABLED_CONNECTIONS` 不再误伤 Gemini/Kimi route。
+- RouteCatalog 与连接可用性解耦：route 定义独立于 credentials/Adapter/allowlist。
+- Gemini route 在服务端 Key/Base URL 配置完整时自动注册 Native inference/file Adapter。
+- route 错误细分为 NOT_FOUND、MODEL_UNSUPPORTED、CONNECTION_DISABLED、CONNECTION_NOT_CONFIGURED、ADAPTER_NOT_REGISTERED、FILE_ADAPTER_NOT_REGISTERED。
+- `route_resolution_failed` 日志补充 configuration reason、model patterns、registered adapters 与 connection policy。
+- 未来需要白名单时显式启用 `CONNECTION_AVAILABILITY_MODE=allowlist`。
+- 无数据库 migration。
+
 ## 0.5.0 Route Decoupling + Upload Observability
 
 - 新增 server-side RouteCatalog/RouteResolver；public contract 2.1 由 provider/model 决定内部 route。

@@ -1,13 +1,13 @@
-# Model Relay 0.5.0 部署与迁移关键操作
+# Model Relay 0.5.1 部署与迁移关键操作
 
-本版本以 `0.4.1` 为基线，合并两项变化：
+本版本以 `0.5.0` 为基线，重点修复 route 可用性判断：默认所有 connection 都可被 RouteResolver 选择，是否真正可执行由服务端凭据与 Adapter 注册决定。
 
 1. **Route 由 Relay 服务端决定**：Dify 只传 `provider + model`，不再负责 `connection_id / target_connection_id`。
 2. **Material 上传日志补齐**：从 JSON/multipart 解析、参数/policy、Dify/HTTPS source fetch，到 Provider Files API、fallback 与 API 最终失败，都有可串联日志。
 
 ## 1. 数据库
 
-**0.4.1 -> 0.5.0 不需要执行新的 SQL。**
+**0.5.0 -> 0.5.1 不需要执行新的 SQL。**
 
 现有 0.4.1 数据库应已经执行过：
 
@@ -18,7 +18,7 @@ sql/003_relay_v2_session_request_material.sql
 sql/004_provider_native_file_ingress.sql
 ```
 
-0.5.0 的 `route_revision / route_binding_hash / account_scope_hash` 先保存在现有 Session metadata 与 Request snapshot 中，因此无需新 migration。
+0.5.1 的 `route_revision / route_binding_hash / account_scope_hash` 先保存在现有 Session metadata 与 Request snapshot 中，因此无需新 migration。
 
 ## 2. Railway：Grok + Gemini Native
 
@@ -26,13 +26,14 @@ sql/004_provider_native_file_ingress.sql
 DEPLOYMENT_ID=railway
 EXECUTION_POOL=railway-default
 WORKER_EXECUTION_POOLS=railway-default
-ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native
+CONNECTION_AVAILABILITY_MODE=all
+# ENABLED_CONNECTIONS=... 在 all 模式下仅保留兼容，不参与路由限制
 
 AIHUBMIX_API_KEY=...
 AIHUBMIX_GEMINI_BASE_URL=<WF-NormalInference 中已验证的 Gemini Native Proxy base URL>
 AIHUBMIX_GEMINI_CONNECTION_ID=aihubmix_gemini_native
 
-ROUTE_REVISION=relay-route-catalog/2026-09-21.1
+ROUTE_REVISION=relay-route-catalog/2026-09-21.2
 ROUTE_LEGACY_HINT_MODE=warn
 ```
 
@@ -63,13 +64,14 @@ AIHubMix Gemini Native Proxy
 DEPLOYMENT_ID=aliyun-sae
 EXECUTION_POOL=aliyun-default
 WORKER_EXECUTION_POOLS=aliyun-default
-ENABLED_CONNECTIONS=moonshot_official
+CONNECTION_AVAILABILITY_MODE=all
+# ENABLED_CONNECTIONS=... 在 all 模式下不需要修改
 
 MOONSHOT_API_KEY=...
 MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
 MOONSHOT_CONNECTION_ID=moonshot_official
 
-ROUTE_REVISION=relay-route-catalog/2026-09-21.1
+ROUTE_REVISION=relay-route-catalog/2026-09-21.2
 ROUTE_LEGACY_HINT_MODE=warn
 ```
 
@@ -97,14 +99,15 @@ video/*                    -> purpose=video        -> ms://<file_id>
 ROUTE_CATALOG_JSON={"revision":"relay-route-catalog/2026-09-21.2","routes":[{"provider":"gemini","model_pattern":"gemini-*","connection_id":"aihubmix_gemini_native","priority":100,"deployment_id":"railway","requires_file_adapter":true},{"provider":"grok","model_pattern":"grok-*","connection_id":"aihubmix_default","priority":100,"deployment_id":"railway"}]}
 ```
 
-启动时 Relay 会校验：
+启动时 Relay 会校验 route 结构一致性，但默认不会因为“另一个暂未配置的 Provider”阻止整个服务启动。真正选择某 route 时会分别判断：
 
-- connection 是否在 `ENABLED_CONNECTIONS`；
-- inference adapter 是否注册且 Provider 一致；
-- 要求 Native File Adapter 的 route 是否真的注册；
-- route catalog 是否有冲突。
+- route 是否存在；
+- model 是否匹配；
+- 若显式启用 allowlist，connection 是否被允许；
+- 所需服务端凭据/endpoint 是否配置；
+- inference/file Adapter 是否注册且 Provider 一致。
 
-配置错误直接 Fail-Closed，不自动退回 default Adapter。
+错误会分别返回 `ROUTE_NOT_FOUND`、`ROUTE_MODEL_UNSUPPORTED`、`ROUTE_CONNECTION_DISABLED`、`ROUTE_CONNECTION_NOT_CONFIGURED`、`ROUTE_ADAPTER_NOT_REGISTERED` 或 `ROUTE_FILE_ADAPTER_NOT_REGISTERED`，不再把配置缺失混成 `ROUTE_NOT_FOUND`。
 
 ## 5. Material API：不再传 target_connection_id
 
@@ -146,7 +149,7 @@ provider/model
   "provider": "gemini",
   "model": "gemini-3.1-flash-lite",
   "purpose": "inference_input",
-  "route_revision": "relay-route-catalog/2026-09-21.1",
+  "route_revision": "relay-route-catalog/2026-09-21.2",
   "durability": "provider_bound",
   "ready_for": ["gemini"],
   "fallback": {"stored": false, "object_ref": null}
@@ -405,14 +408,14 @@ python -m app.worker
 
 ```text
 GET /health
-version = 0.5.0-route-observability
+version = 0.5.1-route-default-all
 ```
 
 响应会提供 `route_revision` 与可用业务 Provider，不公开内部 connection 列表。
 
 ## 13. Dify 配套修改
 
-Relay 0.5.0 可以先上线兼容旧 DSL；随后 Dify 应逐步删除：
+Relay 0.5.1 可以先上线兼容旧 DSL；随后 Dify 应逐步删除：
 
 ```text
 Parent relay_channel_resolver -> 不再生成 connection_id
@@ -444,3 +447,27 @@ python -m unittest discover -s tests -v
 8. JSON/multipart 非法、owner/policy/payload 非法时，都能看到对应 validation/parse 事件 + 最终失败事件。
 9. route 未配置/模型不支持时 Material/Session Fail-Closed，不调用 Provider。
 10. async Worker 恢复旧 Session 时不重新解析新 RouteCatalog。
+
+
+## 0.5.1：默认 all 与未来 allowlist
+
+当前建议保持：
+
+```text
+CONNECTION_AVAILABILITY_MODE=all
+```
+
+此时即使 Railway 仍存在历史变量：
+
+```text
+ENABLED_CONNECTIONS=aihubmix_default
+```
+
+也不会阻止 Gemini Native/Kimi route 被解析。只要对应 Key/Base URL 已配置，API/Worker 会自动注册 Adapter。
+
+未来接入大量模型提供商后，如确实需要按部署做连接白名单，再改为：
+
+```text
+CONNECTION_AVAILABILITY_MODE=allowlist
+ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native,...
+```

@@ -26,6 +26,9 @@ class ProviderFileRegistry:
     def has(self, connection_id: str | None) -> bool:
         return bool(connection_id and connection_id in self._adapters)
 
+    def registered_connections(self) -> list[str]:
+        return sorted(self._adapters)
+
     def describe(self, connection_id: str) -> dict[str, Any] | None:
         adapter = self._adapters.get(connection_id)
         if adapter is None:

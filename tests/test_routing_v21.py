@@ -13,6 +13,7 @@ from app.api_v2.router import create_material
 from app.materials.provider_files.registry import ProviderFileRegistry
 from app.materials.safe_fetch import MaterialFetchError
 from app.routing import RouteCatalog, RouteEntry, RouteResolutionError, RouteResolver
+from app.config import Settings
 from app.v2_models import MaterialCreateJSON, SessionCreateRequest, SessionRequestCreate, SessionResponse
 
 
@@ -126,6 +127,81 @@ class RoutingV21Tests(unittest.TestCase):
 
     def test_disabled_route_fails_closed(self):
         resolver = self._resolver(enabled={"aihubmix_default"})
+        with self.assertRaises(RouteResolutionError) as ctx:
+            resolver.resolve(provider="gemini", model="gemini-3.1-flash-lite", purpose="session")
+        self.assertEqual(ctx.exception.code, "ROUTE_CONNECTION_DISABLED")
+
+    def test_default_connection_policy_ignores_legacy_enabled_connections_allowlist(self):
+        settings = Settings(
+            relay_api_token="relay-token",
+            supabase_url="https://supabase.example",
+            supabase_secret_key="service-key",
+            enabled_connections="aihubmix_default",
+            aihubmix_api_key="aihub-key",
+            aihubmix_gemini_base_url="https://gemini-native.example",
+        )
+        self.assertEqual(settings.connection_availability_mode, "all")
+        self.assertTrue(settings.connection_is_enabled("aihubmix_default"))
+        self.assertTrue(settings.connection_is_enabled(settings.aihubmix_gemini_connection_id))
+        self.assertTrue(settings.connection_is_enabled(settings.moonshot_connection_id))
+        catalog = RouteCatalog.from_settings(settings)
+        entry = catalog.match(
+            provider="gemini",
+            model="gemini-3.1-flash-lite",
+            deployment_id=settings.deployment_id,
+        )
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.connection_id, settings.aihubmix_gemini_connection_id)
+
+    def test_missing_gemini_server_config_is_not_reported_as_route_not_found(self):
+        settings = Settings(
+            relay_api_token="relay-token",
+            supabase_url="https://supabase.example",
+            supabase_secret_key="service-key",
+            enabled_connections="aihubmix_default",
+            aihubmix_api_key="aihub-key",
+            aihubmix_gemini_base_url=None,
+        )
+        catalog = RouteCatalog.from_settings(settings)
+        resolver = RouteResolver(
+            settings=settings,
+            catalog=catalog,
+            providers=_ProviderRegistry({}),
+            provider_files=_FileRegistry({}),
+        )
+        with self.assertLogs("model-relay-routing", level="ERROR") as captured:
+            with self.assertRaises(RouteResolutionError) as ctx:
+                resolver.resolve(
+                    provider="gemini",
+                    model="gemini-3.1-flash-lite",
+                    purpose="material_ingress",
+                )
+        self.assertEqual(ctx.exception.code, "ROUTE_CONNECTION_NOT_CONFIGURED")
+        joined = "\n".join(captured.output)
+        self.assertIn('"reason":"ROUTE_CONNECTION_NOT_CONFIGURED"', joined)
+        self.assertIn("AIHUBMIX_GEMINI_BASE_URL", joined)
+        self.assertNotIn('"reason":"ROUTE_NOT_FOUND"', joined)
+
+    def test_allowlist_mode_can_still_disable_a_route_explicitly(self):
+        settings = Settings(
+            relay_api_token="relay-token",
+            supabase_url="https://supabase.example",
+            supabase_secret_key="service-key",
+            connection_availability_mode="allowlist",
+            enabled_connections="aihubmix_default",
+            aihubmix_api_key="aihub-key",
+            aihubmix_gemini_base_url="https://gemini-native.example",
+        )
+        catalog = RouteCatalog.from_settings(settings)
+        providers = _ProviderRegistry({
+            "aihubmix_gemini_native": {"provider": "gemini", "adapter_version": "gemini-native-aihubmix/1"},
+        })
+        files = _FileRegistry({
+            "aihubmix_gemini_native": {"provider": "gemini", "adapter_version": "gemini-aihubmix-files/1"},
+        })
+        resolver = RouteResolver(
+            settings=settings, catalog=catalog, providers=providers, provider_files=files
+        )
         with self.assertRaises(RouteResolutionError) as ctx:
             resolver.resolve(provider="gemini", model="gemini-3.1-flash-lite", purpose="session")
         self.assertEqual(ctx.exception.code, "ROUTE_CONNECTION_DISABLED")

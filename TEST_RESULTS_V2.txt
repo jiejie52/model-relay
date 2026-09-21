@@ -1,65 +1,44 @@
-Model Relay 0.5.0 validation
-============================
+Model Relay 0.5.1 verification
+Date: 2026-09-21
+Baseline: model-relay-v2 0.5.0
 
-Baseline: model-relay-v2 0.4.1
-Target:   0.5.0-route-observability
-Date:     2026-09-21
+1. python -m compileall -q app tests
+   PASS
 
-1. Syntax / bytecode compile
-----------------------------
-Command:
-  python -m compileall -q app
-Result:
-  PASS
+2. PYTHONPATH=. pytest -q
+   57 passed in 3.04s
 
-2. Unit tests
--------------
-Command:
-  python -m unittest discover -s tests -v
-Result:
-  PASS - 54 tests
+3. Regression smoke: legacy ENABLED_CONNECTIONS does not hide Gemini route
+   Environment:
+     CONNECTION_AVAILABILITY_MODE=all (default)
+     ENABLED_CONNECTIONS=aihubmix_default
+     AIHUBMIX_API_KEY=<configured>
+     AIHUBMIX_GEMINI_BASE_URL=<configured>
+   Result:
+     connection_mode = all
+     gemini_enabled = True
+     gemini_configured = True
+     provider=gemini model=gemini-3.1-flash-lite
+       -> aihubmix_gemini_native
+       -> gemini-native-aihubmix/1
+       -> gemini-aihubmix-files/1
+   PASS
 
-Coverage added in 0.5.0 includes:
-- Gemini provider/model -> server-side Gemini Native route
-- Grok/Kimi deterministic route resolution
-- legacy connection hints warn/ignore and strict reject modes
-- unsupported/disabled routes fail closed
-- public v2 contract no longer requires connection_id
-- inference material requires provider/model; archive material does not
-- source fetch lifecycle logs with HTTP status/bytes/phase
-- source URL query is not logged
-- invalid JSON/multipart emits parse failure + final material_upload_failed
-- schema validation logs do not echo base64 file payloads
-- policy validation failure logs
-- MaterialIngressError always emits API final material_upload_failed
-- existing provider-native file, raw-error, structured-output and v2 recovery tests remain green
+4. Route error clarity regression
+   Gemini route exists but AIHUBMIX_GEMINI_BASE_URL missing:
+     expected ROUTE_CONNECTION_NOT_CONFIGURED
+     must not return ROUTE_NOT_FOUND
+   Covered by test_routing_v21.py
+   PASS
 
-3. Railway configuration smoke
--------------------------------
-Configuration:
-  DEPLOYMENT_ID=railway
-  ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native
-Result:
-  PASS
-  routes:
-    gemini / gemini-* -> aihubmix_gemini_native
-    grok   / grok-*   -> aihubmix_default
-  RouteCatalog validation passed.
+5. Explicit future allowlist mode
+   CONNECTION_AVAILABILITY_MODE=allowlist + ENABLED_CONNECTIONS=aihubmix_default
+   Gemini route remains defined but resolver returns ROUTE_CONNECTION_DISABLED.
+   Covered by test_routing_v21.py
+   PASS
 
-4. Aliyun SAE configuration smoke
----------------------------------
-Configuration:
-  DEPLOYMENT_ID=aliyun-sae
-  ENABLED_CONNECTIONS=moonshot_official
-Result:
-  PASS
-  routes:
-    kimi / kimi-* -> moonshot_official
-  RouteCatalog validation passed.
+6. API version/import smoke
+   app.version = 0.5.1-route-default-all
+   PASS
 
-5. Key deployment facts
------------------------
-- No new SQL migration from 0.4.1 to 0.5.0.
-- Existing 0.4.0 sql/004_provider_native_file_ingress.sql remains prerequisite.
-- Route fields are frozen in Session metadata / Request snapshots.
-- Existing Sessions are not automatically re-routed.
+Database migrations added: none

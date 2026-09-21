@@ -42,12 +42,12 @@ class RelayWorker:
         self.materials = MaterialResolver(self.repo, self.storage, settings)
         self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
         self.file_adapters = ProviderFileRegistry()
-        if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+        if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
             self.file_adapters.register(
                 settings.aihubmix_gemini_connection_id,
                 GeminiAIHubMixFileAdapter(settings),
             )
-        if settings.moonshot_connection_id in settings.enabled_connection_set:
+        if settings.connection_is_active(settings.moonshot_connection_id):
             self.file_adapters.register(
                 settings.moonshot_connection_id,
                 KimiOfficialFileAdapter(settings, self.repo, self.storage),
@@ -55,19 +55,19 @@ class RelayWorker:
         self.bindings = BindingResolver(self.repo, self.fallback_storage, self.file_adapters)
         self.providers = ProviderRegistry(settings)
         self.providers.validate_enabled_connections()
-        if "aihubmix_default" in settings.enabled_connection_set:
+        if settings.connection_is_active("aihubmix_default"):
             self.providers.register_v2(
                 "aihubmix_default",
                 ResponsesV2Adapter(self.providers.openai_compatible, self.materials),
                 provider="grok",
             )
-        if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+        if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
             self.providers.register_v2(
                 settings.aihubmix_gemini_connection_id,
                 GeminiNativeAdapter(settings),
                 provider="gemini",
             )
-        if settings.moonshot_connection_id in settings.enabled_connection_set:
+        if settings.connection_is_active(settings.moonshot_connection_id):
             self.providers.register_v2(
                 settings.moonshot_connection_id,
                 MoonshotChatAdapter(settings, self.materials, self.repo),
@@ -105,6 +105,9 @@ class RelayWorker:
             route_revision=self.route_catalog.revision,
             route_catalog_hash=self.route_catalog.catalog_hash,
             route_providers=self.route_catalog.providers(),
+            connection_policy=settings.connection_availability_mode,
+            configured_connections=self.providers.registered_connections(),
+            configured_file_connections=self.file_adapters.registered_connections(),
         )
         while not self.stop_requested.is_set():
             try:
