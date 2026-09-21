@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     app_name: str = "model-relay"
     log_level: str = "INFO"
+    dependency_http_log_level: str = "WARNING"
+    uvicorn_access_log: bool = False
 
     relay_api_token: SecretStr
 

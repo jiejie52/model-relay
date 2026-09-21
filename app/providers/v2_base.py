@@ -14,6 +14,8 @@ class V2ProviderResult:
     cached_tokens: int | None
     response_output: Any
     history_entry: dict[str, Any]
+    http_status: int | None = None
+    provider_request_id: str | None = None
 
 
 @dataclass
@@ -25,6 +27,8 @@ class V2ExecutionContext:
     material_bindings: list[dict[str, Any]]
     tenant_id: str
     conversation_hash: str
+    request_id: str | None = None
+    session_id: str | None = None
 
 
 class V2ProviderAdapter(Protocol):

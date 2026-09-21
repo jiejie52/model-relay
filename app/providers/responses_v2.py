@@ -27,6 +27,13 @@ class ResponsesV2Adapter:
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         snapshot = dict(context.snapshot)
+        snapshot["_relay_log_context"] = {
+            "request_id": context.request_id,
+            "session_id": context.session_id,
+            "provider": snapshot.get("provider"),
+            "connection_id": snapshot.get("connection_id"),
+            "model": snapshot.get("model"),
+        }
         snapshot["current_query"] = self._input_text(snapshot.get("input"))
         snapshot["mode"] = "continue_session"
         snapshot["material_prefix_includes_current_query"] = False
@@ -65,6 +72,8 @@ class ResponsesV2Adapter:
                     "response_output": result.response_output,
                 }
             },
+            http_status=result.http_status,
+            provider_request_id=result.provider_request_id,
         )
 
     async def _material_prefix(self, context: V2ExecutionContext) -> list[Any]:

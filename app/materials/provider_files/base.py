@@ -24,6 +24,7 @@ class ProviderFileResult:
     request_id: str | None = None
     phase: str = "ready"
     derived_object_id: str | None = None
+    http_status: int | None = None
 
 
 class ProviderFileAdapter(Protocol):

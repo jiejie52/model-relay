@@ -1,4 +1,4 @@
-# Model Relay 0.4.0 部署关键操作
+# Model Relay 0.4.1 部署关键操作
 
 ## 1. 从 0.3.1 升级数据库
 
@@ -150,7 +150,7 @@ python -m app.worker
 
 ```text
 GET /health
-version = 0.4.0-provider-native-files
+version = 0.4.1-observability
 ```
 
 ## 8. 最少验收
@@ -166,3 +166,57 @@ python -m unittest discover -s tests -v
 2. Kimi PDF 经 `file-extract -> /content` 后参与模型请求；file_id 不直接作为文本上下文。
 3. Kimi image/video 请求使用 `ms://<file_id>`。
 4. 故意触发 Gemini/Kimi Files API 4xx/5xx，核对 raw error body/headers/phase 不截断。
+
+
+## 9. 0.4.1 日志配置
+
+0.4.1 **没有数据库 migration**。从 0.4.0 升级只需要重新部署 API/Worker。
+
+默认建议：
+
+```text
+LOG_LEVEL=INFO
+DEPENDENCY_HTTP_LOG_LEVEL=WARNING
+UVICORN_ACCESS_LOG=false
+```
+
+这样会隐藏 `httpx`/`httpcore` 的高频 Supabase REST/RPC 成功日志，例如 Worker 每 2 秒调用一次 `claim_relay_job_v2` 的 `HTTP/1.1 200 OK`，也不会让 Uvicorn 的 status/result 轮询 access log 淹没业务日志。
+
+Relay 自己保留以下关键事件：
+
+```text
+request_accepted
+job_claimed
+request_execution_started
+material_bindings_frozen
+provider_call_started
+provider_call_completed / provider_call_failed
+upstream_stream_interrupted
+request_execution_committed
+request_executor_failed / request_executor_timeout
+provider_file_binding_started / completed / failed
+material_provider_fallback_activated
+```
+
+关键事件均尽量带 `request_id/session_id/job_id`、`provider/connection_id/model`、`phase`、`duration_ms`、`http_status`、`failure_class` 与 Provider request id。异常事件使用 `exc_info` 输出堆栈。日志不会打印 Authorization/API Key/Token，也不会打印请求正文或原始错误 body。原始错误仍通过 Raw Error 通道读取。
+
+常见 `failure_class`：
+
+```text
+client                 # Relay API 4xx / 调用方参数或状态问题
+upstream_rejected      # Provider 返回 4xx
+upstream               # Provider 返回 5xx/处理失败
+upstream_timeout       # Provider/Files API 超时
+upstream_transport     # DNS/TLS/连接/流中断
+relay_validation       # Relay/Adapter 校验失败
+relay_configuration    # 连接未配置
+relay                  # Relay 内部异常
+```
+
+若临时需要观察底层 HTTP 调用，可把：
+
+```text
+DEPENDENCY_HTTP_LOG_LEVEL=INFO
+```
+
+调试结束后建议恢复 `WARNING`。

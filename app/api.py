@@ -6,7 +6,7 @@ import base64
 import hashlib
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 
 from .config import get_settings
 from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
@@ -31,10 +31,11 @@ from .providers.gemini_native import GeminiNativeAdapter
 from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
+from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, now_ms, status_failure_class
 
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings)
 logger = logging.getLogger("model-relay-api")
 
 backend: SupabaseBackend | None = None
@@ -98,15 +99,59 @@ async def lifespan(_: FastAPI):
     app.state.shared_runtime = runtime
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
+    log_info(
+        logger,
+        "api_started",
+        version="0.4.1-observability",
+        deployment_id=settings.deployment_id,
+        execution_pool=settings.execution_pool,
+        enabled_connections=sorted(settings.enabled_connection_set),
+        dependency_http_log_level=settings.dependency_http_log_level,
+        uvicorn_access_log=settings.uvicorn_access_log,
+    )
     try:
         yield
     finally:
+        log_info(logger, "api_stopping", deployment_id=settings.deployment_id)
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.4.0-provider-native-files", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.4.1-observability", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
+
+
+@app.middleware("http")
+async def relay_http_logging(request: Request, call_next):
+    start_ms = now_ms()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        log_error(
+            logger,
+            "api_request_unhandled",
+            exc_info=True,
+            method=request.method,
+            path=request.url.path,
+            duration_ms=elapsed_ms(start_ms),
+            failure_class="relay",
+            exception_type=type(exc).__name__,
+        )
+        raise
+
+    # Do not turn health checks or status/result polling into the dominant log
+    # volume. Mutation requests and all HTTP failures remain visible.
+    if request.method not in {"GET", "HEAD"} or response.status_code >= 400:
+        log_info(
+            logger,
+            "api_request_complete",
+            method=request.method,
+            path=request.url.path,
+            http_status=response.status_code,
+            duration_ms=elapsed_ms(start_ms),
+            failure_class=status_failure_class(response.status_code),
+        )
+    return response
 
 
 def _repo() -> RelayV2Repository:
@@ -148,7 +193,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.4.0-provider-native-files",
+        "version": "0.4.1-observability",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "enabled_connections": sorted(settings.enabled_connection_set),

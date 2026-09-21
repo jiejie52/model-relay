@@ -25,10 +25,11 @@ from .providers.responses_v2 import ResponsesV2Adapter
 from .supabase import SupabaseBackend
 from .v2_repository import RelayV2Repository
 from .utils import utcnow
+from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings)
 logger = logging.getLogger("model-relay-worker")
 
 
@@ -83,10 +84,12 @@ class RelayWorker:
         await self.backend.close()
 
     async def run_forever(self) -> None:
-        logger.info(
-            "worker_started id=%s pools=%s",
-            self.worker_id,
-            sorted(settings.worker_pool_set),
+        log_info(
+            logger,
+            "worker_started",
+            worker_id=self.worker_id,
+            deployment_id=settings.deployment_id,
+            execution_pools=sorted(settings.worker_pool_set),
         )
         while not self.stop_requested.is_set():
             try:
@@ -105,25 +108,36 @@ class RelayWorker:
                     await self._process_legacy(job)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception("worker_loop_error")
+            except Exception as exc:
+                log_error(
+                    logger,
+                    "worker_loop_error",
+                    exc_info=True,
+                    worker_id=self.worker_id,
+                    failure_class="relay",
+                    exception_type=type(exc).__name__,
+                )
                 try:
                     await asyncio.wait_for(
                         self.stop_requested.wait(), timeout=settings.worker_poll_seconds
                     )
                 except asyncio.TimeoutError:
                     pass
-        logger.info("worker_drained id=%s", self.worker_id)
+        log_info(logger, "worker_drained", worker_id=self.worker_id)
 
     async def _process_v2(self, job: dict) -> None:
         job_id = str(job["id"])
         epoch = int(job.get("lease_epoch") or 0)
-        logger.info(
-            "v2_job_claimed job_id=%s request_id=%s pool=%s epoch=%s",
-            job_id,
-            job.get("request_id"),
-            job.get("execution_pool"),
-            epoch,
+        started_ms = now_ms()
+        log_info(
+            logger,
+            "job_claimed",
+            worker_id=self.worker_id,
+            job_id=job_id,
+            request_id=job.get("request_id"),
+            execution_pool=job.get("execution_pool"),
+            lease_epoch=epoch,
+            protocol_version="v2",
         )
         await self.repo.update_job(
             job_id,
@@ -137,6 +151,14 @@ class RelayWorker:
         heartbeat = asyncio.create_task(self._heartbeat(job_id, epoch, stop))
         try:
             await self.queue.execute(job, self.worker_id)
+            log_info(
+                logger,
+                "job_execution_returned",
+                worker_id=self.worker_id,
+                job_id=job_id,
+                request_id=job.get("request_id"),
+                duration_ms=elapsed_ms(started_ms),
+            )
         finally:
             stop.set()
             heartbeat.cancel()
@@ -151,7 +173,7 @@ class RelayWorker:
             except asyncio.TimeoutError:
                 ok = await self.repo.renew_lease_v2(job_id, self.worker_id, lease_epoch)
                 if not ok:
-                    logger.warning("v2_lease_renew_failed job_id=%s epoch=%s", job_id, lease_epoch)
+                    log_warning(logger, "lease_renew_failed", worker_id=self.worker_id, job_id=job_id, lease_epoch=lease_epoch)
                     return
 
     async def _process_legacy(self, job: dict) -> None:
@@ -162,7 +184,7 @@ class RelayWorker:
 
             self._legacy = LegacyRelayWorker()
         self._legacy.worker_id = self.worker_id
-        logger.info("legacy_job_claimed job_id=%s", job.get("id"))
+        log_info(logger, "legacy_job_claimed", worker_id=self.worker_id, job_id=job.get("id"))
         await self._legacy.process_job(job)
 
 
@@ -171,7 +193,7 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
 
     def request_stop() -> None:
-        logger.info("worker_stop_requested id=%s", worker.worker_id)
+        log_info(logger, "worker_stop_requested", worker_id=worker.worker_id)
         worker.stop_requested.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):

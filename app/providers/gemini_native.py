@@ -120,7 +120,7 @@ class GeminiNativeAdapter:
         )
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 status = response.status_code
                 response_headers = dict(response.headers)
         if not 200 <= status < 300:
@@ -189,6 +189,8 @@ class GeminiNativeAdapter:
                     "model_content": model_content,
                 }
             },
+            http_status=status,
+            provider_request_id=self._request_id(response_headers),
         )
 
     @staticmethod

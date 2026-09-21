@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from ..config import get_settings
+from ..observability import configure_logging
 from ..fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
 from ..providers.base import ProviderHTTPError, ProviderRequestError
 from ..providers.openai_compatible import OpenAICompatibleResponsesProvider
@@ -20,7 +21,7 @@ from ..utils import json_bytes, truncate_utf8, utcnow
 
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings)
 logger = logging.getLogger("model-relay-worker")
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -13,11 +14,15 @@ from ..core.raw_error import raw_body_inline_fields
 from ..providers.base import ProviderHTTPError, ProviderRequestError
 from ..storage_paths import relay_object_path
 from ..utils import utcnow
+from ..observability import elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, exception_failure_class
 from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
 from .provider_files.base import MaterialFile, ProviderFileResult
 from .provider_files.registry import ProviderFileRegistry
 from .safe_fetch import fetch_bytes
+
+
+logger = logging.getLogger("model-relay-materials")
 
 
 class MaterialIngressError(RuntimeError):
@@ -67,6 +72,13 @@ class MaterialIngress:
     ) -> dict[str, Any]:
         existing = await self.repo.find_material_by_idempotency(tenant_id, idempotency_key)
         if existing:
+            log_info(
+                logger,
+                "material_ingress_idempotent_reuse",
+                material_id=existing.get("id"),
+                target_connection_id=existing.get("target_connection_id"),
+                status=existing.get("status"),
+            )
             return existing
 
         durability_policy = (durability_policy or self.settings.material_default_durability_policy).lower()
@@ -99,6 +111,7 @@ class MaterialIngress:
         detected_content_type = (detected_content_type or "application/octet-stream").split(";", 1)[0].strip()
         digest = hashlib.sha256(data).hexdigest()
         material_id = f"mat_{uuid4().hex}"
+        ingress_started_ms = now_ms()
         row = await self.repo.create_material(
             {
                 "id": material_id,
@@ -129,6 +142,19 @@ class MaterialIngress:
             }
         )
 
+        log_info(
+            logger,
+            "material_ingress_started",
+            material_id=material_id,
+            filename=filename,
+            content_type=detected_content_type,
+            size_bytes=len(data),
+            target_connection_id=target_connection_id,
+            durability_policy=durability_policy,
+            fallback_policy=fallback_policy,
+            source_kind=source_kind,
+        )
+
         adapter = self.file_adapters.maybe_get(target_connection_id)
         fallback_row: dict[str, Any] | None = None
 
@@ -139,6 +165,15 @@ class MaterialIngress:
                 row=row,
                 data=data,
                 retention_policy="bridge" if target_connection_id else "legacy-default",
+            )
+            log_info(
+                logger,
+                "material_fallback_stored",
+                material_id=material_id,
+                target_connection_id=target_connection_id,
+                storage_id=fallback_row.get("storage_id"),
+                retention_policy="bridge" if target_connection_id else "legacy-default",
+                duration_ms=elapsed_ms(ingress_started_ms),
             )
             return await self.repo.update_material(
                 material_id,
@@ -175,6 +210,18 @@ class MaterialIngress:
             sha256=digest,
             data=data,
         )
+        binding_started_ms = now_ms()
+        log_info(
+            logger,
+            "provider_file_binding_started",
+            material_id=material_id,
+            provider=adapter.provider,
+            connection_id=target_connection_id,
+            adapter_version=adapter.adapter_version,
+            generation=generation,
+            size_bytes=len(data),
+            content_type=detected_content_type,
+        )
         try:
             result = await adapter.prepare(material_file, generation=generation)
             binding = dict(result.binding)
@@ -199,7 +246,38 @@ class MaterialIngress:
                     "completed_at": utcnow().isoformat(),
                 },
             )
+            log_info(
+                logger,
+                "provider_file_binding_completed",
+                material_id=material_id,
+                provider=adapter.provider,
+                connection_id=target_connection_id,
+                adapter_version=adapter.adapter_version,
+                generation=generation,
+                phase=result.phase,
+                http_status=result.http_status,
+                upstream_request_id=result.request_id,
+                duration_ms=elapsed_ms(binding_started_ms),
+            )
         except Exception as exc:
+            log_error(
+                logger,
+                "provider_file_binding_failed",
+                exc_info=True,
+                material_id=material_id,
+                provider=adapter.provider,
+                connection_id=target_connection_id,
+                adapter_version=adapter.adapter_version,
+                generation=generation,
+                phase=getattr(exc, "phase", None),
+                duration_ms=elapsed_ms(binding_started_ms),
+                failure_class=exception_failure_class(exc),
+                upstream_http_status=getattr(exc, "status_code", None),
+                upstream_request_id=getattr(exc, "request_id", None),
+                stream_interrupted=getattr(exc, "stream_interrupted", False),
+                bytes_received=getattr(exc, "bytes_received", None),
+                exception_type=type(exc).__name__,
+            )
             error_ref = None
             raw_error = self._error_detail(exc)
             if isinstance(exc, ProviderHTTPError):
@@ -227,6 +305,17 @@ class MaterialIngress:
                     data=data,
                     retention_policy="provider-unavailable",
                 )
+                log_warning(
+                    logger,
+                    "material_provider_fallback_activated",
+                    material_id=material_id,
+                    provider=adapter.provider,
+                    connection_id=target_connection_id,
+                    failure_class=exception_failure_class(exc),
+                    upstream_http_status=getattr(exc, "status_code", None),
+                    retention_policy="provider-unavailable",
+                    duration_ms=elapsed_ms(ingress_started_ms),
+                )
                 return await self.repo.update_material(
                     material_id,
                     {
@@ -249,6 +338,17 @@ class MaterialIngress:
                 retention_policy="durability" if durability_policy == "relay_backed" else "policy-always",
             )
 
+        log_info(
+            logger,
+            "material_ingress_completed",
+            material_id=material_id,
+            provider=adapter.provider,
+            connection_id=target_connection_id,
+            status="ready_provider",
+            durability="relay_backed" if fallback_row else "provider_bound",
+            fallback_stored=bool(fallback_row),
+            duration_ms=elapsed_ms(ingress_started_ms),
+        )
         return await self.repo.update_material(
             material_id,
             {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 from ..core.idempotency import request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
 from ..materials.ingress import MaterialIngressError
+from ..observability import error as log_error, info as log_info
 from ..persistence.object_storage import ObjectLocation
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -27,6 +29,8 @@ from ..v2_models import (
     SessionResponse,
 )
 
+
+logger = logging.getLogger("model-relay-api.v2")
 
 router = APIRouter(prefix="/v2", tags=["relay-v2"], dependencies=[Depends(require_relay_auth)])
 
@@ -277,7 +281,26 @@ async def create_material(
     except MaterialIngressError as exc:
         raise HTTPException(status_code=502, detail=exc.detail) from exc
     except Exception as exc:
+        log_error(
+            logger,
+            "material_api_failed",
+            exc_info=True,
+            target_connection_id=target_connection_id if "target_connection_id" in locals() else None,
+            filename=filename if "filename" in locals() else None,
+            failure_class="relay",
+            exception_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    log_info(
+        logger,
+        "material_api_accepted",
+        material_id=row.get("id"),
+        target_connection_id=row.get("target_connection_id"),
+        status=row.get("status"),
+        durability=row.get("durability"),
+        size_bytes=row.get("actual_size") or row.get("size_bytes"),
+        content_type=row.get("content_type"),
+    )
     return await _material_response(request, row)
 
 
@@ -308,6 +331,15 @@ async def create_session(
     if existing:
         if existing.get("session_hash") != session_hash:
             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Session")
+        log_info(
+            logger,
+            "session_idempotent_reuse",
+            session_id=existing.get("id"),
+            provider=existing.get("provider"),
+            connection_id=existing.get("connection_id"),
+            model=existing.get("model"),
+            execution_pool=existing.get("execution_pool"),
+        )
         return _session_response(existing)
 
     for material_id in body.material_ids:
@@ -357,6 +389,17 @@ async def create_session(
             "metadata": body.metadata,
             "expires_at": repo.default_session_expiry().isoformat(),
         }
+    )
+    log_info(
+        logger,
+        "session_created",
+        session_id=row.get("id"),
+        provider=row.get("provider"),
+        connection_id=row.get("connection_id"),
+        model=row.get("model"),
+        context_policy=row.get("context_policy"),
+        execution_pool=row.get("execution_pool"),
+        material_count=len(row.get("material_manifest") or []),
     )
     return _session_response(row)
 
@@ -447,6 +490,17 @@ async def create_request(
     if existing:
         if existing.get("request_hash") != req_hash:
             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
+        log_info(
+            logger,
+            "request_idempotent_reuse",
+            request_id=existing.get("id"),
+            session_id=existing.get("session_id"),
+            job_id=existing.get("job_id"),
+            execution_mode=existing.get("execution_mode"),
+            status=existing.get("status"),
+            connection_id=existing.get("connection_id"),
+            model=existing.get("model"),
+        )
         return await _request_envelope_hydrated(request, existing)
 
     request_id = uuid4()
@@ -497,7 +551,39 @@ async def create_request(
             raise HTTPException(status_code=409, detail="SESSION_BUSY") from exc
         if "IDEMPOTENCY_CONFLICT" in text:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
+        log_error(
+            logger,
+            "request_accept_failed",
+            exc_info=True,
+            request_id=str(request_id),
+            session_id=str(session_id),
+            job_id=job_id,
+            execution_mode=body.execution.mode,
+            provider=provider,
+            connection_id=connection_id,
+            model=model,
+            failure_class="dependency",
+            dependency="supabase",
+            http_status=exc.status_code,
+            exception_type=type(exc).__name__,
+        )
         raise HTTPException(status_code=502, detail="Failed to accept Relay Request") from exc
+
+    log_info(
+        logger,
+        "request_accepted",
+        request_id=row.get("id"),
+        session_id=row.get("session_id"),
+        job_id=row.get("job_id"),
+        execution_mode=row.get("execution_mode"),
+        status=row.get("status"),
+        provider=provider,
+        connection_id=connection_id,
+        model=model,
+        execution_pool=row.get("execution_pool"),
+        material_count=len(effective_material_ids),
+        business_stage=(body.metadata or {}).get("stage") or (body.metadata or {}).get("purpose") or (body.input.get("stage") if isinstance(body.input, dict) else None),
+    )
 
     if body.execution.mode == "sync":
         row = await _inline(request).execute(row)

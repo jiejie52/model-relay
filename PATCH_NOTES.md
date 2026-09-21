@@ -1,34 +1,35 @@
-# Model Relay 0.4.0 Patch Notes
+# Model Relay 0.4.1 Patch Notes
 
-基线：`model-relay-v2_0.3.1`  
-设计依据：`Model_Relay_改造方案_文件上传机制增强补丁_V1.1_20260921`
+基线：`model-relay-v2_0.4.0`
+范围：生产日志与可观测性优化，**无 SQL migration**。
 
-## 文件入站改造
+## 默认降噪
 
-- 新增 `ProviderFileAdapter` 与 connection-scoped registry。
-- Gemini：AIHubMix Gemini Native Proxy -> resumable Gemini Files API -> ACTIVE `fileUri`；默认不写 Supabase 原始输入文件。
-- Kimi：官方 Files API；文本 `file-extract -> /content`，图片/视频 `image/video -> ms://<file_id>`。
-- Material Registry 与输入 payload 存储解耦；`material_id` 继续作为调用方稳定 ID。
-- Supabase 原始输入文件存储改为 `FallbackObjectStorage`，只由 fallback/bridge/durability 策略触发。
-- Kimi 抽取文本作为 Provider-derived artifact 保存，不等价于保存原始输入文件。
+- `httpx/httpcore/hpack` 默认 `WARNING`：不再出现 Worker 轮询 Supabase `claim_relay_job_v2` 的每次 `200 OK`。
+- `uvicorn.access` 默认关闭：health/status/result 的正常轮询不再占据主要日志。
+- 可用 `DEPENDENCY_HTTP_LOG_LEVEL=INFO` 临时恢复依赖 HTTP access log。
 
-## 恢复与隔离
+## 请求生命周期日志
 
-- `provider_material_bindings` 增加 `account_scope_hash`、`generation` 与 provider resource 字段。
-- Request 首次 dispatch 前冻结 `material_binding_snapshot`。
-- Key/account scope 变化不会复用旧 Provider file ID/URI；没有 fallback 时返回 `MATERIAL_REUPLOAD_REQUIRED`。
-- provider upload attempt 增加独立审计记录，保留 phase/request-id/raw response/raw error/uncertain 状态。
+- `request_accepted`：Request 已持久化；带 request/session/job、sync/async、provider/connection/model/pool。
+- `job_claimed`：Worker 领取异步 Job；带 worker、lease_epoch、execution_pool。
+- `request_execution_started`、`material_bindings_frozen`、`provider_call_started`、`provider_call_completed`、`request_execution_committed`。
+- Provider 成功记录耗时、HTTP 状态、Provider request/response id、响应字节数。
 
-## Error
+## 错误与流中断
 
-- 继续沿用 0.3.1 原始 Error 规则。
-- Gemini/Kimi Files API 非 2xx body、headers、request ID 与上传阶段完整记录；不使用 `UPSTREAM_*` 归一化，不复制 DSL 的 2K/4K 截断。
-- 默认 `on_provider_unavailable` 只对连接/超时/408/425/5xx/processing-timeout 进入 fallback；429/业务 4xx 原样失败，避免隐式改变文件留存策略。
+- `provider_call_failed` / `provider_file_binding_failed` 输出 request/material 关联信息、failure_class、HTTP 状态、Provider request id、phase 和 traceback。
+- `upstream_stream_interrupted` 在已经拿到响应头但读取 body 中途断开时记录 `bytes_received/http_status/upstream_host/upstream_path`；URL query 不记录。
+- `request_executor_timeout` / `request_executor_failed` 记录最终执行层异常和 traceback。
+- `failure_class` 区分 client、upstream_rejected、upstream、upstream_timeout、upstream_transport、relay_validation、relay_configuration、relay。
 
-## 数据库
+## 安全边界
 
-从 0.3.1 升级只需要执行：
+- 结构化日志不打印请求/模型正文、不打印 Raw Error body。
+- Authorization、Token、API Key、Secret 字段统一脱敏。
+- 原始 Provider Error 的完整交付机制保持 0.3.1+ 行为不变。
 
-```text
-sql/004_provider_native_file_ingress.sql
-```
+## 部署
+
+0.4.0 数据库无需变化。替换代码并同时重启 API 与 Worker 即可。
+

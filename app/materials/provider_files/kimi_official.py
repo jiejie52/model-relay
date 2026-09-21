@@ -37,7 +37,7 @@ class KimiOfficialFileAdapter:
 
     async def prepare(self, material: MaterialFile, *, generation: int) -> ProviderFileResult:
         purpose, representation = self._purpose(material.content_type)
-        upload_raw, upload_headers, payload = await self._upload(material, purpose)
+        upload_raw, upload_headers, upload_status, payload = await self._upload(material, purpose)
         file_id = str(payload.get("id") or payload.get("file_id") or "")
         if not file_id:
             raise ProviderRequestError("PROVIDER_FILE_BINDING", "Kimi Files API returned no file id")
@@ -53,7 +53,7 @@ class KimiOfficialFileAdapter:
         external_uri = None
         derived_object_id = None
         if purpose == "file-extract":
-            extracted, content_type, content_raw, content_headers = await self._read_content(file_id)
+            extracted, content_type, content_raw, content_headers, content_status = await self._read_content(file_id)
             derived_object_id = await self._store_extraction(material, extracted, content_type)
             metadata["extraction_object_id"] = derived_object_id
             metadata["extraction_content_type"] = content_type
@@ -93,6 +93,7 @@ class KimiOfficialFileAdapter:
             request_id=request_id,
             phase=f"kimi_files_{purpose}_ready",
             derived_object_id=derived_object_id,
+            http_status=content_status if purpose == "file-extract" else upload_status,
         )
 
     async def probe(self, binding: dict[str, Any]) -> dict[str, Any]:
@@ -103,7 +104,7 @@ class KimiOfficialFileAdapter:
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_probe"})
                 status = response.status_code
                 headers = dict(response.headers)
         if status in {404, 410}:
@@ -141,7 +142,7 @@ class KimiOfficialFileAdapter:
 
     async def _upload(
         self, material: MaterialFile, purpose: str
-    ) -> tuple[bytes, dict[str, str], dict[str, Any]]:
+    ) -> tuple[bytes, dict[str, str], int, dict[str, Any]]:
         url = f"{self.settings.moonshot_root}/files"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
@@ -152,7 +153,7 @@ class KimiOfficialFileAdapter:
                 data={"purpose": purpose},
                 files={"file": (material.filename, material.data, material.content_type)},
             ) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_upload", "purpose": purpose})
                 status = response.status_code
                 headers = dict(response.headers)
         if not 200 <= status < 300:
@@ -181,7 +182,7 @@ class KimiOfficialFileAdapter:
             ) from exc
         if not isinstance(payload, dict):
             raise ProviderRequestError("PROVIDER_FILE_BINDING", "Kimi Files API returned an invalid response")
-        return raw, headers, payload
+        return raw, headers, status, payload
 
 
     async def _wait_file_ready(self, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -199,7 +200,7 @@ class KimiOfficialFileAdapter:
                 await asyncio.sleep(self.settings.kimi_file_poll_seconds)
                 url = f"{self.settings.moonshot_root}/files/{file_id}"
                 async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
-                    raw = await read_raw_response(response)
+                    raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_probe", "provider_file_id": file_id})
                     status = response.status_code
                     headers = dict(response.headers)
                 if not 200 <= status < 300:
@@ -245,12 +246,12 @@ class KimiOfficialFileAdapter:
 
     async def _read_content(
         self, file_id: str
-    ) -> tuple[bytes, str, bytes, dict[str, str]]:
+    ) -> tuple[bytes, str, bytes, dict[str, str], int]:
         url = f"{self.settings.moonshot_root}/files/{file_id}/content"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_content", "provider_file_id": file_id})
                 status = response.status_code
                 headers = dict(response.headers)
         if not 200 <= status < 300:
@@ -279,7 +280,7 @@ class KimiOfficialFileAdapter:
                             break
             except Exception:
                 pass
-        return extracted, content_type, raw, headers
+        return extracted, content_type, raw, headers, status
 
     async def _store_extraction(self, material: MaterialFile, data: bytes, content_type: str) -> str:
         import hashlib

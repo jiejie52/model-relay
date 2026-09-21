@@ -1,8 +1,8 @@
-Model Relay 0.4.0 verification
-==============================
+Model Relay 0.4.1 verification
+================================
 
 $ python -m compileall -q app tests
-compileall: OK
+PASS
 
 $ python -m unittest discover -s tests -v
 test_corpus_hash_ignores_volatile_signed_urls (test_fusion_contract.FusionContractTests.test_corpus_hash_ignores_volatile_signed_urls) ... ok
@@ -12,13 +12,51 @@ test_fusion_model_stage_does_not_require_current_query (test_fusion_contract.Fus
 test_fusion_provider_payload_forces_json_object_transport (test_fusion_contract.FusionContractTests.test_fusion_provider_payload_forces_json_object_transport) ... ok
 test_global_adjudication_singleton_container_normalization (test_fusion_contract.FusionContractTests.test_global_adjudication_singleton_container_normalization) ... ok
 test_normal_stage_still_requires_current_query (test_fusion_contract.FusionContractTests.test_normal_stage_still_requires_current_query) ... ok
+test_dependency_polling_loggers_are_suppressed_by_default (test_observability.ObservabilityTests.test_dependency_polling_loggers_are_suppressed_by_default) ... ok
+test_stream_interruption_is_logged_with_partial_byte_count (test_observability.ObservabilityTests.test_stream_interruption_is_logged_with_partial_byte_count) ... ok
+test_structured_event_redacts_secrets (test_observability.ObservabilityTests.test_structured_event_redacts_secrets) ... ok
 test_binding_scope_mismatch_without_fallback_requires_reupload (test_provider_native_files.ProviderNativeFileTests.test_binding_scope_mismatch_without_fallback_requires_reupload) ... ok
 test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct (test_provider_native_files.ProviderNativeFileTests.test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct) ... ok
 test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes (test_provider_native_files.ProviderNativeFileTests.test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes) ... ok
-test_native_success_does_not_store_input_file_in_fallback (test_provider_native_files.ProviderNativeFileTests.test_native_success_does_not_store_input_file_in_fallback) ... ok
-test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback (test_provider_native_files.ProviderNativeFileTests.test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback) ... ok
-test_provider_failure_does_not_silently_change_retention_when_fallback_disabled (test_provider_native_files.ProviderNativeFileTests.test_provider_failure_does_not_silently_change_retention_when_fallback_disabled) ... ok
-test_provider_temporary_failure_uses_fallback_only_when_policy_allows (test_provider_native_files.ProviderNativeFileTests.test_provider_temporary_failure_uses_fallback_only_when_policy_allows) ... ok
+test_native_success_does_not_store_input_file_in_fallback (test_provider_native_files.ProviderNativeFileTests.test_native_success_does_not_store_input_file_in_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","filename":"report.pdf","content_type":"application/pdf","size_bytes":21,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
+2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":21,"content_type":"application/pdf"}
+2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_ready","duration_ms":0}
+2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","status":"ready_provider","durability":"provider_bound","fallback_stored":false,"duration_ms":0}
+ok
+test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback (test_provider_native_files.ProviderNativeFileTests.test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","filename":"report.pdf","content_type":"application/pdf","size_bytes":26,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
+2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":26,"content_type":"application/pdf"}
+2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_upload","duration_ms":0,"failure_class":"upstream_rejected","upstream_http_status":429,"stream_interrupted":false,"exception_type":"ProviderHTTPError"}
+Traceback (most recent call last):
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
+    result = await adapter.prepare(material_file, generation=generation)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
+    raise self.failure
+app.providers.base.ProviderHTTPError: Upstream provider request failed
+ok
+test_provider_failure_does_not_silently_change_retention_when_fallback_disabled (test_provider_native_files.ProviderNativeFileTests.test_provider_failure_does_not_silently_change_retention_when_fallback_disabled) ... 2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","filename":"report.pdf","content_type":"application/pdf","size_bytes":12,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"never","source_kind":"inline"}
+2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":12,"content_type":"application/pdf"}
+2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
+Traceback (most recent call last):
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
+    result = await adapter.prepare(material_file, generation=generation)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
+    raise self.failure
+app.providers.base.ProviderRequestError: provider processing timeout
+ok
+test_provider_temporary_failure_uses_fallback_only_when_policy_allows (test_provider_native_files.ProviderNativeFileTests.test_provider_temporary_failure_uses_fallback_only_when_policy_allows) ... 2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","filename":"report.pdf","content_type":"application/pdf","size_bytes":11,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
+2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":11,"content_type":"application/pdf"}
+2026-09-21 05:45:47,520 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
+Traceback (most recent call last):
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
+    result = await adapter.prepare(material_file, generation=generation)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
+    raise self.failure
+app.providers.base.ProviderRequestError: provider processing timeout
+2026-09-21 05:45:47,520 WARNING model-relay-materials {"event":"material_provider_fallback_activated","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","failure_class":"upstream_timeout","retention_policy":"provider-unavailable","duration_ms":0}
+ok
 test_provider_execute_sends_json_schema_to_responses (test_structured_output.ProviderStructuredOutputIntegrationTests.test_provider_execute_sends_json_schema_to_responses) ... ok
 test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation (test_structured_output.StructuredOutputExecutionTests.test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation) ... ok
 test_caller_schema_disables_legacy_global_output_contract_in_prompt (test_structured_output.StructuredOutputTests.test_caller_schema_disables_legacy_global_output_contract_in_prompt) ... ok
@@ -45,19 +83,12 @@ test_request_identity_changes_when_execution_relevant_input_changes (test_v2_cor
 test_session_request_allows_sync_without_job_semantics (test_v2_core.RelayV2CoreTests.test_session_request_allows_sync_without_job_semantics) ... ok
 
 ----------------------------------------------------------------------
-Ran 38 tests in 0.022s
+Ran 41 tests in 0.023s
 
 OK
 
 $ API import smoke
-api_import_ok
-version: 0.4.0-provider-native-files
+PASS version=0.4.1-observability
 
 $ Worker import smoke
-worker_import_ok
-
-$ Gemini native config smoke
-gemini_native_config_ok
-
-$ Kimi official config smoke
-kimi_official_config_ok
+PASS

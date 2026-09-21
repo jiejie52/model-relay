@@ -1,6 +1,6 @@
-# Model Relay 0.4.0 - Provider-native File Ingress
+# Model Relay 0.4.1 - Provider-native Files + Production Observability
 
-本版本以 `model-relay-v2_0.3.1` 为基线，实现文件上传机制增强补丁 V1.1：
+本版本以 `model-relay-v2_0.4.0` 为直接基线；0.4.0 已实现文件上传机制增强补丁 V1.1，本版继续优化生产日志与可观测性：
 
 ```text
 Caller file / readable URL
@@ -16,6 +16,18 @@ Relay Material Registry (stable material_id)
         |
         `--> Supabase input-file fallback (conditional only)
 ```
+
+
+## 0.4.1 日志与可观测性优化
+
+- 默认把 `httpx/httpcore` 提升到 `WARNING`，不再打印 Supabase `claim_relay_job_v2`、Heartbeat 等高频成功访问日志。
+- 默认关闭 `uvicorn.access`，避免 health/status/result 轮询占满日志；Relay 自己记录业务生命周期事件。
+- Session Request 日志以 `request_id/session_id/job_id` 串联 API 接收、Worker claim、材料 binding、Provider dispatch、结果提交。
+- Provider 调用记录 connection/model/adapter、阶段、耗时、HTTP status、Provider request id 和响应字节数。
+- 错误明确标注 `failure_class`，区分客户端 4xx、Provider 拒绝、上游 5xx、超时/网络、Relay 校验/配置/内部错误。
+- Provider response stream 在读 body 过程中断开时输出 `upstream_stream_interrupted`，记录已接收字节、HTTP status、上游 path，并保留异常堆栈。
+- 日志不打印请求正文、Authorization/API Key/Token 或原始 Error body；完整原始 Error 继续使用 0.3.1+ Raw Error 通道。
+- **无数据库结构变化**；从 0.4.0 直接替换代码即可。
 
 ## 0.4.0 核心变化
 
@@ -42,6 +54,6 @@ Relay Material Registry (stable material_id)
 
 ## 验证状态
 
-本代码包已通过 Python `compileall`、API/Worker import smoke 与 38 项单元测试。单元测试覆盖 native 成功不写 input fallback、Provider 暂时失败 fallback、关闭 fallback 时失败、429 原始错误不隐式落盘、account scope 隔离、Kimi file-extract/image/video wire 语义，以及 0.3.1 的原始 Error 回归测试。
+本代码包会在打包前重新执行 Python `compileall`、API/Worker import smoke 与完整单元测试；结果见 `TEST_RESULTS_V2.txt`。单元测试覆盖 native 成功不写 input fallback、Provider 暂时失败 fallback、关闭 fallback 时失败、429 原始错误不隐式落盘、account scope 隔离、Kimi file-extract/image/video wire 语义，以及 0.3.1 的原始 Error 回归测试。
 
 真实上线前仍必须使用你的 AIHubMix Gemini Native Proxy endpoint、Kimi 官方 Key、Supabase 与目标模型做预发布集成验收；本代码包不会伪造“已对你的外部账号完成联调”。

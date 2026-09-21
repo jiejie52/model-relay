@@ -11,6 +11,8 @@ class ProviderResult:
     usage: dict[str, Any]
     cached_tokens: int | None
     response_output: list[Any]
+    http_status: int | None = None
+    provider_request_id: str | None = None
 
 
 class ProviderRequestError(RuntimeError):

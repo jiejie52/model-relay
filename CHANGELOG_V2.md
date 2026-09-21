@@ -1,5 +1,17 @@
 # Relay v2 改造摘要
 
+## 0.4.1 Production Observability
+
+- 默认关闭 `httpx/httpcore` INFO，去除 Supabase `claim_relay_job_v2`、Lease/Heartbeat 等高频成功轮询噪音。
+- 默认关闭 Uvicorn access log，由 Relay 业务事件替代普通 access log。
+- 新增单行结构化 JSON lifecycle logs：Request 接收、Job claim、执行开始、Material binding、Provider dispatch、原子提交。
+- Provider 成功日志增加 `duration_ms/http_status/upstream_request_id/provider_response_id/response_bytes`。
+- Provider/Files API 失败日志增加 `failure_class/upstream_http_status/phase/exception_type` 并输出 traceback。
+- response body 读取中断新增 `upstream_stream_interrupted`，记录已接收字节与上游 HTTP 上下文；不记录 URL query。
+- 日志字段统一做敏感键脱敏；Token/API Key/Authorization 不进入业务日志。
+- 新增 `DEPENDENCY_HTTP_LOG_LEVEL`、`UVICORN_ACCESS_LOG` 配置。
+- 无数据库 migration；0.4.0 -> 0.4.1 仅需替换代码并重新部署 API/Worker。
+
 ## 0.4.0 Provider-native File Ingress
 
 - Gemini 输入文件默认通过 AIHubMix Gemini Native Proxy 直传 Gemini Files API，不先持久化 Supabase input-file object。

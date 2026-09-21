@@ -125,7 +125,7 @@ class OpenAICompatibleResponsesProvider:
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             if hasattr(client, "stream"):
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    raw = await read_raw_response(response)
+                    raw = await read_raw_response(response, log_context=request_snapshot.get("_relay_log_context"))
                     response_status = response.status_code
                     response_headers = dict(getattr(response, "headers", {}) or {})
             else:  # test doubles / older compatible clients
@@ -169,6 +169,8 @@ class OpenAICompatibleResponsesProvider:
             usage=usage,
             cached_tokens=cached_tokens,
             response_output=output,
+            http_status=response_status,
+            provider_request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
         )
 
     @staticmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -10,10 +11,14 @@ from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
 from ..providers.v2_base import V2ExecutionContext
+from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
 from ..storage_paths import request_object_path_v2, session_history_request_path
 from ..structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
 from ..utils import json_bytes, truncate_utf8, utcnow
 from ..v2_repository import RelayV2Repository
+
+
+logger = logging.getLogger("model-relay-runtime")
 
 
 class SessionConflictError(RuntimeError):
@@ -46,6 +51,19 @@ class SharedExecutionRuntime:
         lease_owner: str | None = None,
         lease_epoch: int | None = None,
     ) -> dict[str, Any]:
+        execution_started_ms = now_ms()
+        request_id = str(request_row["id"])
+        session_id = str(request_row["session_id"])
+        log_info(
+            logger,
+            "request_execution_started",
+            request_id=request_id,
+            session_id=session_id,
+            execution_mode=request_row.get("execution_mode"),
+            job_id=request_row.get("job_id"),
+            lease_owner=lease_owner,
+            lease_epoch=lease_epoch,
+        )
         session = await self.repo.get_session(
             request_row["session_id"],
             tenant_id=request_row["tenant_id"],
@@ -79,12 +97,23 @@ class SharedExecutionRuntime:
         existing_binding_snapshot = request_row.get("material_binding_snapshot")
         if not isinstance(existing_binding_snapshot, list):
             existing_binding_snapshot = None
+        binding_started_ms = now_ms()
         material_bindings = await self.bindings.freeze_for_request(
             material_ids=material_ids,
             connection_id=str(snapshot["connection_id"]),
             tenant_id=request_row["tenant_id"],
             conversation_hash=request_row["conversation_hash"],
             existing_snapshot=existing_binding_snapshot,
+        )
+        log_info(
+            logger,
+            "material_bindings_frozen",
+            request_id=request_id,
+            session_id=session_id,
+            connection_id=snapshot.get("connection_id"),
+            material_count=len(material_ids),
+            reused_snapshot=existing_binding_snapshot is not None,
+            duration_ms=elapsed_ms(binding_started_ms),
         )
         if existing_binding_snapshot is None:
             await self.repo.update_request(
@@ -100,16 +129,73 @@ class SharedExecutionRuntime:
                 "started_at": request_row.get("started_at") or utcnow().isoformat(),
             },
         )
-        result = await adapter.execute(
-            V2ExecutionContext(
-                snapshot=snapshot,
-                session=session,
-                history=history,
-                material_ids=material_ids,
-                material_bindings=material_bindings,
-                tenant_id=request_row["tenant_id"],
-                conversation_hash=request_row["conversation_hash"],
+        provider_started_ms = now_ms()
+        metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
+        input_value = snapshot.get("input") if isinstance(snapshot.get("input"), dict) else {}
+        business_stage = metadata.get("stage") or metadata.get("purpose") or input_value.get("stage")
+        log_info(
+            logger,
+            "provider_call_started",
+            request_id=request_id,
+            session_id=session_id,
+            provider=snapshot.get("provider"),
+            connection_id=snapshot.get("connection_id"),
+            model=snapshot.get("model"),
+            adapter_version=getattr(adapter, "adapter_version", None),
+            phase="model_inference",
+            business_stage=business_stage,
+            material_count=len(material_ids),
+        )
+        try:
+            result = await adapter.execute(
+                V2ExecutionContext(
+                    snapshot=snapshot,
+                    session=session,
+                    history=history,
+                    material_ids=material_ids,
+                    material_bindings=material_bindings,
+                    tenant_id=request_row["tenant_id"],
+                    conversation_hash=request_row["conversation_hash"],
+                    request_id=request_id,
+                    session_id=session_id,
+                )
             )
+        except Exception as exc:
+            log_error(
+                logger,
+                "provider_call_failed",
+                exc_info=True,
+                request_id=request_id,
+                session_id=session_id,
+                provider=snapshot.get("provider"),
+                connection_id=snapshot.get("connection_id"),
+                model=snapshot.get("model"),
+                adapter_version=getattr(adapter, "adapter_version", None),
+                phase=getattr(exc, "phase", None) or "model_inference",
+                duration_ms=elapsed_ms(provider_started_ms),
+                failure_class=exception_failure_class(exc),
+                upstream_http_status=getattr(exc, "status_code", None),
+                upstream_request_id=getattr(exc, "request_id", None),
+                exception_type=type(exc).__name__,
+                stream_interrupted=getattr(exc, "stream_interrupted", False),
+                bytes_received=getattr(exc, "bytes_received", None),
+            )
+            raise
+        log_info(
+            logger,
+            "provider_call_completed",
+            request_id=request_id,
+            session_id=session_id,
+            provider=snapshot.get("provider"),
+            connection_id=snapshot.get("connection_id"),
+            model=snapshot.get("model"),
+            adapter_version=getattr(adapter, "adapter_version", None),
+            phase="model_inference",
+            duration_ms=elapsed_ms(provider_started_ms),
+            http_status=result.http_status,
+            upstream_request_id=result.provider_request_id,
+            provider_response_id=result.response_id,
+            response_bytes=len(result.raw_bytes),
         )
 
         raw_object_id = await self._store_object(
@@ -229,6 +315,18 @@ class SharedExecutionRuntime:
             raise SessionConflictError(
                 "Request result was persisted but the atomic Session commit was rejected"
             )
+        log_info(
+            logger,
+            "request_execution_committed",
+            request_id=request_id,
+            session_id=session_id,
+            provider=snapshot.get("provider"),
+            connection_id=snapshot.get("connection_id"),
+            model=snapshot.get("model"),
+            history_version=int(request_row["expected_history_version"]) + (1 if history_object_id else 0),
+            duration_ms=elapsed_ms(execution_started_ms),
+            status="succeeded",
+        )
         return compact_result
 
     async def _load_json_object(

@@ -54,7 +54,7 @@ class GeminiAIHubMixFileAdapter:
                 headers=headers,
                 json={"file": {"display_name": material.filename}},
             ) as response:
-                start_raw = await read_raw_response(response)
+                start_raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_start"})
                 start_status = response.status_code
                 start_headers = dict(response.headers)
             if not 200 <= start_status < 300:
@@ -89,7 +89,7 @@ class GeminiAIHubMixFileAdapter:
             async with client.stream(
                 "POST", upload_url, headers=upload_headers, content=material.data
             ) as response:
-                final_raw = await read_raw_response(response)
+                final_raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_finalize"})
                 final_status = response.status_code
                 final_headers = dict(response.headers)
             if not 200 <= final_status < 300:
@@ -145,6 +145,7 @@ class GeminiAIHubMixFileAdapter:
             raw_response_content_type=response_headers.get("content-type") if response_headers else "application/json",
             request_id=self._request_id(response_headers or {}),
             phase="gemini_files_active",
+            http_status=final_status,
         )
 
     async def probe(self, binding: dict[str, Any]) -> dict[str, Any]:
@@ -156,7 +157,7 @@ class GeminiAIHubMixFileAdapter:
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
             async with client.stream("GET", url, headers={"x-goog-api-key": key, "Accept-Encoding": "identity"}) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_probe"})
                 headers = dict(response.headers)
                 status = response.status_code
         if not 200 <= status < 300:
@@ -213,7 +214,7 @@ class GeminiAIHubMixFileAdapter:
             await asyncio.sleep(self.settings.gemini_file_poll_seconds)
             url = f"{self.base_url}/v1beta/{file_name.lstrip('/')}"
             async with client.stream("GET", url, headers={"x-goog-api-key": key, "Accept-Encoding": "identity"}) as response:
-                raw = await read_raw_response(response)
+                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_probe"})
                 status = response.status_code
                 headers = dict(response.headers)
             if not 200 <= status < 300:

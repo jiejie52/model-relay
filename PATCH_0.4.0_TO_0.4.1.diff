@@ -1,0 +1,1861 @@
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/.env.example /mnt/data/model-relay-v2_0.4.1/model-relay-v2/.env.example
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/.env.example	2026-09-21 04:11:14.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/.env.example	2026-09-21 05:42:38.781043097 +0000
+@@ -62,3 +62,8 @@
+ UPSTREAM_POOL_TIMEOUT_SECONDS=30
+ SUPABASE_TIMEOUT_SECONDS=60
+ LOG_LEVEL=INFO
++# Suppress high-frequency httpx/httpcore access logs (including Supabase
++# claim_relay_job_v2 polling). Set to INFO only for temporary HTTP wire debugging.
++DEPENDENCY_HTTP_LOG_LEVEL=WARNING
++# Relay emits its own lifecycle logs, so Uvicorn access logs are disabled by default.
++UVICORN_ACCESS_LOG=false
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/CHANGELOG_V2.md /mnt/data/model-relay-v2_0.4.1/model-relay-v2/CHANGELOG_V2.md
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/CHANGELOG_V2.md	2026-09-21 04:16:53.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/CHANGELOG_V2.md	2026-09-21 05:42:38.781353252 +0000
+@@ -1,5 +1,17 @@
+ # Relay v2 改造摘要
+ 
++## 0.4.1 Production Observability
++
++- 默认关闭 `httpx/httpcore` INFO，去除 Supabase `claim_relay_job_v2`、Lease/Heartbeat 等高频成功轮询噪音。
++- 默认关闭 Uvicorn access log，由 Relay 业务事件替代普通 access log。
++- 新增单行结构化 JSON lifecycle logs：Request 接收、Job claim、执行开始、Material binding、Provider dispatch、原子提交。
++- Provider 成功日志增加 `duration_ms/http_status/upstream_request_id/provider_response_id/response_bytes`。
++- Provider/Files API 失败日志增加 `failure_class/upstream_http_status/phase/exception_type` 并输出 traceback。
++- response body 读取中断新增 `upstream_stream_interrupted`，记录已接收字节与上游 HTTP 上下文；不记录 URL query。
++- 日志字段统一做敏感键脱敏；Token/API Key/Authorization 不进入业务日志。
++- 新增 `DEPENDENCY_HTTP_LOG_LEVEL`、`UVICORN_ACCESS_LOG` 配置。
++- 无数据库 migration；0.4.0 -> 0.4.1 仅需替换代码并重新部署 API/Worker。
++
+ ## 0.4.0 Provider-native File Ingress
+ 
+ - Gemini 输入文件默认通过 AIHubMix Gemini Native Proxy 直传 Gemini Files API，不先持久化 Supabase input-file object。
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/PATCH_NOTES.md /mnt/data/model-relay-v2_0.4.1/model-relay-v2/PATCH_NOTES.md
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/PATCH_NOTES.md	2026-09-21 04:16:52.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/PATCH_NOTES.md	2026-09-21 05:42:38.781574364 +0000
+@@ -1,34 +1,35 @@
+-# Model Relay 0.4.0 Patch Notes
++# Model Relay 0.4.1 Patch Notes
+ 
+-基线：`model-relay-v2_0.3.1`  
+-设计依据：`Model_Relay_改造方案_文件上传机制增强补丁_V1.1_20260921`
++基线：`model-relay-v2_0.4.0`
++范围：生产日志与可观测性优化，**无 SQL migration**。
+ 
+-## 文件入站改造
++## 默认降噪
+ 
+-- 新增 `ProviderFileAdapter` 与 connection-scoped registry。
+-- Gemini：AIHubMix Gemini Native Proxy -> resumable Gemini Files API -> ACTIVE `fileUri`；默认不写 Supabase 原始输入文件。
+-- Kimi：官方 Files API；文本 `file-extract -> /content`，图片/视频 `image/video -> ms://<file_id>`。
+-- Material Registry 与输入 payload 存储解耦；`material_id` 继续作为调用方稳定 ID。
+-- Supabase 原始输入文件存储改为 `FallbackObjectStorage`，只由 fallback/bridge/durability 策略触发。
+-- Kimi 抽取文本作为 Provider-derived artifact 保存，不等价于保存原始输入文件。
++- `httpx/httpcore/hpack` 默认 `WARNING`：不再出现 Worker 轮询 Supabase `claim_relay_job_v2` 的每次 `200 OK`。
++- `uvicorn.access` 默认关闭：health/status/result 的正常轮询不再占据主要日志。
++- 可用 `DEPENDENCY_HTTP_LOG_LEVEL=INFO` 临时恢复依赖 HTTP access log。
+ 
+-## 恢复与隔离
++## 请求生命周期日志
+ 
+-- `provider_material_bindings` 增加 `account_scope_hash`、`generation` 与 provider resource 字段。
+-- Request 首次 dispatch 前冻结 `material_binding_snapshot`。
+-- Key/account scope 变化不会复用旧 Provider file ID/URI；没有 fallback 时返回 `MATERIAL_REUPLOAD_REQUIRED`。
+-- provider upload attempt 增加独立审计记录，保留 phase/request-id/raw response/raw error/uncertain 状态。
++- `request_accepted`：Request 已持久化；带 request/session/job、sync/async、provider/connection/model/pool。
++- `job_claimed`：Worker 领取异步 Job；带 worker、lease_epoch、execution_pool。
++- `request_execution_started`、`material_bindings_frozen`、`provider_call_started`、`provider_call_completed`、`request_execution_committed`。
++- Provider 成功记录耗时、HTTP 状态、Provider request/response id、响应字节数。
+ 
+-## Error
++## 错误与流中断
+ 
+-- 继续沿用 0.3.1 原始 Error 规则。
+-- Gemini/Kimi Files API 非 2xx body、headers、request ID 与上传阶段完整记录；不使用 `UPSTREAM_*` 归一化，不复制 DSL 的 2K/4K 截断。
+-- 默认 `on_provider_unavailable` 只对连接/超时/408/425/5xx/processing-timeout 进入 fallback；429/业务 4xx 原样失败，避免隐式改变文件留存策略。
++- `provider_call_failed` / `provider_file_binding_failed` 输出 request/material 关联信息、failure_class、HTTP 状态、Provider request id、phase 和 traceback。
++- `upstream_stream_interrupted` 在已经拿到响应头但读取 body 中途断开时记录 `bytes_received/http_status/upstream_host/upstream_path`；URL query 不记录。
++- `request_executor_timeout` / `request_executor_failed` 记录最终执行层异常和 traceback。
++- `failure_class` 区分 client、upstream_rejected、upstream、upstream_timeout、upstream_transport、relay_validation、relay_configuration、relay。
+ 
+-## 数据库
++## 安全边界
+ 
+-从 0.3.1 升级只需要执行：
++- 结构化日志不打印请求/模型正文、不打印 Raw Error body。
++- Authorization、Token、API Key、Secret 字段统一脱敏。
++- 原始 Provider Error 的完整交付机制保持 0.3.1+ 行为不变。
++
++## 部署
++
++0.4.0 数据库无需变化。替换代码并同时重启 API 与 Worker 即可。
+ 
+-```text
+-sql/004_provider_native_file_ingress.sql
+-```
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/QUICKSTART.md /mnt/data/model-relay-v2_0.4.1/model-relay-v2/QUICKSTART.md
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/QUICKSTART.md	2026-09-21 04:16:52.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/QUICKSTART.md	2026-09-21 05:42:38.781219061 +0000
+@@ -1,4 +1,4 @@
+-# Model Relay 0.4.0 部署关键操作
++# Model Relay 0.4.1 部署关键操作
+ 
+ ## 1. 从 0.3.1 升级数据库
+ 
+@@ -150,7 +150,7 @@
+ 
+ ```text
+ GET /health
+-version = 0.4.0-provider-native-files
++version = 0.4.1-observability
+ ```
+ 
+ ## 8. 最少验收
+@@ -166,3 +166,57 @@
+ 2. Kimi PDF 经 `file-extract -> /content` 后参与模型请求；file_id 不直接作为文本上下文。
+ 3. Kimi image/video 请求使用 `ms://<file_id>`。
+ 4. 故意触发 Gemini/Kimi Files API 4xx/5xx，核对 raw error body/headers/phase 不截断。
++
++
++## 9. 0.4.1 日志配置
++
++0.4.1 **没有数据库 migration**。从 0.4.0 升级只需要重新部署 API/Worker。
++
++默认建议：
++
++```text
++LOG_LEVEL=INFO
++DEPENDENCY_HTTP_LOG_LEVEL=WARNING
++UVICORN_ACCESS_LOG=false
++```
++
++这样会隐藏 `httpx`/`httpcore` 的高频 Supabase REST/RPC 成功日志，例如 Worker 每 2 秒调用一次 `claim_relay_job_v2` 的 `HTTP/1.1 200 OK`，也不会让 Uvicorn 的 status/result 轮询 access log 淹没业务日志。
++
++Relay 自己保留以下关键事件：
++
++```text
++request_accepted
++job_claimed
++request_execution_started
++material_bindings_frozen
++provider_call_started
++provider_call_completed / provider_call_failed
++upstream_stream_interrupted
++request_execution_committed
++request_executor_failed / request_executor_timeout
++provider_file_binding_started / completed / failed
++material_provider_fallback_activated
++```
++
++关键事件均尽量带 `request_id/session_id/job_id`、`provider/connection_id/model`、`phase`、`duration_ms`、`http_status`、`failure_class` 与 Provider request id。异常事件使用 `exc_info` 输出堆栈。日志不会打印 Authorization/API Key/Token，也不会打印请求正文或原始错误 body。原始错误仍通过 Raw Error 通道读取。
++
++常见 `failure_class`：
++
++```text
++client                 # Relay API 4xx / 调用方参数或状态问题
++upstream_rejected      # Provider 返回 4xx
++upstream               # Provider 返回 5xx/处理失败
++upstream_timeout       # Provider/Files API 超时
++upstream_transport     # DNS/TLS/连接/流中断
++relay_validation       # Relay/Adapter 校验失败
++relay_configuration    # 连接未配置
++relay                  # Relay 内部异常
++```
++
++若临时需要观察底层 HTTP 调用，可把：
++
++```text
++DEPENDENCY_HTTP_LOG_LEVEL=INFO
++```
++
++调试结束后建议恢复 `WARNING`。
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/README.md /mnt/data/model-relay-v2_0.4.1/model-relay-v2/README.md
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/README.md	2026-09-21 04:16:52.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/README.md	2026-09-21 05:43:08.117945230 +0000
+@@ -1,6 +1,6 @@
+-# Model Relay 0.4.0 - Provider-native File Ingress
++# Model Relay 0.4.1 - Provider-native Files + Production Observability
+ 
+-本版本以 `model-relay-v2_0.3.1` 为基线，实现文件上传机制增强补丁 V1.1：
++本版本以 `model-relay-v2_0.4.0` 为直接基线；0.4.0 已实现文件上传机制增强补丁 V1.1，本版继续优化生产日志与可观测性：
+ 
+ ```text
+ Caller file / readable URL
+@@ -17,6 +17,18 @@
+         `--> Supabase input-file fallback (conditional only)
+ ```
+ 
++
++## 0.4.1 日志与可观测性优化
++
++- 默认把 `httpx/httpcore` 提升到 `WARNING`，不再打印 Supabase `claim_relay_job_v2`、Heartbeat 等高频成功访问日志。
++- 默认关闭 `uvicorn.access`，避免 health/status/result 轮询占满日志；Relay 自己记录业务生命周期事件。
++- Session Request 日志以 `request_id/session_id/job_id` 串联 API 接收、Worker claim、材料 binding、Provider dispatch、结果提交。
++- Provider 调用记录 connection/model/adapter、阶段、耗时、HTTP status、Provider request id 和响应字节数。
++- 错误明确标注 `failure_class`，区分客户端 4xx、Provider 拒绝、上游 5xx、超时/网络、Relay 校验/配置/内部错误。
++- Provider response stream 在读 body 过程中断开时输出 `upstream_stream_interrupted`，记录已接收字节、HTTP status、上游 path，并保留异常堆栈。
++- 日志不打印请求正文、Authorization/API Key/Token 或原始 Error body；完整原始 Error 继续使用 0.3.1+ Raw Error 通道。
++- **无数据库结构变化**；从 0.4.0 直接替换代码即可。
++
+ ## 0.4.0 核心变化
+ 
+ - **Gemini native-first**：`aihubmix_gemini_native` 连接直接使用 AIHubMix Gemini Native Proxy 的 resumable Files API。成功后记录 `file.name/file.uri` binding，原始输入文件默认不写 Supabase。
+@@ -42,6 +54,6 @@
+ 
+ ## 验证状态
+ 
+-本代码包已通过 Python `compileall`、API/Worker import smoke 与 38 项单元测试。单元测试覆盖 native 成功不写 input fallback、Provider 暂时失败 fallback、关闭 fallback 时失败、429 原始错误不隐式落盘、account scope 隔离、Kimi file-extract/image/video wire 语义，以及 0.3.1 的原始 Error 回归测试。
++本代码包会在打包前重新执行 Python `compileall`、API/Worker import smoke 与完整单元测试；结果见 `TEST_RESULTS_V2.txt`。单元测试覆盖 native 成功不写 input fallback、Provider 暂时失败 fallback、关闭 fallback 时失败、429 原始错误不隐式落盘、account scope 隔离、Kimi file-extract/image/video wire 语义，以及 0.3.1 的原始 Error 回归测试。
+ 
+ 真实上线前仍必须使用你的 AIHubMix Gemini Native Proxy endpoint、Kimi 官方 Key、Supabase 与目标模型做预发布集成验收；本代码包不会伪造“已对你的外部账号完成联调”。
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/TEST_RESULTS_V2.txt /mnt/data/model-relay-v2_0.4.1/model-relay-v2/TEST_RESULTS_V2.txt
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/TEST_RESULTS_V2.txt	2026-09-21 04:17:41.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/TEST_RESULTS_V2.txt	2026-09-21 05:45:51.133247982 +0000
+@@ -1,8 +1,8 @@
+-Model Relay 0.4.0 verification
+-==============================
++Model Relay 0.4.1 verification
++================================
+ 
+ $ python -m compileall -q app tests
+-compileall: OK
++PASS
+ 
+ $ python -m unittest discover -s tests -v
+ test_corpus_hash_ignores_volatile_signed_urls (test_fusion_contract.FusionContractTests.test_corpus_hash_ignores_volatile_signed_urls) ... ok
+@@ -12,13 +12,51 @@
+ test_fusion_provider_payload_forces_json_object_transport (test_fusion_contract.FusionContractTests.test_fusion_provider_payload_forces_json_object_transport) ... ok
+ test_global_adjudication_singleton_container_normalization (test_fusion_contract.FusionContractTests.test_global_adjudication_singleton_container_normalization) ... ok
+ test_normal_stage_still_requires_current_query (test_fusion_contract.FusionContractTests.test_normal_stage_still_requires_current_query) ... ok
++test_dependency_polling_loggers_are_suppressed_by_default (test_observability.ObservabilityTests.test_dependency_polling_loggers_are_suppressed_by_default) ... ok
++test_stream_interruption_is_logged_with_partial_byte_count (test_observability.ObservabilityTests.test_stream_interruption_is_logged_with_partial_byte_count) ... ok
++test_structured_event_redacts_secrets (test_observability.ObservabilityTests.test_structured_event_redacts_secrets) ... ok
+ test_binding_scope_mismatch_without_fallback_requires_reupload (test_provider_native_files.ProviderNativeFileTests.test_binding_scope_mismatch_without_fallback_requires_reupload) ... ok
+ test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct (test_provider_native_files.ProviderNativeFileTests.test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct) ... ok
+ test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes (test_provider_native_files.ProviderNativeFileTests.test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes) ... ok
+-test_native_success_does_not_store_input_file_in_fallback (test_provider_native_files.ProviderNativeFileTests.test_native_success_does_not_store_input_file_in_fallback) ... ok
+-test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback (test_provider_native_files.ProviderNativeFileTests.test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback) ... ok
+-test_provider_failure_does_not_silently_change_retention_when_fallback_disabled (test_provider_native_files.ProviderNativeFileTests.test_provider_failure_does_not_silently_change_retention_when_fallback_disabled) ... ok
+-test_provider_temporary_failure_uses_fallback_only_when_policy_allows (test_provider_native_files.ProviderNativeFileTests.test_provider_temporary_failure_uses_fallback_only_when_policy_allows) ... ok
++test_native_success_does_not_store_input_file_in_fallback (test_provider_native_files.ProviderNativeFileTests.test_native_success_does_not_store_input_file_in_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","filename":"report.pdf","content_type":"application/pdf","size_bytes":21,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
++2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":21,"content_type":"application/pdf"}
++2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_ready","duration_ms":0}
++2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","status":"ready_provider","durability":"provider_bound","fallback_stored":false,"duration_ms":0}
++ok
++test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback (test_provider_native_files.ProviderNativeFileTests.test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","filename":"report.pdf","content_type":"application/pdf","size_bytes":26,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
++2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":26,"content_type":"application/pdf"}
++2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_upload","duration_ms":0,"failure_class":"upstream_rejected","upstream_http_status":429,"stream_interrupted":false,"exception_type":"ProviderHTTPError"}
++Traceback (most recent call last):
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
++    result = await adapter.prepare(material_file, generation=generation)
++             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
++    raise self.failure
++app.providers.base.ProviderHTTPError: Upstream provider request failed
++ok
++test_provider_failure_does_not_silently_change_retention_when_fallback_disabled (test_provider_native_files.ProviderNativeFileTests.test_provider_failure_does_not_silently_change_retention_when_fallback_disabled) ... 2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","filename":"report.pdf","content_type":"application/pdf","size_bytes":12,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"never","source_kind":"inline"}
++2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":12,"content_type":"application/pdf"}
++2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
++Traceback (most recent call last):
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
++    result = await adapter.prepare(material_file, generation=generation)
++             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
++    raise self.failure
++app.providers.base.ProviderRequestError: provider processing timeout
++ok
++test_provider_temporary_failure_uses_fallback_only_when_policy_allows (test_provider_native_files.ProviderNativeFileTests.test_provider_temporary_failure_uses_fallback_only_when_policy_allows) ... 2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","filename":"report.pdf","content_type":"application/pdf","size_bytes":11,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
++2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":11,"content_type":"application/pdf"}
++2026-09-21 05:45:47,520 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
++Traceback (most recent call last):
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
++    result = await adapter.prepare(material_file, generation=generation)
++             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
++    raise self.failure
++app.providers.base.ProviderRequestError: provider processing timeout
++2026-09-21 05:45:47,520 WARNING model-relay-materials {"event":"material_provider_fallback_activated","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","failure_class":"upstream_timeout","retention_policy":"provider-unavailable","duration_ms":0}
++ok
+ test_provider_execute_sends_json_schema_to_responses (test_structured_output.ProviderStructuredOutputIntegrationTests.test_provider_execute_sends_json_schema_to_responses) ... ok
+ test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation (test_structured_output.StructuredOutputExecutionTests.test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation) ... ok
+ test_caller_schema_disables_legacy_global_output_contract_in_prompt (test_structured_output.StructuredOutputTests.test_caller_schema_disables_legacy_global_output_contract_in_prompt) ... ok
+@@ -45,19 +83,12 @@
+ test_session_request_allows_sync_without_job_semantics (test_v2_core.RelayV2CoreTests.test_session_request_allows_sync_without_job_semantics) ... ok
+ 
+ ----------------------------------------------------------------------
+-Ran 38 tests in 0.022s
++Ran 41 tests in 0.023s
+ 
+ OK
+ 
+ $ API import smoke
+-api_import_ok
+-version: 0.4.0-provider-native-files
++PASS version=0.4.1-observability
+ 
+ $ Worker import smoke
+-worker_import_ok
+-
+-$ Gemini native config smoke
+-gemini_native_config_ok
+-
+-$ Kimi official config smoke
+-kimi_official_config_ok
++PASS
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/api.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/api.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/api.py	2026-09-21 04:09:04.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/api.py	2026-09-21 05:43:30.887132559 +0000
+@@ -6,7 +6,7 @@
+ import hashlib
+ from uuid import UUID, uuid4
+ 
+-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response, status
++from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+ 
+ from .config import get_settings
+ from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
+@@ -31,10 +31,11 @@
+ from .core.execution_runtime import SharedExecutionRuntime
+ from .core.raw_error import RawErrorRecorder
+ from .execution.inline_executor import InlineExecutor
++from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, now_ms, status_failure_class
+ 
+ 
+ settings = get_settings()
+-logging.basicConfig(level=settings.log_level)
++configure_logging(settings)
+ logger = logging.getLogger("model-relay-api")
+ 
+ backend: SupabaseBackend | None = None
+@@ -98,17 +99,61 @@
+     app.state.shared_runtime = runtime
+     app.state.raw_error_recorder = raw_errors
+     app.state.inline_executor = inline_executor
++    log_info(
++        logger,
++        "api_started",
++        version="0.4.1-observability",
++        deployment_id=settings.deployment_id,
++        execution_pool=settings.execution_pool,
++        enabled_connections=sorted(settings.enabled_connection_set),
++        dependency_http_log_level=settings.dependency_http_log_level,
++        uvicorn_access_log=settings.uvicorn_access_log,
++    )
+     try:
+         yield
+     finally:
++        log_info(logger, "api_stopping", deployment_id=settings.deployment_id)
+         await backend.close()
+ 
+ 
+-app = FastAPI(title="Model Relay API", version="0.4.0-provider-native-files", lifespan=lifespan)
++app = FastAPI(title="Model Relay API", version="0.4.1-observability", lifespan=lifespan)
+ app.include_router(dify_relay_gateway_router)
+ app.include_router(relay_v2_router)
+ 
+ 
++@app.middleware("http")
++async def relay_http_logging(request: Request, call_next):
++    start_ms = now_ms()
++    try:
++        response = await call_next(request)
++    except Exception as exc:
++        log_error(
++            logger,
++            "api_request_unhandled",
++            exc_info=True,
++            method=request.method,
++            path=request.url.path,
++            duration_ms=elapsed_ms(start_ms),
++            failure_class="relay",
++            exception_type=type(exc).__name__,
++        )
++        raise
++
++    # Do not turn health checks or status/result polling into the dominant log
++    # volume. Mutation requests and all HTTP failures remain visible.
++    if request.method not in {"GET", "HEAD"} or response.status_code >= 400:
++        log_info(
++            logger,
++            "api_request_complete",
++            method=request.method,
++            path=request.url.path,
++            http_status=response.status_code,
++            duration_ms=elapsed_ms(start_ms),
++            failure_class=status_failure_class(response.status_code),
++        )
++    return response
++
++
+ def _repo() -> RelayV2Repository:
+     assert repo is not None
+     return repo
+@@ -148,7 +193,7 @@
+     return {
+         "ok": True,
+         "service": "relay-api",
+-        "version": "0.4.0-provider-native-files",
++        "version": "0.4.1-observability",
+         "deployment_id": settings.deployment_id,
+         "execution_pool": settings.execution_pool,
+         "enabled_connections": sorted(settings.enabled_connection_set),
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/api_v2/router.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/api_v2/router.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/api_v2/router.py	2026-09-21 04:09:31.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/api_v2/router.py	2026-09-21 05:45:29.130768117 +0000
+@@ -3,6 +3,7 @@
+ import base64
+ import hashlib
+ import json
++import logging
+ from datetime import datetime
+ from typing import Any
+ from uuid import UUID, uuid4
+@@ -13,6 +14,7 @@
+ from ..core.idempotency import request_identity, stable_hash
+ from ..core.raw_error import raw_body_inline_fields
+ from ..materials.ingress import MaterialIngressError
++from ..observability import error as log_error, info as log_info
+ from ..persistence.object_storage import ObjectLocation
+ from ..security import require_owner_headers, require_relay_auth
+ from ..storage_paths import request_object_path_v2
+@@ -28,6 +30,8 @@
+ )
+ 
+ 
++logger = logging.getLogger("model-relay-api.v2")
++
+ router = APIRouter(prefix="/v2", tags=["relay-v2"], dependencies=[Depends(require_relay_auth)])
+ 
+ 
+@@ -277,7 +281,26 @@
+     except MaterialIngressError as exc:
+         raise HTTPException(status_code=502, detail=exc.detail) from exc
+     except Exception as exc:
++        log_error(
++            logger,
++            "material_api_failed",
++            exc_info=True,
++            target_connection_id=target_connection_id if "target_connection_id" in locals() else None,
++            filename=filename if "filename" in locals() else None,
++            failure_class="relay",
++            exception_type=type(exc).__name__,
++        )
+         raise HTTPException(status_code=502, detail=str(exc)) from exc
++    log_info(
++        logger,
++        "material_api_accepted",
++        material_id=row.get("id"),
++        target_connection_id=row.get("target_connection_id"),
++        status=row.get("status"),
++        durability=row.get("durability"),
++        size_bytes=row.get("actual_size") or row.get("size_bytes"),
++        content_type=row.get("content_type"),
++    )
+     return await _material_response(request, row)
+ 
+ 
+@@ -308,6 +331,15 @@
+     if existing:
+         if existing.get("session_hash") != session_hash:
+             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Session")
++        log_info(
++            logger,
++            "session_idempotent_reuse",
++            session_id=existing.get("id"),
++            provider=existing.get("provider"),
++            connection_id=existing.get("connection_id"),
++            model=existing.get("model"),
++            execution_pool=existing.get("execution_pool"),
++        )
+         return _session_response(existing)
+ 
+     for material_id in body.material_ids:
+@@ -358,6 +390,17 @@
+             "expires_at": repo.default_session_expiry().isoformat(),
+         }
+     )
++    log_info(
++        logger,
++        "session_created",
++        session_id=row.get("id"),
++        provider=row.get("provider"),
++        connection_id=row.get("connection_id"),
++        model=row.get("model"),
++        context_policy=row.get("context_policy"),
++        execution_pool=row.get("execution_pool"),
++        material_count=len(row.get("material_manifest") or []),
++    )
+     return _session_response(row)
+ 
+ 
+@@ -447,6 +490,17 @@
+     if existing:
+         if existing.get("request_hash") != req_hash:
+             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
++        log_info(
++            logger,
++            "request_idempotent_reuse",
++            request_id=existing.get("id"),
++            session_id=existing.get("session_id"),
++            job_id=existing.get("job_id"),
++            execution_mode=existing.get("execution_mode"),
++            status=existing.get("status"),
++            connection_id=existing.get("connection_id"),
++            model=existing.get("model"),
++        )
+         return await _request_envelope_hydrated(request, existing)
+ 
+     request_id = uuid4()
+@@ -497,8 +551,40 @@
+             raise HTTPException(status_code=409, detail="SESSION_BUSY") from exc
+         if "IDEMPOTENCY_CONFLICT" in text:
+             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
++        log_error(
++            logger,
++            "request_accept_failed",
++            exc_info=True,
++            request_id=str(request_id),
++            session_id=str(session_id),
++            job_id=job_id,
++            execution_mode=body.execution.mode,
++            provider=provider,
++            connection_id=connection_id,
++            model=model,
++            failure_class="dependency",
++            dependency="supabase",
++            http_status=exc.status_code,
++            exception_type=type(exc).__name__,
++        )
+         raise HTTPException(status_code=502, detail="Failed to accept Relay Request") from exc
+ 
++    log_info(
++        logger,
++        "request_accepted",
++        request_id=row.get("id"),
++        session_id=row.get("session_id"),
++        job_id=row.get("job_id"),
++        execution_mode=row.get("execution_mode"),
++        status=row.get("status"),
++        provider=provider,
++        connection_id=connection_id,
++        model=model,
++        execution_pool=row.get("execution_pool"),
++        material_count=len(effective_material_ids),
++        business_stage=(body.metadata or {}).get("stage") or (body.metadata or {}).get("purpose") or (body.input.get("stage") if isinstance(body.input, dict) else None),
++    )
++
+     if body.execution.mode == "sync":
+         row = await _inline(request).execute(row)
+         if not row:
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/compatibility/legacy_worker.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/compatibility/legacy_worker.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/compatibility/legacy_worker.py	2026-09-18 15:26:06.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/compatibility/legacy_worker.py	2026-09-21 05:38:47.545642033 +0000
+@@ -9,6 +9,7 @@
+ from uuid import uuid4
+ 
+ from ..config import get_settings
++from ..observability import configure_logging
+ from ..fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
+ from ..providers.base import ProviderHTTPError, ProviderRequestError
+ from ..providers.openai_compatible import OpenAICompatibleResponsesProvider
+@@ -20,7 +21,7 @@
+ 
+ 
+ settings = get_settings()
+-logging.basicConfig(level=settings.log_level)
++configure_logging(settings)
+ logger = logging.getLogger("model-relay-worker")
+ 
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/config.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/config.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/config.py	2026-09-21 04:11:14.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/config.py	2026-09-21 05:38:18.394755895 +0000
+@@ -15,6 +15,8 @@
+ 
+     app_name: str = "model-relay"
+     log_level: str = "INFO"
++    dependency_http_log_level: str = "WARNING"
++    uvicorn_access_log: bool = False
+ 
+     relay_api_token: SecretStr
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/core/execution_runtime.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/core/execution_runtime.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/core/execution_runtime.py	2026-09-21 04:07:59.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/core/execution_runtime.py	2026-09-21 05:42:59.916826696 +0000
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import json
++import logging
+ from typing import Any
+ from uuid import uuid4
+ 
+@@ -10,12 +11,16 @@
+ from ..persistence.object_storage import ObjectLocation, StorageRegistry
+ from ..providers.registry import ProviderRegistry
+ from ..providers.v2_base import V2ExecutionContext
++from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
+ from ..storage_paths import request_object_path_v2, session_history_request_path
+ from ..structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
+ from ..utils import json_bytes, truncate_utf8, utcnow
+ from ..v2_repository import RelayV2Repository
+ 
+ 
++logger = logging.getLogger("model-relay-runtime")
++
++
+ class SessionConflictError(RuntimeError):
+     pass
+ 
+@@ -46,6 +51,19 @@
+         lease_owner: str | None = None,
+         lease_epoch: int | None = None,
+     ) -> dict[str, Any]:
++        execution_started_ms = now_ms()
++        request_id = str(request_row["id"])
++        session_id = str(request_row["session_id"])
++        log_info(
++            logger,
++            "request_execution_started",
++            request_id=request_id,
++            session_id=session_id,
++            execution_mode=request_row.get("execution_mode"),
++            job_id=request_row.get("job_id"),
++            lease_owner=lease_owner,
++            lease_epoch=lease_epoch,
++        )
+         session = await self.repo.get_session(
+             request_row["session_id"],
+             tenant_id=request_row["tenant_id"],
+@@ -79,6 +97,7 @@
+         existing_binding_snapshot = request_row.get("material_binding_snapshot")
+         if not isinstance(existing_binding_snapshot, list):
+             existing_binding_snapshot = None
++        binding_started_ms = now_ms()
+         material_bindings = await self.bindings.freeze_for_request(
+             material_ids=material_ids,
+             connection_id=str(snapshot["connection_id"]),
+@@ -86,6 +105,16 @@
+             conversation_hash=request_row["conversation_hash"],
+             existing_snapshot=existing_binding_snapshot,
+         )
++        log_info(
++            logger,
++            "material_bindings_frozen",
++            request_id=request_id,
++            session_id=session_id,
++            connection_id=snapshot.get("connection_id"),
++            material_count=len(material_ids),
++            reused_snapshot=existing_binding_snapshot is not None,
++            duration_ms=elapsed_ms(binding_started_ms),
++        )
+         if existing_binding_snapshot is None:
+             await self.repo.update_request(
+                 request_row["id"],
+@@ -100,16 +129,73 @@
+                 "started_at": request_row.get("started_at") or utcnow().isoformat(),
+             },
+         )
+-        result = await adapter.execute(
+-            V2ExecutionContext(
+-                snapshot=snapshot,
+-                session=session,
+-                history=history,
+-                material_ids=material_ids,
+-                material_bindings=material_bindings,
+-                tenant_id=request_row["tenant_id"],
+-                conversation_hash=request_row["conversation_hash"],
++        provider_started_ms = now_ms()
++        metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
++        input_value = snapshot.get("input") if isinstance(snapshot.get("input"), dict) else {}
++        business_stage = metadata.get("stage") or metadata.get("purpose") or input_value.get("stage")
++        log_info(
++            logger,
++            "provider_call_started",
++            request_id=request_id,
++            session_id=session_id,
++            provider=snapshot.get("provider"),
++            connection_id=snapshot.get("connection_id"),
++            model=snapshot.get("model"),
++            adapter_version=getattr(adapter, "adapter_version", None),
++            phase="model_inference",
++            business_stage=business_stage,
++            material_count=len(material_ids),
++        )
++        try:
++            result = await adapter.execute(
++                V2ExecutionContext(
++                    snapshot=snapshot,
++                    session=session,
++                    history=history,
++                    material_ids=material_ids,
++                    material_bindings=material_bindings,
++                    tenant_id=request_row["tenant_id"],
++                    conversation_hash=request_row["conversation_hash"],
++                    request_id=request_id,
++                    session_id=session_id,
++                )
+             )
++        except Exception as exc:
++            log_error(
++                logger,
++                "provider_call_failed",
++                exc_info=True,
++                request_id=request_id,
++                session_id=session_id,
++                provider=snapshot.get("provider"),
++                connection_id=snapshot.get("connection_id"),
++                model=snapshot.get("model"),
++                adapter_version=getattr(adapter, "adapter_version", None),
++                phase=getattr(exc, "phase", None) or "model_inference",
++                duration_ms=elapsed_ms(provider_started_ms),
++                failure_class=exception_failure_class(exc),
++                upstream_http_status=getattr(exc, "status_code", None),
++                upstream_request_id=getattr(exc, "request_id", None),
++                exception_type=type(exc).__name__,
++                stream_interrupted=getattr(exc, "stream_interrupted", False),
++                bytes_received=getattr(exc, "bytes_received", None),
++            )
++            raise
++        log_info(
++            logger,
++            "provider_call_completed",
++            request_id=request_id,
++            session_id=session_id,
++            provider=snapshot.get("provider"),
++            connection_id=snapshot.get("connection_id"),
++            model=snapshot.get("model"),
++            adapter_version=getattr(adapter, "adapter_version", None),
++            phase="model_inference",
++            duration_ms=elapsed_ms(provider_started_ms),
++            http_status=result.http_status,
++            upstream_request_id=result.provider_request_id,
++            provider_response_id=result.response_id,
++            response_bytes=len(result.raw_bytes),
+         )
+ 
+         raw_object_id = await self._store_object(
+@@ -229,6 +315,18 @@
+             raise SessionConflictError(
+                 "Request result was persisted but the atomic Session commit was rejected"
+             )
++        log_info(
++            logger,
++            "request_execution_committed",
++            request_id=request_id,
++            session_id=session_id,
++            provider=snapshot.get("provider"),
++            connection_id=snapshot.get("connection_id"),
++            model=snapshot.get("model"),
++            history_version=int(request_row["expected_history_version"]) + (1 if history_object_id else 0),
++            duration_ms=elapsed_ms(execution_started_ms),
++            status="succeeded",
++        )
+         return compact_result
+ 
+     async def _load_json_object(
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/execution/inline_executor.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/execution/inline_executor.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/execution/inline_executor.py	2026-09-18 15:21:36.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/execution/inline_executor.py	2026-09-21 05:43:41.291668702 +0000
+@@ -1,14 +1,19 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import logging
+ 
+ from ..config import Settings
+ from ..core.execution_runtime import SharedExecutionRuntime
+ from ..core.raw_error import RawErrorRecorder
++from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
+ from ..v2_repository import RelayV2Repository
+ from .errors import error_source
+ 
+ 
++logger = logging.getLogger("model-relay-execution")
++
++
+ class InlineExecutor:
+     def __init__(
+         self,
+@@ -23,12 +28,35 @@
+         self.settings = settings
+ 
+     async def execute(self, request_row: dict):
++        started_ms = now_ms()
++        request_id = request_row.get("id")
++        session_id = request_row.get("session_id")
++        log_info(
++            logger,
++            "request_executor_started",
++            request_id=request_id,
++            session_id=session_id,
++            execution_mode="sync",
++            deadline_seconds=self.settings.sync_request_deadline_seconds,
++        )
+         try:
+             await asyncio.wait_for(
+                 self.runtime.execute(request_row),
+                 timeout=self.settings.sync_request_deadline_seconds,
+             )
+         except asyncio.TimeoutError as exc:
++            log_error(
++                logger,
++                "request_executor_timeout",
++                exc_info=True,
++                request_id=request_id,
++                session_id=session_id,
++                execution_mode="sync",
++                duration_ms=elapsed_ms(started_ms),
++                failure_class="upstream_timeout",
++                exception_type=type(exc).__name__,
++                provider_dispatch_state=request_row.get("provider_dispatch_state"),
++            )
+             err = await self.errors.record(
+                 exc=exc,
+                 source="relay_timeout",
+@@ -47,6 +75,21 @@
+                 release_session=False,
+             )
+         except Exception as exc:
++            log_error(
++                logger,
++                "request_executor_failed",
++                exc_info=(error_source(exc) != "provider"),
++                request_id=request_id,
++                session_id=session_id,
++                execution_mode="sync",
++                duration_ms=elapsed_ms(started_ms),
++                failure_class=exception_failure_class(exc),
++                error_source=error_source(exc),
++                exception_type=type(exc).__name__,
++                upstream_http_status=getattr(exc, "status_code", None),
++                upstream_request_id=getattr(exc, "request_id", None),
++                upstream_phase=getattr(exc, "phase", None),
++            )
+             err = await self.errors.record(
+                 exc=exc,
+                 source=error_source(exc),
+@@ -62,4 +105,14 @@
+                 status="failed",
+                 release_session=True,
+             )
+-        return await self.repo.get_request(request_row["id"])
++        row = await self.repo.get_request(request_row["id"])
++        log_info(
++            logger,
++            "request_executor_finished",
++            request_id=request_id,
++            session_id=session_id,
++            execution_mode="sync",
++            duration_ms=elapsed_ms(started_ms),
++            status=row.get("status") if row else None,
++        )
++        return row
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/execution/queue_executor.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/execution/queue_executor.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/execution/queue_executor.py	2026-09-18 15:24:50.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/execution/queue_executor.py	2026-09-21 05:43:41.291804246 +0000
+@@ -1,14 +1,19 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import logging
+ 
+ from ..config import Settings
+ from ..core.execution_runtime import SharedExecutionRuntime
+ from ..core.raw_error import RawErrorRecorder
++from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
+ from ..v2_repository import RelayV2Repository
+ from .errors import error_source
+ 
+ 
++logger = logging.getLogger("model-relay-execution")
++
++
+ class QueueExecutor:
+     def __init__(
+         self,
+@@ -29,7 +34,18 @@
+         request_row = await self.repo.get_request(request_id)
+         if not request_row or request_row.get("status") == "cancelled":
+             return
++        started_ms = now_ms()
+         lease_epoch = int(job.get("lease_epoch") or 0)
++        log_info(
++            logger,
++            "request_executor_started",
++            request_id=request_id,
++            session_id=request_row.get("session_id"),
++            job_id=job.get("id"),
++            execution_mode="async",
++            worker_id=worker_id,
++            lease_epoch=lease_epoch,
++        )
+         await self.repo.update_request(request_id, {"status": "running"})
+         try:
+             if request_row.get("provider_dispatch_state") == "result_stored":
+@@ -47,6 +63,14 @@
+                 )
+                 if not ok:
+                     raise RuntimeError("Stored provider result could not be atomically committed")
++                log_info(
++                    logger,
++                    "request_commit_recovered",
++                    request_id=request_id,
++                    session_id=request_row.get("session_id"),
++                    job_id=job.get("id"),
++                    duration_ms=elapsed_ms(started_ms),
++                )
+                 return
+             await asyncio.wait_for(
+                 self.runtime.execute(
+@@ -56,7 +80,29 @@
+                 ),
+                 timeout=self.settings.worker_max_runtime_seconds,
+             )
++            log_info(
++                logger,
++                "request_executor_finished",
++                request_id=request_id,
++                session_id=request_row.get("session_id"),
++                job_id=job.get("id"),
++                execution_mode="async",
++                status="succeeded",
++                duration_ms=elapsed_ms(started_ms),
++            )
+         except asyncio.TimeoutError as exc:
++            log_error(
++                logger,
++                "request_executor_timeout",
++                exc_info=True,
++                request_id=request_id,
++                session_id=request_row.get("session_id"),
++                job_id=job.get("id"),
++                execution_mode="async",
++                duration_ms=elapsed_ms(started_ms),
++                failure_class="upstream_timeout",
++                exception_type=type(exc).__name__,
++            )
+             err = await self.errors.record(
+                 exc=exc,
+                 source="relay_timeout",
+@@ -75,6 +121,22 @@
+                 lease_epoch=lease_epoch,
+             )
+         except Exception as exc:
++            log_error(
++                logger,
++                "request_executor_failed",
++                exc_info=(error_source(exc) != "provider"),
++                request_id=request_id,
++                session_id=request_row.get("session_id"),
++                job_id=job.get("id"),
++                execution_mode="async",
++                duration_ms=elapsed_ms(started_ms),
++                failure_class=exception_failure_class(exc),
++                error_source=error_source(exc),
++                exception_type=type(exc).__name__,
++                upstream_http_status=getattr(exc, "status_code", None),
++                upstream_request_id=getattr(exc, "request_id", None),
++                upstream_phase=getattr(exc, "phase", None),
++            )
+             err = await self.errors.record(
+                 exc=exc,
+                 source=error_source(exc),
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/ingress.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/ingress.py	2026-09-21 04:15:14.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py	2026-09-21 05:40:48.468525446 +0000
+@@ -2,6 +2,7 @@
+ 
+ import base64
+ import hashlib
++import logging
+ from typing import Any
+ from urllib.parse import urlsplit, urlunsplit
+ from uuid import uuid4
+@@ -13,6 +14,7 @@
+ from ..providers.base import ProviderHTTPError, ProviderRequestError
+ from ..storage_paths import relay_object_path
+ from ..utils import utcnow
++from ..observability import elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, exception_failure_class
+ from ..v2_repository import RelayV2Repository
+ from .fallback_storage import FallbackObjectStorage
+ from .provider_files.base import MaterialFile, ProviderFileResult
+@@ -20,6 +22,9 @@
+ from .safe_fetch import fetch_bytes
+ 
+ 
++logger = logging.getLogger("model-relay-materials")
++
++
+ class MaterialIngressError(RuntimeError):
+     def __init__(self, detail: dict[str, Any]) -> None:
+         super().__init__(str(detail.get("message") or detail.get("code") or "material ingress failed"))
+@@ -67,6 +72,13 @@
+     ) -> dict[str, Any]:
+         existing = await self.repo.find_material_by_idempotency(tenant_id, idempotency_key)
+         if existing:
++            log_info(
++                logger,
++                "material_ingress_idempotent_reuse",
++                material_id=existing.get("id"),
++                target_connection_id=existing.get("target_connection_id"),
++                status=existing.get("status"),
++            )
+             return existing
+ 
+         durability_policy = (durability_policy or self.settings.material_default_durability_policy).lower()
+@@ -99,6 +111,7 @@
+         detected_content_type = (detected_content_type or "application/octet-stream").split(";", 1)[0].strip()
+         digest = hashlib.sha256(data).hexdigest()
+         material_id = f"mat_{uuid4().hex}"
++        ingress_started_ms = now_ms()
+         row = await self.repo.create_material(
+             {
+                 "id": material_id,
+@@ -129,6 +142,19 @@
+             }
+         )
+ 
++        log_info(
++            logger,
++            "material_ingress_started",
++            material_id=material_id,
++            filename=filename,
++            content_type=detected_content_type,
++            size_bytes=len(data),
++            target_connection_id=target_connection_id,
++            durability_policy=durability_policy,
++            fallback_policy=fallback_policy,
++            source_kind=source_kind,
++        )
++
+         adapter = self.file_adapters.maybe_get(target_connection_id)
+         fallback_row: dict[str, Any] | None = None
+ 
+@@ -140,6 +166,15 @@
+                 data=data,
+                 retention_policy="bridge" if target_connection_id else "legacy-default",
+             )
++            log_info(
++                logger,
++                "material_fallback_stored",
++                material_id=material_id,
++                target_connection_id=target_connection_id,
++                storage_id=fallback_row.get("storage_id"),
++                retention_policy="bridge" if target_connection_id else "legacy-default",
++                duration_ms=elapsed_ms(ingress_started_ms),
++            )
+             return await self.repo.update_material(
+                 material_id,
+                 {
+@@ -175,6 +210,18 @@
+             sha256=digest,
+             data=data,
+         )
++        binding_started_ms = now_ms()
++        log_info(
++            logger,
++            "provider_file_binding_started",
++            material_id=material_id,
++            provider=adapter.provider,
++            connection_id=target_connection_id,
++            adapter_version=adapter.adapter_version,
++            generation=generation,
++            size_bytes=len(data),
++            content_type=detected_content_type,
++        )
+         try:
+             result = await adapter.prepare(material_file, generation=generation)
+             binding = dict(result.binding)
+@@ -199,7 +246,38 @@
+                     "completed_at": utcnow().isoformat(),
+                 },
+             )
++            log_info(
++                logger,
++                "provider_file_binding_completed",
++                material_id=material_id,
++                provider=adapter.provider,
++                connection_id=target_connection_id,
++                adapter_version=adapter.adapter_version,
++                generation=generation,
++                phase=result.phase,
++                http_status=result.http_status,
++                upstream_request_id=result.request_id,
++                duration_ms=elapsed_ms(binding_started_ms),
++            )
+         except Exception as exc:
++            log_error(
++                logger,
++                "provider_file_binding_failed",
++                exc_info=True,
++                material_id=material_id,
++                provider=adapter.provider,
++                connection_id=target_connection_id,
++                adapter_version=adapter.adapter_version,
++                generation=generation,
++                phase=getattr(exc, "phase", None),
++                duration_ms=elapsed_ms(binding_started_ms),
++                failure_class=exception_failure_class(exc),
++                upstream_http_status=getattr(exc, "status_code", None),
++                upstream_request_id=getattr(exc, "request_id", None),
++                stream_interrupted=getattr(exc, "stream_interrupted", False),
++                bytes_received=getattr(exc, "bytes_received", None),
++                exception_type=type(exc).__name__,
++            )
+             error_ref = None
+             raw_error = self._error_detail(exc)
+             if isinstance(exc, ProviderHTTPError):
+@@ -227,6 +305,17 @@
+                     data=data,
+                     retention_policy="provider-unavailable",
+                 )
++                log_warning(
++                    logger,
++                    "material_provider_fallback_activated",
++                    material_id=material_id,
++                    provider=adapter.provider,
++                    connection_id=target_connection_id,
++                    failure_class=exception_failure_class(exc),
++                    upstream_http_status=getattr(exc, "status_code", None),
++                    retention_policy="provider-unavailable",
++                    duration_ms=elapsed_ms(ingress_started_ms),
++                )
+                 return await self.repo.update_material(
+                     material_id,
+                     {
+@@ -249,6 +338,17 @@
+                 retention_policy="durability" if durability_policy == "relay_backed" else "policy-always",
+             )
+ 
++        log_info(
++            logger,
++            "material_ingress_completed",
++            material_id=material_id,
++            provider=adapter.provider,
++            connection_id=target_connection_id,
++            status="ready_provider",
++            durability="relay_backed" if fallback_row else "provider_bound",
++            fallback_stored=bool(fallback_row),
++            duration_ms=elapsed_ms(ingress_started_ms),
++        )
+         return await self.repo.update_material(
+             material_id,
+             {
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/base.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/base.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/base.py	2026-09-21 04:10:05.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/base.py	2026-09-21 05:40:20.317443662 +0000
+@@ -24,6 +24,7 @@
+     request_id: str | None = None
+     phase: str = "ready"
+     derived_object_id: str | None = None
++    http_status: int | None = None
+ 
+ 
+ class ProviderFileAdapter(Protocol):
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/gemini_aihubmix.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/gemini_aihubmix.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/gemini_aihubmix.py	2026-09-21 04:06:22.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/gemini_aihubmix.py	2026-09-21 05:41:21.070884698 +0000
+@@ -54,7 +54,7 @@
+                 headers=headers,
+                 json={"file": {"display_name": material.filename}},
+             ) as response:
+-                start_raw = await read_raw_response(response)
++                start_raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_start"})
+                 start_status = response.status_code
+                 start_headers = dict(response.headers)
+             if not 200 <= start_status < 300:
+@@ -89,7 +89,7 @@
+             async with client.stream(
+                 "POST", upload_url, headers=upload_headers, content=material.data
+             ) as response:
+-                final_raw = await read_raw_response(response)
++                final_raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_finalize"})
+                 final_status = response.status_code
+                 final_headers = dict(response.headers)
+             if not 200 <= final_status < 300:
+@@ -145,6 +145,7 @@
+             raw_response_content_type=response_headers.get("content-type") if response_headers else "application/json",
+             request_id=self._request_id(response_headers or {}),
+             phase="gemini_files_active",
++            http_status=final_status,
+         )
+ 
+     async def probe(self, binding: dict[str, Any]) -> dict[str, Any]:
+@@ -156,7 +157,7 @@
+         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             async with client.stream("GET", url, headers={"x-goog-api-key": key, "Accept-Encoding": "identity"}) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_probe"})
+                 headers = dict(response.headers)
+                 status = response.status_code
+         if not 200 <= status < 300:
+@@ -213,7 +214,7 @@
+             await asyncio.sleep(self.settings.gemini_file_poll_seconds)
+             url = f"{self.base_url}/v1beta/{file_name.lstrip('/')}"
+             async with client.stream("GET", url, headers={"x-goog-api-key": key, "Accept-Encoding": "identity"}) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "gemini_files_probe"})
+                 status = response.status_code
+                 headers = dict(response.headers)
+             if not 200 <= status < 300:
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/kimi_official.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/kimi_official.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/materials/provider_files/kimi_official.py	2026-09-21 04:11:25.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/provider_files/kimi_official.py	2026-09-21 05:41:21.071045259 +0000
+@@ -37,7 +37,7 @@
+ 
+     async def prepare(self, material: MaterialFile, *, generation: int) -> ProviderFileResult:
+         purpose, representation = self._purpose(material.content_type)
+-        upload_raw, upload_headers, payload = await self._upload(material, purpose)
++        upload_raw, upload_headers, upload_status, payload = await self._upload(material, purpose)
+         file_id = str(payload.get("id") or payload.get("file_id") or "")
+         if not file_id:
+             raise ProviderRequestError("PROVIDER_FILE_BINDING", "Kimi Files API returned no file id")
+@@ -53,7 +53,7 @@
+         external_uri = None
+         derived_object_id = None
+         if purpose == "file-extract":
+-            extracted, content_type, content_raw, content_headers = await self._read_content(file_id)
++            extracted, content_type, content_raw, content_headers, content_status = await self._read_content(file_id)
+             derived_object_id = await self._store_extraction(material, extracted, content_type)
+             metadata["extraction_object_id"] = derived_object_id
+             metadata["extraction_content_type"] = content_type
+@@ -93,6 +93,7 @@
+             request_id=request_id,
+             phase=f"kimi_files_{purpose}_ready",
+             derived_object_id=derived_object_id,
++            http_status=content_status if purpose == "file-extract" else upload_status,
+         )
+ 
+     async def probe(self, binding: dict[str, Any]) -> dict[str, Any]:
+@@ -103,7 +104,7 @@
+         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_probe"})
+                 status = response.status_code
+                 headers = dict(response.headers)
+         if status in {404, 410}:
+@@ -141,7 +142,7 @@
+ 
+     async def _upload(
+         self, material: MaterialFile, purpose: str
+-    ) -> tuple[bytes, dict[str, str], dict[str, Any]]:
++    ) -> tuple[bytes, dict[str, str], int, dict[str, Any]]:
+         url = f"{self.settings.moonshot_root}/files"
+         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+@@ -152,7 +153,7 @@
+                 data={"purpose": purpose},
+                 files={"file": (material.filename, material.data, material.content_type)},
+             ) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"material_id": material.material_id, "provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_upload", "purpose": purpose})
+                 status = response.status_code
+                 headers = dict(response.headers)
+         if not 200 <= status < 300:
+@@ -181,7 +182,7 @@
+             ) from exc
+         if not isinstance(payload, dict):
+             raise ProviderRequestError("PROVIDER_FILE_BINDING", "Kimi Files API returned an invalid response")
+-        return raw, headers, payload
++        return raw, headers, status, payload
+ 
+ 
+     async def _wait_file_ready(self, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+@@ -199,7 +200,7 @@
+                 await asyncio.sleep(self.settings.kimi_file_poll_seconds)
+                 url = f"{self.settings.moonshot_root}/files/{file_id}"
+                 async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
+-                    raw = await read_raw_response(response)
++                    raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_probe", "provider_file_id": file_id})
+                     status = response.status_code
+                     headers = dict(response.headers)
+                 if not 200 <= status < 300:
+@@ -245,12 +246,12 @@
+ 
+     async def _read_content(
+         self, file_id: str
+-    ) -> tuple[bytes, str, bytes, dict[str, str]]:
++    ) -> tuple[bytes, str, bytes, dict[str, str], int]:
+         url = f"{self.settings.moonshot_root}/files/{file_id}/content"
+         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_content", "provider_file_id": file_id})
+                 status = response.status_code
+                 headers = dict(response.headers)
+         if not 200 <= status < 300:
+@@ -279,7 +280,7 @@
+                             break
+             except Exception:
+                 pass
+-        return extracted, content_type, raw, headers
++        return extracted, content_type, raw, headers, status
+ 
+     async def _store_extraction(self, material: MaterialFile, data: bytes, content_type: str) -> str:
+         import hashlib
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/observability.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/observability.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/observability.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/observability.py	2026-09-21 05:42:10.721045734 +0000
+@@ -0,0 +1,154 @@
++from __future__ import annotations
++
++import json
++import logging
++import math
++import time
++
++import httpx
++from typing import Any
++
++
++_SENSITIVE_KEYS = {
++    "authorization",
++    "api_key",
++    "apikey",
++    "key",
++    "secret",
++    "token",
++    "password",
++    "x-goog-api-key",
++}
++
++
++def configure_logging(settings: Any) -> None:
++    """Configure concise application logs and silence noisy dependency access logs."""
++
++    level_name = str(getattr(settings, "log_level", "INFO") or "INFO").upper()
++    level = getattr(logging, level_name, logging.INFO)
++    logging.basicConfig(
++        level=level,
++        format="%(asctime)s %(levelname)s %(name)s %(message)s",
++        force=False,
++    )
++    logging.getLogger().setLevel(level)
++
++    # httpx emits one INFO line for every Supabase REST/RPC request.  Worker
++    # claim polling and heartbeat renewal are high-frequency control-plane I/O,
++    # so these library access logs are intentionally suppressed.  Relay emits
++    # its own request/provider lifecycle logs below instead.
++    dependency_level_name = str(
++        getattr(settings, "dependency_http_log_level", "WARNING") or "WARNING"
++    ).upper()
++    dependency_level = getattr(logging, dependency_level_name, logging.WARNING)
++    for name in ("httpx", "httpcore", "hpack"):
++        logging.getLogger(name).setLevel(dependency_level)
++
++    # Uvicorn's access logger duplicates Relay's business lifecycle events and
++    # makes status/result polling dominate production logs. Errors still use
++    # uvicorn.error and are not suppressed.
++    if not bool(getattr(settings, "uvicorn_access_log", False)):
++        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
++
++
++def now_ms() -> float:
++    return time.perf_counter() * 1000.0
++
++
++def elapsed_ms(start_ms: float) -> int:
++    return max(0, int(round(now_ms() - start_ms)))
++
++
++def status_failure_class(status_code: int | None) -> str | None:
++    if status_code is None or status_code < 400:
++        return None
++    if 400 <= status_code < 500:
++        return "client"
++    return "relay"
++
++
++def exception_failure_class(exc: BaseException) -> str:
++    status_code = getattr(exc, "status_code", None)
++    if isinstance(status_code, int):
++        if 400 <= status_code < 500:
++            return "upstream_rejected"
++        if status_code >= 500:
++            return "upstream"
++    if isinstance(exc, httpx.TimeoutException):
++        return "upstream_timeout"
++    if isinstance(exc, httpx.TransportError):
++        return "upstream_transport"
++    code = str(getattr(exc, "code", "") or "").upper()
++    if "TIMEOUT" in code:
++        return "upstream_timeout"
++    if "PROCESSING_FAILED" in code:
++        return "upstream"
++    if "CONNECTION_NOT_CONFIGURED" in code:
++        return "relay_configuration"
++    name = type(exc).__name__.lower()
++    if "timeout" in name:
++        return "upstream_timeout"
++    if any(token in name for token in ("connect", "network", "transport", "tls", "dns", "readerror", "writeerror")):
++        return "upstream_transport"
++    if "supabase" in name:
++        return "dependency"
++    if code:
++        return "relay_validation"
++    return "relay"
++
++
++def event(
++    logger: logging.Logger,
++    level: int,
++    event_name: str,
++    *,
++    exc_info: bool | BaseException | tuple[Any, Any, Any] | None = None,
++    **fields: Any,
++) -> None:
++    payload: dict[str, Any] = {"event": event_name}
++    for key, value in fields.items():
++        if value is None:
++            continue
++        payload[key] = _safe_value(key, value)
++    logger.log(
++        level,
++        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
++        exc_info=exc_info,
++    )
++
++
++def info(logger: logging.Logger, event_name: str, **fields: Any) -> None:
++    event(logger, logging.INFO, event_name, **fields)
++
++
++def warning(logger: logging.Logger, event_name: str, **fields: Any) -> None:
++    event(logger, logging.WARNING, event_name, **fields)
++
++
++def error(
++    logger: logging.Logger,
++    event_name: str,
++    *,
++    exc_info: bool | BaseException | tuple[Any, Any, Any] | None = None,
++    **fields: Any,
++) -> None:
++    event(logger, logging.ERROR, event_name, exc_info=exc_info, **fields)
++
++
++def _safe_value(key: str, value: Any) -> Any:
++    lower = key.lower()
++    if lower in _SENSITIVE_KEYS or lower.endswith("_token") or lower.endswith("_secret"):
++        return "[redacted]"
++    if isinstance(value, dict):
++        return {
++            str(k): _safe_value(str(k), v)
++            for k, v in value.items()
++            if str(k).lower() not in _SENSITIVE_KEYS
++        }
++    if isinstance(value, (list, tuple, set)):
++        return [_safe_value(key, item) for item in value]
++    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
++        return str(value)
++    if isinstance(value, (str, int, float, bool)) or value is None:
++        return value
++    return str(value)
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/base.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/base.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/base.py	2026-09-21 04:06:26.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/base.py	2026-09-21 05:39:11.797298143 +0000
+@@ -11,6 +11,8 @@
+     usage: dict[str, Any]
+     cached_tokens: int | None
+     response_output: list[Any]
++    http_status: int | None = None
++    provider_request_id: str | None = None
+ 
+ 
+ class ProviderRequestError(RuntimeError):
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/gemini_native.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/gemini_native.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/gemini_native.py	2026-09-21 04:08:25.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/gemini_native.py	2026-09-21 05:40:10.724878666 +0000
+@@ -120,7 +120,7 @@
+         )
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             async with client.stream("POST", url, headers=headers, json=payload) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
+                 status = response.status_code
+                 response_headers = dict(response.headers)
+         if not 200 <= status < 300:
+@@ -189,6 +189,8 @@
+                     "model_content": model_content,
+                 }
+             },
++            http_status=status,
++            provider_request_id=self._request_id(response_headers),
+         )
+ 
+     @staticmethod
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/http_wire.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/http_wire.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/http_wire.py	2026-09-18 15:29:37.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/http_wire.py	2026-09-21 05:39:51.362141545 +0000
+@@ -1,13 +1,67 @@
+ from __future__ import annotations
+ 
+ import gzip
++import logging
+ import zlib
++from typing import Any
++from urllib.parse import urlsplit
+ 
++from ..observability import error as log_error
++
++
++logger = logging.getLogger("model-relay-upstream")
++
++
++async def read_raw_response(response, *, log_context: dict[str, Any] | None = None) -> bytes:
++    """Read a provider response body and make mid-stream disconnects explicit.
++
++    Normal successful chunks are deliberately not logged.  If the provider
++    closes/resets the stream after headers were received, the log records the
++    response status and number of bytes already received before re-raising the
++    original exception so the Raw Error path remains authoritative.
++    """
+ 
+-async def read_raw_response(response) -> bytes:
+     chunks: list[bytes] = []
+-    async for chunk in response.aiter_raw():
+-        chunks.append(chunk)
++    total = 0
++    try:
++        async for chunk in response.aiter_raw():
++            total += len(chunk)
++            chunks.append(chunk)
++    except Exception as exc:
++        headers = getattr(response, "headers", {}) or {}
++        request = getattr(response, "request", None)
++        method = getattr(request, "method", None)
++        url = str(getattr(request, "url", "") or "")
++        parsed = urlsplit(url) if url else None
++        upstream_request_id = None
++        for key in ("x-request-id", "request-id", "x-goog-request-id", "x-moonshot-request-id"):
++            value = headers.get(key)
++            if value:
++                upstream_request_id = str(value)
++                break
++        fields: dict[str, Any] = {
++            "phase": "response_stream_read",
++            "http_status": getattr(response, "status_code", None),
++            "bytes_received": total,
++            "content_length": headers.get("content-length"),
++            "upstream_request_id": upstream_request_id,
++            "method": method,
++            "upstream_host": parsed.hostname if parsed else None,
++            "upstream_path": parsed.path if parsed else None,
++            "stream_interrupted": True,
++            "failure_class": "upstream_transport",
++            "exception_type": type(exc).__name__,
++        }
++        fields.update(log_context or {})
++        log_error(logger, "upstream_stream_interrupted", exc_info=True, **fields)
++        try:
++            setattr(exc, "stream_interrupted", True)
++            setattr(exc, "bytes_received", total)
++            if getattr(exc, "status_code", None) is None:
++                setattr(exc, "status_code", getattr(response, "status_code", None))
++        except Exception:
++            pass
++        raise
+     return b"".join(chunks)
+ 
+ 
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/moonshot_chat.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/moonshot_chat.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/moonshot_chat.py	2026-09-21 04:13:32.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/moonshot_chat.py	2026-09-21 05:40:10.725021862 +0000
+@@ -102,7 +102,7 @@
+         headers = self._headers()
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             async with client.stream("POST", url, headers=headers, json=payload) as response:
+-                raw = await read_raw_response(response)
++                raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "kimi", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
+                 response_status = response.status_code
+                 response_headers = dict(response.headers)
+ 
+@@ -165,6 +165,8 @@
+                     "assistant_message": assistant_message,
+                 }
+             },
++            http_status=response_status,
++            provider_request_id=self._request_id(response_headers),
+         )
+ 
+     async def _material_parts(
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/openai_compatible.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/openai_compatible.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/openai_compatible.py	2026-09-18 15:30:18.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/openai_compatible.py	2026-09-21 05:40:06.173504464 +0000
+@@ -125,7 +125,7 @@
+         async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+             if hasattr(client, "stream"):
+                 async with client.stream("POST", url, headers=headers, json=payload) as response:
+-                    raw = await read_raw_response(response)
++                    raw = await read_raw_response(response, log_context=request_snapshot.get("_relay_log_context"))
+                     response_status = response.status_code
+                     response_headers = dict(getattr(response, "headers", {}) or {})
+             else:  # test doubles / older compatible clients
+@@ -169,6 +169,8 @@
+             usage=usage,
+             cached_tokens=cached_tokens,
+             response_output=output,
++            http_status=response_status,
++            provider_request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
+         )
+ 
+     @staticmethod
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/responses_v2.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/responses_v2.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/responses_v2.py	2026-09-21 04:08:10.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/responses_v2.py	2026-09-21 05:40:06.173325684 +0000
+@@ -27,6 +27,13 @@
+ 
+     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+         snapshot = dict(context.snapshot)
++        snapshot["_relay_log_context"] = {
++            "request_id": context.request_id,
++            "session_id": context.session_id,
++            "provider": snapshot.get("provider"),
++            "connection_id": snapshot.get("connection_id"),
++            "model": snapshot.get("model"),
++        }
+         snapshot["current_query"] = self._input_text(snapshot.get("input"))
+         snapshot["mode"] = "continue_session"
+         snapshot["material_prefix_includes_current_query"] = False
+@@ -65,6 +72,8 @@
+                     "response_output": result.response_output,
+                 }
+             },
++            http_status=result.http_status,
++            provider_request_id=result.provider_request_id,
+         )
+ 
+     async def _material_prefix(self, context: V2ExecutionContext) -> list[Any]:
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/v2_base.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/v2_base.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/providers/v2_base.py	2026-09-21 04:07:52.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/providers/v2_base.py	2026-09-21 05:39:11.797175469 +0000
+@@ -14,6 +14,8 @@
+     cached_tokens: int | None
+     response_output: Any
+     history_entry: dict[str, Any]
++    http_status: int | None = None
++    provider_request_id: str | None = None
+ 
+ 
+ @dataclass
+@@ -25,6 +27,8 @@
+     material_bindings: list[dict[str, Any]]
+     tenant_id: str
+     conversation_hash: str
++    request_id: str | None = None
++    session_id: str | None = None
+ 
+ 
+ class V2ProviderAdapter(Protocol):
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/worker.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/worker.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/app/worker.py	2026-09-21 04:09:12.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/worker.py	2026-09-21 05:38:40.151356072 +0000
+@@ -25,10 +25,11 @@
+ from .supabase import SupabaseBackend
+ from .v2_repository import RelayV2Repository
+ from .utils import utcnow
++from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
+ 
+ 
+ settings = get_settings()
+-logging.basicConfig(level=settings.log_level)
++configure_logging(settings)
+ logger = logging.getLogger("model-relay-worker")
+ 
+ 
+@@ -83,10 +84,12 @@
+         await self.backend.close()
+ 
+     async def run_forever(self) -> None:
+-        logger.info(
+-            "worker_started id=%s pools=%s",
+-            self.worker_id,
+-            sorted(settings.worker_pool_set),
++        log_info(
++            logger,
++            "worker_started",
++            worker_id=self.worker_id,
++            deployment_id=settings.deployment_id,
++            execution_pools=sorted(settings.worker_pool_set),
+         )
+         while not self.stop_requested.is_set():
+             try:
+@@ -105,25 +108,36 @@
+                     await self._process_legacy(job)
+             except asyncio.CancelledError:
+                 raise
+-            except Exception:
+-                logger.exception("worker_loop_error")
++            except Exception as exc:
++                log_error(
++                    logger,
++                    "worker_loop_error",
++                    exc_info=True,
++                    worker_id=self.worker_id,
++                    failure_class="relay",
++                    exception_type=type(exc).__name__,
++                )
+                 try:
+                     await asyncio.wait_for(
+                         self.stop_requested.wait(), timeout=settings.worker_poll_seconds
+                     )
+                 except asyncio.TimeoutError:
+                     pass
+-        logger.info("worker_drained id=%s", self.worker_id)
++        log_info(logger, "worker_drained", worker_id=self.worker_id)
+ 
+     async def _process_v2(self, job: dict) -> None:
+         job_id = str(job["id"])
+         epoch = int(job.get("lease_epoch") or 0)
+-        logger.info(
+-            "v2_job_claimed job_id=%s request_id=%s pool=%s epoch=%s",
+-            job_id,
+-            job.get("request_id"),
+-            job.get("execution_pool"),
+-            epoch,
++        started_ms = now_ms()
++        log_info(
++            logger,
++            "job_claimed",
++            worker_id=self.worker_id,
++            job_id=job_id,
++            request_id=job.get("request_id"),
++            execution_pool=job.get("execution_pool"),
++            lease_epoch=epoch,
++            protocol_version="v2",
+         )
+         await self.repo.update_job(
+             job_id,
+@@ -137,6 +151,14 @@
+         heartbeat = asyncio.create_task(self._heartbeat(job_id, epoch, stop))
+         try:
+             await self.queue.execute(job, self.worker_id)
++            log_info(
++                logger,
++                "job_execution_returned",
++                worker_id=self.worker_id,
++                job_id=job_id,
++                request_id=job.get("request_id"),
++                duration_ms=elapsed_ms(started_ms),
++            )
+         finally:
+             stop.set()
+             heartbeat.cancel()
+@@ -151,7 +173,7 @@
+             except asyncio.TimeoutError:
+                 ok = await self.repo.renew_lease_v2(job_id, self.worker_id, lease_epoch)
+                 if not ok:
+-                    logger.warning("v2_lease_renew_failed job_id=%s epoch=%s", job_id, lease_epoch)
++                    log_warning(logger, "lease_renew_failed", worker_id=self.worker_id, job_id=job_id, lease_epoch=lease_epoch)
+                     return
+ 
+     async def _process_legacy(self, job: dict) -> None:
+@@ -162,7 +184,7 @@
+ 
+             self._legacy = LegacyRelayWorker()
+         self._legacy.worker_id = self.worker_id
+-        logger.info("legacy_job_claimed job_id=%s", job.get("id"))
++        log_info(logger, "legacy_job_claimed", worker_id=self.worker_id, job_id=job.get("id"))
+         await self._legacy.process_job(job)
+ 
+ 
+@@ -171,7 +193,7 @@
+     loop = asyncio.get_running_loop()
+ 
+     def request_stop() -> None:
+-        logger.info("worker_stop_requested id=%s", worker.worker_id)
++        log_info(logger, "worker_stop_requested", worker_id=worker.worker_id)
+         worker.stop_requested.set()
+ 
+     for sig in (signal.SIGTERM, signal.SIGINT):
+diff -ruN '--exclude=__pycache__' '--exclude=*.pyc' /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/tests/test_observability.py /mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_observability.py
+--- /mnt/data/model-relay-v2_0.4.0_baseline_full/model-relay-v2/tests/test_observability.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_observability.py	2026-09-21 05:41:52.672799054 +0000
+@@ -0,0 +1,81 @@
++import asyncio
++import json
++import logging
++from types import SimpleNamespace
++import unittest
++
++from app.observability import configure_logging, info as log_info
++from app.providers.http_wire import read_raw_response
++
++
++class _BrokenResponse:
++    status_code = 200
++    headers = {
++        "content-type": "application/json",
++        "content-length": "100",
++        "x-request-id": "up-stream-1",
++    }
++    request = SimpleNamespace(method="POST", url="https://provider.example/v1/responses?secret=no-log")
++
++    async def aiter_raw(self):
++        yield b"abc"
++        raise ConnectionResetError("provider closed stream")
++
++
++class ObservabilityTests(unittest.TestCase):
++    def test_dependency_polling_loggers_are_suppressed_by_default(self):
++        settings = SimpleNamespace(
++            log_level="INFO",
++            dependency_http_log_level="WARNING",
++            uvicorn_access_log=False,
++        )
++        configure_logging(settings)
++        self.assertEqual(logging.getLogger("httpx").level, logging.WARNING)
++        self.assertEqual(logging.getLogger("httpcore").level, logging.WARNING)
++        self.assertEqual(logging.getLogger("uvicorn.access").level, logging.WARNING)
++
++    def test_structured_event_redacts_secrets(self):
++        logger = logging.getLogger("test-observability-redaction")
++        logger.setLevel(logging.INFO)
++        with self.assertLogs(logger, level="INFO") as captured:
++            log_info(
++                logger,
++                "request_test",
++                request_id="req_1",
++                relay_api_token="must-not-appear",
++                detail={"authorization": "Bearer secret", "safe": "ok"},
++            )
++        payload = json.loads(captured.output[0][captured.output[0].find("{"):])
++        self.assertEqual(payload["request_id"], "req_1")
++        self.assertEqual(payload["relay_api_token"], "[redacted]")
++        self.assertNotIn("authorization", payload["detail"])
++        self.assertEqual(payload["detail"]["safe"], "ok")
++        self.assertNotIn("must-not-appear", captured.output[0])
++
++    def test_stream_interruption_is_logged_with_partial_byte_count(self):
++        async def run():
++            response = _BrokenResponse()
++            try:
++                await read_raw_response(
++                    response,
++                    log_context={"request_id": "req-stream", "provider": "gemini"},
++                )
++            except ConnectionResetError as exc:
++                return exc
++            self.fail("stream interruption did not raise")
++
++        with self.assertLogs("model-relay-upstream", level="ERROR") as captured:
++            exc = asyncio.run(run())
++        joined = "\n".join(captured.output)
++        self.assertIn('"event":"upstream_stream_interrupted"', joined)
++        self.assertIn('"request_id":"req-stream"', joined)
++        self.assertIn('"bytes_received":3', joined)
++        self.assertIn('"http_status":200', joined)
++        self.assertIn('"upstream_path":"/v1/responses"', joined)
++        self.assertNotIn("secret=no-log", joined)
++        self.assertTrue(getattr(exc, "stream_interrupted", False))
++        self.assertEqual(getattr(exc, "bytes_received", None), 3)
++
++
++if __name__ == "__main__":
++    unittest.main()
