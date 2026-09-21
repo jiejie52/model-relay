@@ -1,5 +1,6 @@
 import asyncio
 from copy import deepcopy
+from datetime import timedelta
 from types import SimpleNamespace
 import unittest
 
@@ -114,7 +115,11 @@ class FakeFallback:
     def __init__(self, repo):
         self.repo = repo
         self.store_calls = []
+        self.sign_calls = []
         self.storage = FakeArtifactStorageRegistry()
+        self.settings = SimpleNamespace(
+            supabase_signed_url_ttl=604800,
+        )
 
     async def store(self, **kwargs):
         self.store_calls.append(deepcopy(kwargs))
@@ -134,6 +139,29 @@ class FakeFallback:
     async def read(self, row):
         # Tests that need refresh put exact bytes here.
         return row.get("_data", b"fallback-bytes")
+
+    async def sign_read_url(self, row, *, expires_in=None):
+        self.sign_calls.append((deepcopy(row), expires_in))
+        return f"https://signed.example.test/{row['object_id']}?ttl={int(expires_in or 604800)}"
+
+
+class FakeRouteBinding:
+    provider = "gemini"
+    model = "gemini-3.1-flash-lite"
+    connection_id = "native-conn"
+    route_revision = "test-route/1"
+    account_scope_hash = "scope-a"
+    file_adapter_version = "fake-native/1"
+
+    def internal_metadata(self):
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "connection_id": self.connection_id,
+            "route_revision": self.route_revision,
+            "account_scope_hash": self.account_scope_hash,
+            "file_adapter_version": self.file_adapter_version,
+        }
 
 
 class FakeNativeAdapter:
@@ -196,7 +224,155 @@ class ProviderNativeFileTests(unittest.TestCase):
             material_allow_http=False,
             default_storage_id="supabase_shared",
             relay_storage_prefix="relay",
+            gemini_files_threshold_bytes=99 * 1024 * 1024,
+            supabase_signed_url_ttl=604800,
         )
+
+    def test_gemini_at_or_below_99mib_uses_supabase_external_url_not_files_api(self):
+        for total in (10 * 1024 * 1024, 99 * 1024 * 1024):
+            repo = FakeRepo()
+            fallback = FakeFallback(repo)
+            registry = ProviderFileRegistry()
+            adapter = FakeNativeAdapter()
+            registry.register("native-conn", adapter)
+            ingress = MaterialIngress(repo, fallback, registry, self._settings())
+
+            row = asyncio.run(
+                ingress.create(
+                    tenant_id="t",
+                    conversation_hash="c",
+                    idempotency_key=f"small-{total}",
+                    filename="report.pdf",
+                    content_type="application/pdf",
+                    data=b"small-file",
+                    route_binding=FakeRouteBinding(),
+                    request_file_total_bytes=total,
+                    request_file_count=2,
+                    material_batch_id="batch-small",
+                )
+            )
+
+            self.assertEqual(row["status"], "ready_provider")
+            self.assertEqual(row["durability"], "relay_backed")
+            self.assertEqual(len(fallback.store_calls), 1)
+            self.assertEqual(len(fallback.sign_calls), 1)
+            self.assertEqual(adapter.calls, [])
+            self.assertEqual(repo.bindings[0]["representation"], "gemini_external_url")
+            self.assertTrue(repo.bindings[0]["external_uri"].startswith("https://signed.example.test/"))
+            self.assertEqual(
+                repo.materials[row["id"]]["metadata"]["_relay_gemini_transport"]["mode"],
+                "supabase_external_url",
+            )
+
+    def test_gemini_above_99mib_uses_files_api_and_never_writes_supabase(self):
+        repo = FakeRepo()
+        fallback = FakeFallback(repo)
+        registry = ProviderFileRegistry()
+        adapter = FakeNativeAdapter()
+        registry.register("native-conn", adapter)
+        ingress = MaterialIngress(repo, fallback, registry, self._settings())
+
+        row = asyncio.run(
+            ingress.create(
+                tenant_id="t",
+                conversation_hash="c",
+                idempotency_key="large",
+                filename="report.pdf",
+                content_type="application/pdf",
+                data=b"large-request-part",
+                route_binding=FakeRouteBinding(),
+                request_file_total_bytes=99 * 1024 * 1024 + 1,
+                request_file_count=3,
+                durability_policy="relay_backed",
+                fallback_policy="always",
+                material_batch_id="batch-large",
+            )
+        )
+
+        self.assertEqual(row["status"], "ready_provider")
+        self.assertEqual(row["durability"], "provider_bound")
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(fallback.store_calls, [])
+        self.assertEqual(repo.bindings[0]["representation"], "gemini_file_uri")
+
+    def test_gemini_missing_aggregate_uses_files_api_conservatively(self):
+        repo = FakeRepo()
+        fallback = FakeFallback(repo)
+        registry = ProviderFileRegistry()
+        adapter = FakeNativeAdapter()
+        registry.register("native-conn", adapter)
+        ingress = MaterialIngress(repo, fallback, registry, self._settings())
+        row = asyncio.run(
+            ingress.create(
+                tenant_id="t", conversation_hash="c", idempotency_key="unknown-total",
+                filename="a.pdf", content_type="application/pdf", data=b"x",
+                route_binding=FakeRouteBinding(),
+            )
+        )
+        self.assertEqual(row["durability"], "provider_bound")
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(fallback.store_calls, [])
+
+    def test_gemini_single_file_count_can_infer_total_for_external_url(self):
+        repo = FakeRepo()
+        fallback = FakeFallback(repo)
+        registry = ProviderFileRegistry()
+        adapter = FakeNativeAdapter()
+        registry.register("native-conn", adapter)
+        ingress = MaterialIngress(repo, fallback, registry, self._settings())
+        row = asyncio.run(
+            ingress.create(
+                tenant_id="t", conversation_hash="c", idempotency_key="single",
+                filename="a.pdf", content_type="application/pdf", data=b"x",
+                route_binding=FakeRouteBinding(), request_file_count=1,
+            )
+        )
+        self.assertEqual(row["durability"], "relay_backed")
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(repo.bindings[0]["representation"], "gemini_external_url")
+
+    def test_expired_gemini_external_url_is_resigned_without_files_api_upload(self):
+        repo = FakeRepo()
+        repo.materials["mat_ext"] = {
+            "id": "mat_ext",
+            "tenant_id": "t",
+            "conversation_hash": "c",
+            "status": "ready_provider",
+            "filename": "report.pdf",
+            "content_type": "application/pdf",
+            "sha256": "abc",
+            "binding_generation": 1,
+            "metadata": {"_relay_gemini_transport": {"mode": "supabase_external_url"}},
+        }
+        repo.fallbacks["mat_ext"] = {
+            "material_id": "mat_ext", "object_id": "obj_ext",
+            "storage_id": "supabase_shared", "bucket": "relay",
+            "object_key": "fallback/mat_ext", "sha256": "abc", "size_bytes": 1,
+        }
+        repo.bindings.append({
+            "material_id": "mat_ext", "connection_id": "native-conn",
+            "account_scope_hash": "scope-a", "purpose": "file",
+            "representation": "gemini_external_url",
+            "adapter_version": "gemini-external-url-supabase/1",
+            "state": "active", "generation": 1,
+            "external_uri": "https://expired.example.test/file",
+            "expires_at": "2000-01-01T00:00:00+00:00",
+        })
+        fallback = FakeFallback(repo)
+        registry = ProviderFileRegistry()
+        adapter = FakeNativeAdapter()
+        registry.register("native-conn", adapter)
+        resolver = BindingResolver(repo, fallback, registry)
+
+        frozen = asyncio.run(resolver.freeze_for_request(
+            material_ids=["mat_ext"], connection_id="native-conn",
+            tenant_id="t", conversation_hash="c",
+        ))
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(len(fallback.sign_calls), 1)
+        self.assertEqual(frozen[0]["binding_kind"], "gemini_external_url")
+        self.assertEqual(frozen[0]["binding_generation"], 2)
+        self.assertTrue(frozen[0]["external_uri"].startswith("https://signed.example.test/"))
 
     def test_native_success_does_not_store_input_file_in_fallback(self):
         repo = FakeRepo()

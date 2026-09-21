@@ -1,5 +1,8 @@
 # 文件上传机制增强补丁 V1.1 - 代码映射（0.5.0）
 
+> **0.5.2 override:** Gemini 的原始输入文件不再无条件 Provider-native First。当前 Request 文件总量 `<=99 MiB` 时改为 Supabase Signed External URL；`>99 MiB` 才使用 Gemini Files API。Kimi 与其余未被 0.5.2 覆盖的 V1.1 规则继续有效。详见 `GEMINI_DUAL_TRANSPORT_0.5.2_IMPLEMENTATION.md`。
+
+
 0.5.0 继续保留 0.4.0/0.4.1 的 Provider-native First 实现，但根据路由解耦方案把 **File Adapter 的选择权从调用方 target_connection_id 收回 Relay RouteResolver**。
 
 | 补丁/路由要求 | 0.5.0 实现 |

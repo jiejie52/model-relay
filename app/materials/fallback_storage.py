@@ -85,3 +85,20 @@ class FallbackObjectStorage:
             key=fallback["object_key"],
         )
         return await self.storage.get(location.storage_id).get_bytes(location)
+
+    async def sign_read_url(
+        self,
+        fallback: dict[str, Any],
+        *,
+        expires_in: int | None = None,
+    ) -> str:
+        location = ObjectLocation(
+            storage_id=fallback["storage_id"],
+            bucket=fallback["bucket"],
+            key=fallback["object_key"],
+        )
+        ttl = int(expires_in or self.settings.supabase_signed_url_ttl)
+        ttl = max(300, min(ttl, 604800))
+        return await self.storage.get(location.storage_id).sign_read_url(
+            location, expires_in=ttl
+        )

@@ -1,13 +1,14 @@
-# Model Relay 0.5.1 部署与迁移关键操作
+# Model Relay 0.5.2 部署与迁移关键操作
 
-本版本以 `0.5.0` 为基线，重点修复 route 可用性判断：默认所有 connection 都可被 RouteResolver 选择，是否真正可执行由服务端凭据与 Adapter 注册决定。
+本版本以 `0.5.1` 为基线，新增 Gemini 双材料传输策略，同时保留服务端 RouteResolver、默认全 Connection 可用、完整上传日志和 Raw Error。
 
-1. **Route 由 Relay 服务端决定**：Dify 只传 `provider + model`，不再负责 `connection_id / target_connection_id`。
-2. **Material 上传日志补齐**：从 JSON/multipart 解析、参数/policy、Dify/HTTPS source fetch，到 Provider Files API、fallback 与 API 最终失败，都有可串联日志。
+1. **Route 仍由 Relay 服务端决定**：Dify 只传 `provider + model`，不负责 `connection_id / target_connection_id`。
+2. **Gemini 按当前 Request 文件总量选材料传输**：`<=99 MiB` 使用 Supabase Signed External URL；`>99 MiB` 使用 Gemini Files API。两条路径都继续由 `GeminiNativeAdapter` 推理。
+3. **Material 上传日志完整保留**：从 JSON/multipart 解析、参数/policy、Dify/HTTPS source fetch，到 Supabase/Files API 与 API 最终失败都有可串联日志。
 
 ## 1. 数据库
 
-**0.5.0 -> 0.5.1 不需要执行新的 SQL。**
+**0.5.1 -> 0.5.2 不需要执行新的 SQL。**
 
 现有 0.4.1 数据库应已经执行过：
 
@@ -18,7 +19,7 @@ sql/003_relay_v2_session_request_material.sql
 sql/004_provider_native_file_ingress.sql
 ```
 
-0.5.1 的 `route_revision / route_binding_hash / account_scope_hash` 先保存在现有 Session metadata 与 Request snapshot 中，因此无需新 migration。
+0.5.2 继续复用现有 `relay_materials / provider_material_bindings / material_fallback_objects` 与 Session/Request schema，因此无需新 migration。
 
 ## 2. Railway：Grok + Gemini Native
 
@@ -46,16 +47,22 @@ provider=grok   + model=grok-*   -> aihubmix_default
 
 `connection_id` 是 Relay 内部事实，不再由 Dify 决定。
 
-Gemini Native 仍走：
+Gemini 推理 route 始终是 `GeminiNativeAdapter`，但输入文件传输分两条：
 
 ```text
-AIHubMix Gemini Native Proxy
-  -> POST /upload/v1beta/files
-  -> x-goog-upload-url
-  -> upload, finalize
-  -> PROCESSING 时轮询 file.name
+当前 Request 全部文件总量 <= 99 MiB
+  -> 原始文件写 Supabase Private Bucket
+  -> Signed URL（默认 604800 秒）
+  -> provider binding: gemini_external_url
+  -> generateContent(fileData.fileUri=<signed https url>)
+
+当前 Request 全部文件总量 > 99 MiB
+  -> 不写 Supabase input-file object
+  -> AIHubMix Gemini Native Proxy
+  -> Gemini Files API /upload/v1beta/files
+  -> upload, finalize / PROCESSING poll
   -> ACTIVE fileUri
-  -> generateContent(fileData.fileUri)
+  -> generateContent(fileData.fileUri=<Gemini fileUri>)
 ```
 
 ## 3. Aliyun SAE：Kimi Official
@@ -109,73 +116,75 @@ ROUTE_CATALOG_JSON={"revision":"relay-route-catalog/2026-09-21.2","routes":[{"pr
 
 错误会分别返回 `ROUTE_NOT_FOUND`、`ROUTE_MODEL_UNSUPPORTED`、`ROUTE_CONNECTION_DISABLED`、`ROUTE_CONNECTION_NOT_CONFIGURED`、`ROUTE_ADAPTER_NOT_REGISTERED` 或 `ROUTE_FILE_ADAPTER_NOT_REGISTERED`，不再把配置缺失混成 `ROUTE_NOT_FOUND`。
 
-## 5. Material API：不再传 target_connection_id
+## 5. Material API：Gemini 99 MiB 双传输策略
 
-### Gemini multipart 示例
-
-```text
-POST /v2/materials
-Authorization: Bearer <relay-token>
-Idempotency-Key: <stable-material-key>
-Content-Type: multipart/form-data
-
-file=<binary>
-tenant_id=...
-conversation_hash=...
-provider=gemini
-model=gemini-3.1-flash-lite
-purpose=inference_input
-durability_policy=native_first
-fallback_policy=on_provider_unavailable
-```
-
-Relay 内部会自动：
+`/v2/materials` 仍然一次创建一个 Material。为了严格按“本次模型请求全部文件总和”判断，调用方应把同一批文件的聚合信息随每个 Material 一起提交：
 
 ```text
-provider/model
- -> RouteResolver
- -> internal connection=aihubmix_gemini_native
- -> GeminiAIHubMixFileAdapter
- -> Gemini Files API
+request_file_total_bytes = 当前 Request 全部上传文件原始字节总和
+request_file_count       = 当前 Request 文件数
+material_batch_id        = 本次材料批次的稳定关联 ID（建议）
 ```
 
-成功业务响应不会暴露内部 connection，例如：
+也可以通过 Headers 传：
+
+```text
+X-Relay-Request-File-Total-Bytes
+X-Relay-Request-File-Count
+X-Relay-Material-Batch-Id
+```
+
+JSON body 字段存在时优先于 Header。多个文件必须对同一批次发送相同的 `request_file_total_bytes / request_file_count / material_batch_id`。
+
+### Gemini <= 99 MiB 示例
 
 ```json
 {
-  "schema_version": "relay-material/2.2",
-  "material_id": "mat_xxx",
-  "status": "ready",
+  "tenant_id": "tenant-a",
+  "conversation_hash": "conv-a",
   "provider": "gemini",
   "model": "gemini-3.1-flash-lite",
   "purpose": "inference_input",
-  "route_revision": "relay-route-catalog/2026-09-21.2",
-  "durability": "provider_bound",
-  "ready_for": ["gemini"],
-  "fallback": {"stored": false, "object_ref": null}
+  "filename": "report.pdf",
+  "content_type": "application/pdf",
+  "source_url": "https://...temporary...",
+  "request_file_total_bytes": 73400320,
+  "request_file_count": 2,
+  "material_batch_id": "batch-20260921-001"
 }
 ```
 
-### Kimi
-
-只改成：
+Relay 内部：
 
 ```text
-provider=kimi
-model=<实际 Kimi 模型 ID>
+RouteResolver -> Gemini internal route
+source fetch + sha256
+Supabase Storage object (private bucket)
+Supabase Signed URL, TTL=SUPABASE_SIGNED_URL_TTL (default 604800)
+provider binding representation=gemini_external_url
+GeminiNativeAdapter -> fileData.fileUri=<signed url>
 ```
 
-Relay 自动选择官方 Kimi File Adapter。
+MaterialResponse 会显示 `fallback.stored=true` 和 `provider_binding.representation=gemini_external_url`，但不会把内部 connection 或 Signed URL 当成业务主键暴露；长期身份仍是 `material_id`。Signed URL 到期且 fallback object 仍存在时，BindingResolver 会重新签发 URL。
 
-### archive-only 材料
-
-如果文件只用于 Relay 归档、不进入模型上下文：
+### Gemini > 99 MiB
 
 ```text
-purpose=archive
+request_file_total_bytes > 103809024
+ -> Gemini Files API
+ -> provider binding representation=gemini_file_uri
+ -> Supabase input-file object: 不创建
 ```
 
-此时不需要 `provider/model`，不会触发 Provider Native Files API，走 relay-backed 存储。
+这一分支会忽略旧客户端针对输入原始字节设置的 `relay_backed/always`，避免违反“>99 MiB 不走 Supabase”的策略。Artifact/History/Raw Error 的 Supabase 使用不受影响。
+
+### 聚合总量缺失时
+
+如果 `request_file_total_bytes` 缺失，但 `request_file_count=1`，Relay 可用实际接收字节推断总量。若两者都不足以证明是单文件，Relay 会保守走 Gemini Files API，并记录 `gemini_request_file_total_missing`，防止多文件实际总量 >99 MiB 却错误走 External URL。
+
+### Kimi / Grok / archive
+
+Kimi 仍使用官方 Files API 语义；Grok 仍使用 Relay bridge/fallback 语义。`purpose=archive` 不触发 Provider Native Files API。
 
 ## 6. Session API：不再传 connection_id
 
@@ -273,15 +282,16 @@ ROUTE_LEGACY_HINT_MODE=strict
 
 **既有 Session 不会自动重路由。** 如果旧 Session 本身已经是错误 route（例如 Gemini Session 冻结成 `aihubmix_default`），应结束旧 Session 并新建 Session。
 
-## 9. Supabase 的角色不变更为“零依赖”
+## 9. Supabase 对输入文件的新角色
 
 对于原始输入文件 payload：
 
 ```text
-Gemini/Kimi native 成功 -> 默认不写 Supabase fallback
-Provider 临时不可用且 fallback policy 允许 -> 写 Supabase fallback
-relay_backed -> 显式保留原始字节
-Grok/无 Native Files Store 的连接 -> 可作为 bridge
+Gemini Request 文件总量 <=99 MiB -> 主动写 Supabase，Signed URL 作为 Gemini External URL binding
+Gemini Request 文件总量 >99 MiB  -> 不写 Supabase，使用 Gemini Files API
+Kimi native 成功                    -> 默认不写 Supabase fallback
+Grok/无 Native Files Store 的连接   -> 可作为 bridge
+其他 Provider fallback/durability   -> 按原策略决定
 ```
 
 以下数据仍继续使用现有 Relay Artifact Storage：

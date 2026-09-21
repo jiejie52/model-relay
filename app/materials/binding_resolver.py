@@ -9,6 +9,10 @@ from ..observability import error as log_error
 from ..utils import utcnow
 from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
+from .gemini_transport import (
+    GEMINI_EXTERNAL_URL_REPRESENTATION,
+    external_url_binding,
+)
 from .provider_files.base import MaterialFile
 from .provider_files.registry import ProviderFileRegistry
 
@@ -127,23 +131,49 @@ class BindingResolver:
                         "MATERIAL_REUPLOAD_REQUIRED",
                         f"Provider binding is unavailable and no fallback bytes exist: {material_id}",
                     )
-                data = await self.fallback.read(fallback)
+
                 generation = int((binding or {}).get("generation") or material.get("binding_generation") or 0) + 1
-                result = await adapter.prepare(
-                    MaterialFile(
+                if self._uses_gemini_external_url(material, binding, adapter):
+                    ttl_seconds = max(300, min(
+                        int(self.fallback.settings.supabase_signed_url_ttl),
+                        604800,
+                    ))
+                    signed_url = await self.fallback.sign_read_url(
+                        fallback, expires_in=ttl_seconds
+                    )
+                    binding = external_url_binding(
                         material_id=material_id,
-                        tenant_id=tenant_id,
-                        conversation_hash=conversation_hash,
-                        filename=str(material.get("filename") or material_id),
-                        content_type=str(material.get("content_type") or "application/octet-stream"),
-                        size_bytes=len(data),
-                        sha256=str(material.get("sha256") or ""),
-                        data=data,
-                    ),
-                    generation=generation,
-                )
-                binding = dict(result.binding)
-                binding["material_id"] = material_id
+                        connection_id=connection_id,
+                        account_scope_hash=adapter.account_scope_hash,
+                        external_url=signed_url,
+                        object_id=str(fallback["object_id"]),
+                        generation=generation,
+                        ttl_seconds=ttl_seconds,
+                        metadata={
+                            "transport": "supabase_external_url",
+                            "storage_id": fallback.get("storage_id"),
+                            "object_id": fallback.get("object_id"),
+                            "refresh": True,
+                        },
+                    )
+                else:
+                    data = await self.fallback.read(fallback)
+                    result = await adapter.prepare(
+                        MaterialFile(
+                            material_id=material_id,
+                            tenant_id=tenant_id,
+                            conversation_hash=conversation_hash,
+                            filename=str(material.get("filename") or material_id),
+                            content_type=str(material.get("content_type") or "application/octet-stream"),
+                            size_bytes=len(data),
+                            sha256=str(material.get("sha256") or ""),
+                            data=data,
+                        ),
+                        generation=generation,
+                    )
+                    binding = dict(result.binding)
+                    binding["material_id"] = material_id
+
                 binding.setdefault("created_at", utcnow().isoformat())
                 binding["updated_at"] = utcnow().isoformat()
                 await self.repo.upsert_provider_binding(binding)
@@ -158,6 +188,20 @@ class BindingResolver:
 
             snapshots.append(self._snapshot(material, binding))
         return snapshots
+
+    @staticmethod
+    def _uses_gemini_external_url(
+        material: dict[str, Any],
+        binding: dict[str, Any] | None,
+        adapter: Any,
+    ) -> bool:
+        if str(getattr(adapter, "provider", "") or "").lower() != "gemini":
+            return False
+        if binding and str(binding.get("representation") or "") == GEMINI_EXTERNAL_URL_REPRESENTATION:
+            return True
+        metadata = material.get("metadata") if isinstance(material.get("metadata"), dict) else {}
+        policy = metadata.get("_relay_gemini_transport") if isinstance(metadata.get("_relay_gemini_transport"), dict) else {}
+        return str(policy.get("mode") or "") == "supabase_external_url"
 
     @staticmethod
     def _binding_usable(binding: dict[str, Any] | None) -> bool:

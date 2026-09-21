@@ -25,6 +25,11 @@ from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
 from .provider_files.base import MaterialFile
 from .provider_files.registry import ProviderFileRegistry
+from .gemini_transport import (
+    GeminiTransportPolicyError,
+    decide_gemini_transport,
+    external_url_binding,
+)
 from .safe_fetch import MaterialFetchError, fetch_bytes
 
 if TYPE_CHECKING:
@@ -90,6 +95,9 @@ class MaterialIngress:
         durability_policy: str | None = None,
         fallback_policy: str | None = None,
         declared_size: int | None = None,
+        request_file_total_bytes: int | None = None,
+        request_file_count: int | None = None,
+        material_batch_id: str | None = None,
         ingress_id: str | None = None,
         purpose: str = "inference_input",
     ) -> dict[str, Any]:
@@ -188,7 +196,7 @@ class MaterialIngress:
             ) from exc
 
         detected_content_type = content_type
-        if source_url is not None:
+        if source_url is not None and data is None:
             fetch_started_ms = now_ms()
             safe_source = self._sanitized_source_url(source_url)
             log_info(
@@ -283,6 +291,71 @@ class MaterialIngress:
             ) from exc
 
         detected_content_type = (detected_content_type or "application/octet-stream").split(";", 1)[0].strip()
+
+        gemini_transport = None
+        if provider == "gemini" and purpose == "inference_input":
+            try:
+                gemini_transport = decide_gemini_transport(
+                    actual_size=len(data),
+                    request_file_total_bytes=request_file_total_bytes,
+                    request_file_count=request_file_count,
+                    threshold_bytes=int(getattr(self.settings, "gemini_files_threshold_bytes", 99 * 1024 * 1024)),
+                )
+            except GeminiTransportPolicyError as exc:
+                log_warning(
+                    logger,
+                    "gemini_material_transport_validation_failed",
+                    exc_info=True,
+                    ingress_id=ingress_id,
+                    provider=provider,
+                    model=model,
+                    connection_id=resolved_connection_id,
+                    actual_size=len(data),
+                    request_file_total_bytes=request_file_total_bytes,
+                    request_file_count=request_file_count,
+                    material_batch_id=material_batch_id,
+                    failure_class="client",
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                )
+                raise MaterialIngressError(
+                    {
+                        "source": "relay",
+                        "code": "GEMINI_REQUEST_FILE_TOTAL_INVALID",
+                        "message": str(exc),
+                    },
+                    status_code=400,
+                    ingress_id=ingress_id,
+                ) from exc
+            log_info(
+                logger,
+                "gemini_material_transport_selected",
+                ingress_id=ingress_id,
+                provider=provider,
+                model=model,
+                connection_id=resolved_connection_id,
+                route_revision=route_revision,
+                transport_mode=gemini_transport.mode,
+                decision_source=gemini_transport.source,
+                request_file_total_bytes=gemini_transport.total_bytes,
+                request_file_count=request_file_count,
+                material_batch_id=material_batch_id,
+                threshold_bytes=gemini_transport.threshold_bytes,
+                material_size_bytes=len(data),
+            )
+            if gemini_transport.total_bytes is None:
+                log_warning(
+                    logger,
+                    "gemini_request_file_total_missing",
+                    ingress_id=ingress_id,
+                    provider=provider,
+                    model=model,
+                    connection_id=resolved_connection_id,
+                    material_batch_id=material_batch_id,
+                    selected_transport="gemini_files",
+                    reason="aggregate file bytes unknown; conservative Files API path selected",
+                )
+
         digest = hashlib.sha256(data).hexdigest()
         material_id = f"mat_{uuid4().hex}"
         route_meta = route_binding.internal_metadata() if route_binding is not None else None
@@ -294,6 +367,15 @@ class MaterialIngress:
             "model": model,
             "purpose": purpose,
         }
+        if gemini_transport is not None:
+            material_metadata["_relay_gemini_transport"] = {
+                "mode": gemini_transport.mode,
+                "decision_source": gemini_transport.source,
+                "request_file_total_bytes": gemini_transport.total_bytes,
+                "request_file_count": request_file_count,
+                "material_batch_id": material_batch_id,
+                "threshold_bytes": gemini_transport.threshold_bytes,
+            }
         try:
             row = await self.repo.create_material(
                 {
@@ -391,6 +473,156 @@ class MaterialIngress:
                 duration_ms=elapsed_ms(ingress_started_ms),
             )
             return updated
+
+        # Gemini <= threshold: persist the original bytes to Supabase and bind a
+        # short-lived Signed URL directly to Gemini fileData.fileUri. The Gemini
+        # Files API is deliberately not called on this path.
+        if gemini_transport is not None and gemini_transport.mode == "supabase_external_url":
+            if adapter.provider != "gemini":
+                raise MaterialIngressError(
+                    {
+                        "source": "relay",
+                        "code": "ROUTE_CONFIG_INVALID",
+                        "message": "Gemini External URL policy resolved to a non-Gemini file adapter",
+                    },
+                    status_code=500,
+                    ingress_id=ingress_id,
+                    material_id=material_id,
+                )
+            try:
+                fallback_row = await self._store_fallback_logged(
+                    ingress_id=ingress_id,
+                    row=row,
+                    data=data,
+                    retention_policy="gemini-external-url-bridge",
+                    provider=provider,
+                    connection_id=resolved_connection_id,
+                )
+                sign_started_ms = now_ms()
+                ttl_seconds = max(300, min(
+                    int(self.settings.supabase_signed_url_ttl),
+                    604800,
+                ))
+                log_info(
+                    logger,
+                    "gemini_external_url_sign_started",
+                    ingress_id=ingress_id,
+                    material_id=material_id,
+                    provider=provider,
+                    connection_id=resolved_connection_id,
+                    ttl_seconds=ttl_seconds,
+                    storage_id=fallback_row.get("storage_id"),
+                )
+                signed_url = await self.fallback.sign_read_url(
+                    fallback_row, expires_in=ttl_seconds
+                )
+                binding = external_url_binding(
+                    material_id=material_id,
+                    connection_id=str(resolved_connection_id),
+                    account_scope_hash=adapter.account_scope_hash,
+                    external_url=signed_url,
+                    object_id=str(fallback_row["object_id"]),
+                    generation=1,
+                    ttl_seconds=ttl_seconds,
+                    metadata={
+                        "transport": "supabase_external_url",
+                        "storage_id": fallback_row.get("storage_id"),
+                        "object_id": fallback_row.get("object_id"),
+                        "request_file_total_bytes": gemini_transport.total_bytes,
+                        "threshold_bytes": gemini_transport.threshold_bytes,
+                        "material_batch_id": material_batch_id,
+                    },
+                )
+                binding.setdefault("created_at", utcnow().isoformat())
+                binding["updated_at"] = utcnow().isoformat()
+                await self.repo.upsert_provider_binding(binding)
+                log_info(
+                    logger,
+                    "gemini_external_url_sign_completed",
+                    ingress_id=ingress_id,
+                    material_id=material_id,
+                    provider=provider,
+                    connection_id=resolved_connection_id,
+                    representation="gemini_external_url",
+                    duration_ms=elapsed_ms(sign_started_ms),
+                    ttl_seconds=ttl_seconds,
+                )
+            except Exception as exc:
+                detail = self._storage_error_detail(exc, phase="gemini_external_url_bridge")
+                await self.repo.update_material(
+                    material_id,
+                    {
+                        "status": "failed",
+                        "object_id": fallback_row.get("object_id") if fallback_row else None,
+                        "durability": "relay_backed" if fallback_row else "reupload_required",
+                        "metadata": {**material_metadata, "last_binding_error": detail},
+                    },
+                )
+                log_error(
+                    logger,
+                    "gemini_external_url_binding_failed",
+                    exc_info=True,
+                    ingress_id=ingress_id,
+                    material_id=material_id,
+                    provider=provider,
+                    connection_id=resolved_connection_id,
+                    phase="gemini_external_url_bridge",
+                    failure_class="dependency",
+                    exception_type=type(exc).__name__,
+                    upstream_http_status=detail.get("upstream_http_status"),
+                    duration_ms=elapsed_ms(ingress_started_ms),
+                )
+                raise MaterialIngressError(
+                    detail,
+                    status_code=502,
+                    ingress_id=ingress_id,
+                    material_id=material_id,
+                ) from exc
+
+            updated = await self.repo.update_material(
+                material_id,
+                {
+                    "status": "ready_provider",
+                    "object_id": fallback_row["object_id"],
+                    "durability": "relay_backed",
+                    "binding_generation": 1,
+                },
+            ) or row
+            log_info(
+                logger,
+                "material_ingress_completed",
+                ingress_id=ingress_id,
+                material_id=material_id,
+                provider=provider,
+                model=model,
+                connection_id=resolved_connection_id,
+                route_revision=route_revision,
+                status="ready_provider",
+                durability="relay_backed",
+                fallback_stored=True,
+                binding_kind="gemini_external_url",
+                duration_ms=elapsed_ms(ingress_started_ms),
+            )
+            return updated
+
+        force_no_supabase = bool(
+            gemini_transport is not None and gemini_transport.mode == "gemini_files"
+        )
+        if force_no_supabase and (durability_policy == "relay_backed" or fallback_policy == "always"):
+            log_warning(
+                logger,
+                "gemini_files_supabase_policy_suppressed",
+                ingress_id=ingress_id,
+                material_id=material_id,
+                provider=provider,
+                model=model,
+                connection_id=resolved_connection_id,
+                request_file_total_bytes=gemini_transport.total_bytes,
+                threshold_bytes=gemini_transport.threshold_bytes,
+                durability_policy=durability_policy,
+                fallback_policy=fallback_policy,
+                reason="Gemini Files API path selected; input bytes must not be written to Supabase",
+            )
 
         generation = 1
         attempt_id = f"mba_{uuid4().hex}"
@@ -520,7 +752,11 @@ class MaterialIngress:
                 ingress_id=ingress_id,
                 material_id=material_id,
             )
-            if fallback_policy in {"on_provider_unavailable", "always"} and self._fallback_eligible(exc):
+            if (
+                not force_no_supabase
+                and fallback_policy in {"on_provider_unavailable", "always"}
+                and self._fallback_eligible(exc)
+            ):
                 fallback_row = await self._store_fallback_logged(
                     ingress_id=ingress_id,
                     row=row,
@@ -577,7 +813,7 @@ class MaterialIngress:
                 material_id=material_id,
             ) from exc
 
-        if durability_policy == "relay_backed" or fallback_policy == "always":
+        if not force_no_supabase and (durability_policy == "relay_backed" or fallback_policy == "always"):
             fallback_row = await self._store_fallback_logged(
                 ingress_id=ingress_id,
                 row=row,
@@ -792,6 +1028,29 @@ class MaterialIngress:
             "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
             "cause_message": str(exc.__cause__) if exc.__cause__ else None,
         }
+
+    @staticmethod
+    def _storage_error_detail(exc: BaseException, *, phase: str) -> dict[str, Any]:
+        raw = getattr(exc, "raw_body", None)
+        content_type = getattr(exc, "content_type", None)
+        detail: dict[str, Any] = {
+            "source": "fallback_storage",
+            "code": "SUPABASE_FILE_BRIDGE_FAILED",
+            "phase": phase,
+            "upstream_http_status": getattr(exc, "status_code", None),
+            "exception_type": type(exc).__name__,
+            "message": str(exc),
+        }
+        if isinstance(raw, (bytes, bytearray)):
+            body = bytes(raw)
+            detail.update(
+                {
+                    "body_size": len(body),
+                    "body_sha256": hashlib.sha256(body).hexdigest(),
+                    **raw_body_inline_fields(body, content_type=content_type),
+                }
+            )
+        return detail
 
     @staticmethod
     def _source_error_detail(exc: BaseException) -> dict[str, Any]:

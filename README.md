@@ -1,18 +1,17 @@
-# Model Relay 0.5.1 - Default-All Connections + Clear Route Diagnostics
+# Model Relay 0.5.2 - Gemini Dual Transport (Supabase External URL / Files API)
 
-本版本以 `model-relay-v2 0.5.0` 为基线，修复 connection 可用性与 route 错误诊断问题，同时保留 0.5.0 的路由解耦和上传日志能力。
+本版本以 `model-relay-v2 0.5.1` 为基线，保持服务端 RouteResolver、Default-All connections、完整上传日志与 Raw Error 能力，并把 Gemini 输入文件改为按**本次模型请求全部文件原始字节总和**选择材料传输方式。
 
-1. **路由解耦**：Dify 只表达 `provider + model`，Relay 服务端通过 `RouteResolver / RouteCatalog` 解析并冻结内部 `connection_id`。Gemini 在 Railway Relay 上会自动进入 `GeminiNativeAdapter + GeminiAIHubMixFileAdapter`；Kimi 使用 `MoonshotChatAdapter + KimiOfficialFileAdapter`；Grok 使用 `ResponsesV2Adapter`。
-2. **文件上传日志补齐**：完整覆盖 JSON/multipart 解析、参数/policy 校验、Dify/HTTPS source fetch、Material Registry、Provider Files API、Supabase fallback 与 API 最终成功/失败。
+## 0.5.2 关键变化
 
-
-## 0.5.1 关键变化
-
-- 默认 `CONNECTION_AVAILABILITY_MODE=all`：旧 `ENABLED_CONNECTIONS` 不再默认限制 Route；即使部署环境仍保留 `ENABLED_CONNECTIONS=aihubmix_default`，只要 Gemini 所需服务端配置存在，`provider=gemini + gemini-*` 仍会解析到 Gemini Native route。
-- `RouteCatalog` 定义“有哪些合法 route”，不再由 enabled allowlist 决定 route 是否存在；连接凭据、Adapter 注册和未来 allowlist 是独立的可用性检查。
-- 未配置凭据时返回 `ROUTE_CONNECTION_NOT_CONFIGURED`，Adapter 缺失时返回 `ROUTE_ADAPTER_NOT_REGISTERED` / `ROUTE_FILE_ADAPTER_NOT_REGISTERED`，不再误报 `ROUTE_NOT_FOUND`。
-- `route_resolution_failed` 日志增加 `reason_detail / connection_policy / connection_enabled / connection_configured / configuration_reason / provider_model_patterns / registered_*_connections`。
-- 如未来确实需要限制连接，显式设置 `CONNECTION_AVAILABILITY_MODE=allowlist` 后才使用 `ENABLED_CONNECTIONS`。
+- Gemini route 始终保持 `GeminiNativeAdapter`，不会因为文件大小切换到 generic Responses Adapter。
+- 当前请求文件总量 `<= 99 MiB (103809024 bytes)`：原始文件写入 Supabase Private Bucket，Relay 生成 Signed URL，Provider binding 记为 `gemini_external_url`，推理时作为 Gemini `fileData.fileUri`。
+- 当前请求文件总量 `> 99 MiB`：原始文件不写 Supabase input-file object，继续使用 AIHubMix Gemini Native Proxy -> Gemini Files API -> `fileUri`。
+- Supabase Signed URL TTL 复用现有 `SUPABASE_SIGNED_URL_TTL`，默认 `604800` 秒（7 天）；URL 过期时若 Relay fallback object 仍存在，会重新签发 URL，不重新上传 Gemini Files API。
+- 多文件阈值按 Request 聚合值判断，不按单文件分别判断。Material API 新增 `request_file_total_bytes / request_file_count / material_batch_id`，也支持对应 `X-Relay-*` Headers。
+- 聚合总量缺失且无法确定为单文件时，Relay Fail-Safe 地选择 Gemini Files API，避免把实际 >99 MiB 的多文件请求错误走 External URL。
+- `>99 MiB` Files API 路径会抑制 input-file Supabase fallback，即使旧客户端仍带 `relay_backed/always`，也不会把原始文件写 Supabase。
+- 无新增 SQL migration。
 
 ## 关键边界
 

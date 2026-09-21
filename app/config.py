@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     material_allow_http: bool = False
     material_default_durability_policy: str = "native_first"
     material_default_fallback_policy: str = "on_provider_unavailable"
+    # Gemini dual material transport. The threshold is the sum of files in the
+    # current request. <= 99 MiB uses Supabase Signed URL; > 99 MiB uses Files API.
+    gemini_files_threshold_bytes: int = 99 * 1024 * 1024
     gemini_file_soft_ttl_seconds: int = 172800
     gemini_file_poll_seconds: float = 2.0
     gemini_file_processing_timeout_seconds: float = 300.0

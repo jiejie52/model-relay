@@ -318,6 +318,15 @@ async def _validate_materials_for_route(
 async def create_material(
     request: Request,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=500),
+    request_file_total_bytes_header: str | None = Header(
+        default=None, alias="X-Relay-Request-File-Total-Bytes"
+    ),
+    request_file_count_header: str | None = Header(
+        default=None, alias="X-Relay-Request-File-Count"
+    ),
+    material_batch_id_header: str | None = Header(
+        default=None, alias="X-Relay-Material-Batch-Id"
+    ),
 ) -> MaterialResponse:
     ingress_id = f"ing_{uuid4().hex}"
     api_started_ms = now_ms()
@@ -331,6 +340,16 @@ async def create_material(
         media_type=content_type_header.split(";", 1)[0] if content_type_header else None,
         caller_version=caller_version,
     )
+
+    # Direct unit calls invoke the route function without FastAPI dependency
+    # injection, in which case Header() defaults are FieldInfo objects rather
+    # than actual header values. Normalize those to None before parsing.
+    if not isinstance(request_file_total_bytes_header, (str, int)):
+        request_file_total_bytes_header = None
+    if not isinstance(request_file_count_header, (str, int)):
+        request_file_count_header = None
+    if not isinstance(material_batch_id_header, str):
+        material_batch_id_header = None
 
     data: bytes | None = None
     tenant_id = ""
@@ -349,8 +368,21 @@ async def create_material(
     durability_policy = _settings(request).material_default_durability_policy
     fallback_policy = _settings(request).material_default_fallback_policy
     declared_size: int | None = None
+    request_file_total_bytes: int | None = None
+    request_file_count: int | None = None
+    material_batch_id: str | None = material_batch_id_header
 
     try:
+        if request_file_total_bytes_header not in (None, ""):
+            request_file_total_bytes = int(request_file_total_bytes_header)
+            if request_file_total_bytes < 0:
+                raise ValueError("X-Relay-Request-File-Total-Bytes must be >= 0")
+        if request_file_count_header not in (None, ""):
+            request_file_count = int(request_file_count_header)
+            if request_file_count < 1:
+                raise ValueError("X-Relay-Request-File-Count must be >= 1")
+        if material_batch_id is not None and len(material_batch_id) > 220:
+            raise ValueError("X-Relay-Material-Batch-Id exceeds 220 characters")
         if content_type_header.startswith("multipart/form-data"):
             form = await request.form()
             upload = form.get("file")
@@ -385,6 +417,11 @@ async def create_material(
             durability_policy = str(form.get("durability_policy") or _settings(request).material_default_durability_policy)
             fallback_policy = str(form.get("fallback_policy") or _settings(request).material_default_fallback_policy)
             declared_size = int(form["declared_size"]) if form.get("declared_size") not in (None, "") else None
+            if form.get("request_file_total_bytes") not in (None, ""):
+                request_file_total_bytes = int(form["request_file_total_bytes"])
+            if form.get("request_file_count") not in (None, ""):
+                request_file_count = int(form["request_file_count"])
+            material_batch_id = str(form.get("material_batch_id") or material_batch_id or "") or None
         else:
             payload = MaterialCreateJSON.model_validate(await request.json())
             tenant_id = payload.tenant_id
@@ -403,6 +440,17 @@ async def create_material(
             durability_policy = payload.durability_policy
             fallback_policy = payload.fallback_policy
             declared_size = payload.declared_size
+            request_file_total_bytes = (
+                payload.request_file_total_bytes
+                if payload.request_file_total_bytes is not None
+                else request_file_total_bytes
+            )
+            request_file_count = (
+                payload.request_file_count
+                if payload.request_file_count is not None
+                else request_file_count
+            )
+            material_batch_id = payload.material_batch_id or material_batch_id
             if payload.content_base64:
                 data = base64.b64decode(payload.content_base64, validate=True)
     except ValidationError as exc:
@@ -580,6 +628,9 @@ async def create_material(
             durability_policy=durability_policy,
             fallback_policy=fallback_policy,
             declared_size=declared_size,
+            request_file_total_bytes=request_file_total_bytes,
+            request_file_count=request_file_count,
+            material_batch_id=material_batch_id,
             ingress_id=ingress_id,
             purpose=purpose,
         )
@@ -647,6 +698,9 @@ async def create_material(
         durability=row.get("durability"),
         size_bytes=row.get("actual_size") or row.get("size_bytes"),
         content_type=row.get("content_type"),
+        request_file_total_bytes=request_file_total_bytes,
+        request_file_count=request_file_count,
+        material_batch_id=material_batch_id,
         duration_ms=elapsed_ms(api_started_ms),
     )
     return await _material_response(request, row)

@@ -1,5 +1,16 @@
 # Model Relay Changelog
 
+## 0.5.2 Gemini Dual Transport
+
+- Gemini inference route remains `GeminiNativeAdapter`; only the material transport changes.
+- Current Request aggregate file bytes `<= 99 MiB (103809024)` -> Supabase input object + Signed External URL -> Gemini `fileData.fileUri`.
+- Current Request aggregate file bytes `> 99 MiB` -> AIHubMix Gemini Native Proxy -> Gemini Files API -> `fileUri`; input bytes are not written to Supabase.
+- `/v2/materials` adds `request_file_total_bytes`, `request_file_count`, `material_batch_id` plus equivalent `X-Relay-*` headers for one-material-at-a-time ingress.
+- Missing aggregate information falls back conservatively to Files API unless Relay can prove the request contains exactly one file.
+- Signed URL lifetime reuses `SUPABASE_SIGNED_URL_TTL` (default 604800 seconds) and expired External URL bindings are re-signed from the retained Relay object without Files API re-upload.
+- Added Gemini transport-selection logs and regression coverage for threshold boundary, >99 no-Supabase behavior, missing aggregate and URL re-sign.
+- No database migration.
+
 ## 0.5.1 Default-All Connections + Clear Route Diagnostics
 
 - 默认 connection policy 改为 `all`，旧 `ENABLED_CONNECTIONS` 不再误伤 Gemini/Kimi route。

@@ -1,44 +1,26 @@
-Model Relay 0.5.1 verification
+Model Relay 0.5.2 verification
 Date: 2026-09-21
-Baseline: model-relay-v2 0.5.0
+Baseline: model-relay-v2 0.5.1
 
-1. python -m compileall -q app tests
-   PASS
+Result
+======
+python -m compileall -q app tests                       PASS
+PYTHONPATH=. pytest -q                                  62 passed
+API import / version smoke                              PASS (0.5.2-gemini-dual-transport)
+Worker import smoke                                     PASS
 
-2. PYTHONPATH=. pytest -q
-   57 passed in 3.04s
+0.5.2 regression coverage
+=========================
+- Gemini aggregate <= 99 MiB -> Supabase fallback object + Signed URL binding, no Files API call
+- Exact 99 MiB boundary remains on External URL path
+- Gemini aggregate > 99 MiB -> Files API binding, no Supabase input-object write
+- >99 MiB suppresses legacy relay_backed/always input-file storage policy
+- Missing multi-file aggregate -> conservative Files API path
+- Explicit single-file count -> aggregate inferred from actual bytes
+- Expired gemini_external_url -> re-sign Supabase URL without Files API upload
+- Existing provider-native/fallback/account-scope/Kimi/raw-error/routing/logging tests remain green
 
-3. Regression smoke: legacy ENABLED_CONNECTIONS does not hide Gemini route
-   Environment:
-     CONNECTION_AVAILABILITY_MODE=all (default)
-     ENABLED_CONNECTIONS=aihubmix_default
-     AIHUBMIX_API_KEY=<configured>
-     AIHUBMIX_GEMINI_BASE_URL=<configured>
-   Result:
-     connection_mode = all
-     gemini_enabled = True
-     gemini_configured = True
-     provider=gemini model=gemini-3.1-flash-lite
-       -> aihubmix_gemini_native
-       -> gemini-native-aihubmix/1
-       -> gemini-aihubmix-files/1
-   PASS
-
-4. Route error clarity regression
-   Gemini route exists but AIHUBMIX_GEMINI_BASE_URL missing:
-     expected ROUTE_CONNECTION_NOT_CONFIGURED
-     must not return ROUTE_NOT_FOUND
-   Covered by test_routing_v21.py
-   PASS
-
-5. Explicit future allowlist mode
-   CONNECTION_AVAILABILITY_MODE=allowlist + ENABLED_CONNECTIONS=aihubmix_default
-   Gemini route remains defined but resolver returns ROUTE_CONNECTION_DISABLED.
-   Covered by test_routing_v21.py
-   PASS
-
-6. API version/import smoke
-   app.version = 0.5.1-route-default-all
-   PASS
-
-Database migrations added: none
+Notes
+=====
+- Tests use fakes/mocks for Supabase and Provider HTTP; no real AIHubMix, Gemini Files API, Supabase project, Railway or SAE network integration was executed in this environment.
+- No database migration is required from 0.5.1 to 0.5.2.

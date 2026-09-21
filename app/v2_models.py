@@ -115,6 +115,11 @@ class MaterialCreateJSON(BaseModel):
     durability_policy: Literal["native_first", "relay_backed"] = "native_first"
     fallback_policy: Literal["never", "on_provider_unavailable", "always"] = "on_provider_unavailable"
     declared_size: int | None = Field(default=None, ge=0)
+    # Gemini transport policy is based on the aggregate bytes of all files in
+    # the current user request, not the size of an individual material.
+    request_file_total_bytes: int | None = Field(default=None, ge=0)
+    request_file_count: int | None = Field(default=None, ge=1)
+    material_batch_id: str | None = Field(default=None, max_length=220)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

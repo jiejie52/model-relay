@@ -1,24 +1,46 @@
-# Model Relay 0.5.1 Patch Notes
+# Model Relay 0.5.2 Patch Notes
 
-## Default-all connection availability
+## Gemini dual material transport
 
-- 默认 `CONNECTION_AVAILABILITY_MODE=all`。
-- 旧 `ENABLED_CONNECTIONS` 在默认模式下不再限制 Route/Adapter；只有显式切换 `allowlist` 才生效。
-- Built-in RouteCatalog 始终定义 Gemini/Grok/Kimi route，不再因为旧 allowlist 变量把 route 从目录中删除。
-- Adapter 注册改为“服务端配置完整 + connection policy 允许”；默认 all 模式下只要 Key/Base URL 齐全就自动注册。
+Gemini 的 Provider route 不变，始终由服务端 `RouteResolver` 解析到 Gemini Native route；本版只改变输入文件的 transport binding：
 
-## Clear route diagnostics
+- 当前 Request 上传文件原始字节总和 `<= 99 MiB (103809024 bytes)`：写入 Supabase Private Bucket，生成 Signed URL，binding `representation=gemini_external_url`，由 `GeminiNativeAdapter` 作为 `fileData.fileUri` 使用。
+- 当前 Request 上传文件原始字节总和 `> 99 MiB`：不创建 Supabase input-file object，继续走 AIHubMix Gemini Native Proxy -> Gemini Files API，binding `representation=gemini_file_uri`。
+- Signed URL TTL 使用现有 `SUPABASE_SIGNED_URL_TTL`，默认 604800 秒（7 天），并限制最大 7 天。
+- Signed URL 过期时，若 Relay fallback object 仍存在，只重新签 URL，不重新上传 Gemini Files API。
 
-- `ROUTE_NOT_FOUND` 只表示 Provider 在当前 RouteCatalog 中没有 route 定义。
-- Provider 有 route 但 model 不匹配：`ROUTE_MODEL_UNSUPPORTED`。
-- 显式 allowlist 禁止：`ROUTE_CONNECTION_DISABLED`。
-- route 已解析但 Key/Base URL 缺失：`ROUTE_CONNECTION_NOT_CONFIGURED`。
-- inference Adapter 未注册：`ROUTE_ADAPTER_NOT_REGISTERED`。
-- Native File Adapter 未注册：`ROUTE_FILE_ADAPTER_NOT_REGISTERED`。
-- `route_resolution_failed` 增加 connection policy/configuration、model patterns、registered adapters 等诊断字段。
+## Aggregate contract
 
-## Compatibility / Database
+`POST /v2/materials` 一次只接收一个 Material，因此新增以下批次提示来准确执行“当前 Request 文件总量”规则：
 
-- 0.5.0 public contract 2.1 不变；Dify 仍只需要 `provider/model`。
-- legacy `connection_id/target_connection_id` hint 行为不变。
-- 无新增 SQL migration。
+- `request_file_total_bytes`
+- `request_file_count`
+- `material_batch_id`
+
+也支持：
+
+- `X-Relay-Request-File-Total-Bytes`
+- `X-Relay-Request-File-Count`
+- `X-Relay-Material-Batch-Id`
+
+JSON/body 字段优先于 Header。聚合总量缺失且不能确定为单文件时，Relay 保守使用 Files API。
+
+## Supabase behavior
+
+小文件路径复用现有 `FallbackObjectStorage -> SupabaseObjectStorage`：保留 Content-Type、SHA-256、size、storage_id、bucket/object_key；Supabase REST upload 使用 `x-upsert=true`，Signed URL 通过 Storage sign endpoint 创建。Relay 不复制 Dify Workflow 中针对临时 URL 的不安全 TLS 兼容逻辑，source fetch 继续遵守 Relay SSRF/TLS policy。
+
+## Observability
+
+新增/强化：
+
+- `gemini_material_transport_selected`
+- `gemini_request_file_total_missing`
+- `gemini_external_url_sign_started/completed`
+- `gemini_external_url_binding_failed`
+- `gemini_files_supabase_policy_suppressed`
+
+既有 source fetch / storage / Provider / API final-failure 日志继续保留。
+
+## Database
+
+0.5.1 -> 0.5.2 无新增 SQL migration。
