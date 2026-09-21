@@ -102,3 +102,22 @@ class FallbackObjectStorage:
         return await self.storage.get(location.storage_id).sign_read_url(
             location, expires_in=ttl
         )
+
+    async def delete(self, fallback: dict[str, Any]) -> None:
+        """Delete an input-file fallback object and its metadata.
+
+        Used by Gemini request-level promotion when the authoritative sum of
+        request materials crosses the Files API threshold. Request/history/raw
+        artifacts are untouched; this only removes the original input payload.
+        """
+        material_id = str(fallback["material_id"])
+        object_id = str(fallback["object_id"])
+        location = ObjectLocation(
+            storage_id=fallback["storage_id"],
+            bucket=fallback["bucket"],
+            key=fallback["object_key"],
+        )
+        await self.storage.get(location.storage_id).delete(location)
+        await self.repo.update_material(material_id, {"object_id": None})
+        await self.repo.delete_material_fallback(material_id)
+        await self.repo.delete_object(object_id)

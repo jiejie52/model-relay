@@ -337,23 +337,28 @@ class MaterialIngress:
                 route_revision=route_revision,
                 transport_mode=gemini_transport.mode,
                 decision_source=gemini_transport.source,
-                request_file_total_bytes=gemini_transport.total_bytes,
-                request_file_count=request_file_count,
+                relay_actual_bytes=gemini_transport.total_bytes,
+                caller_total_hint=gemini_transport.caller_total_hint,
+                request_file_count_hint=request_file_count,
                 material_batch_id=material_batch_id,
                 threshold_bytes=gemini_transport.threshold_bytes,
                 material_size_bytes=len(data),
             )
-            if gemini_transport.total_bytes is None:
+            if (
+                gemini_transport.caller_total_hint is not None
+                and gemini_transport.caller_total_hint != gemini_transport.total_bytes
+            ):
                 log_warning(
                     logger,
-                    "gemini_request_file_total_missing",
+                    "gemini_client_size_hint_ignored",
                     ingress_id=ingress_id,
                     provider=provider,
                     model=model,
                     connection_id=resolved_connection_id,
                     material_batch_id=material_batch_id,
-                    selected_transport="gemini_files",
-                    reason="aggregate file bytes unknown; conservative Files API path selected",
+                    caller_total_hint=gemini_transport.caller_total_hint,
+                    relay_actual_bytes=gemini_transport.total_bytes,
+                    reason="Relay actual bytes are authoritative; caller aggregate is diagnostic only",
                 )
 
         digest = hashlib.sha256(data).hexdigest()
@@ -371,8 +376,9 @@ class MaterialIngress:
             material_metadata["_relay_gemini_transport"] = {
                 "mode": gemini_transport.mode,
                 "decision_source": gemini_transport.source,
-                "request_file_total_bytes": gemini_transport.total_bytes,
-                "request_file_count": request_file_count,
+                "relay_actual_bytes": gemini_transport.total_bytes,
+                "caller_total_hint": gemini_transport.caller_total_hint,
+                "request_file_count_hint": request_file_count,
                 "material_batch_id": material_batch_id,
                 "threshold_bytes": gemini_transport.threshold_bytes,
             }
@@ -528,7 +534,7 @@ class MaterialIngress:
                         "transport": "supabase_external_url",
                         "storage_id": fallback_row.get("storage_id"),
                         "object_id": fallback_row.get("object_id"),
-                        "request_file_total_bytes": gemini_transport.total_bytes,
+                        "relay_actual_bytes": gemini_transport.total_bytes,
                         "threshold_bytes": gemini_transport.threshold_bytes,
                         "material_batch_id": material_batch_id,
                     },
@@ -617,7 +623,7 @@ class MaterialIngress:
                 provider=provider,
                 model=model,
                 connection_id=resolved_connection_id,
-                request_file_total_bytes=gemini_transport.total_bytes,
+                relay_actual_bytes=gemini_transport.total_bytes,
                 threshold_bytes=gemini_transport.threshold_bytes,
                 durability_policy=durability_policy,
                 fallback_policy=fallback_policy,

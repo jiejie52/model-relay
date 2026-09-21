@@ -1,17 +1,18 @@
-# Model Relay 0.5.2 - Gemini Dual Transport (Supabase External URL / Files API)
+# Model Relay 0.5.3 - Relay-Authoritative Gemini Size
 
-本版本以 `model-relay-v2 0.5.1` 为基线，保持服务端 RouteResolver、Default-All connections、完整上传日志与 Raw Error 能力，并把 Gemini 输入文件改为按**本次模型请求全部文件原始字节总和**选择材料传输方式。
+本版本以 `model-relay-v2 0.5.2` 为基线。Gemini 仍固定使用服务端 RouteResolver + `GeminiNativeAdapter`，但文件大小判断改为 **Relay 自己测量并在 Request 冻结时重新聚合**。调用方不再负责提供权威总字节数。
 
-## 0.5.2 关键变化
+## 0.5.3 关键变化
 
-- Gemini route 始终保持 `GeminiNativeAdapter`，不会因为文件大小切换到 generic Responses Adapter。
-- 当前请求文件总量 `<= 99 MiB (103809024 bytes)`：原始文件写入 Supabase Private Bucket，Relay 生成 Signed URL，Provider binding 记为 `gemini_external_url`，推理时作为 Gemini `fileData.fileUri`。
-- 当前请求文件总量 `> 99 MiB`：原始文件不写 Supabase input-file object，继续使用 AIHubMix Gemini Native Proxy -> Gemini Files API -> `fileUri`。
-- Supabase Signed URL TTL 复用现有 `SUPABASE_SIGNED_URL_TTL`，默认 `604800` 秒（7 天）；URL 过期时若 Relay fallback object 仍存在，会重新签发 URL，不重新上传 Gemini Files API。
-- 多文件阈值按 Request 聚合值判断，不按单文件分别判断。Material API 新增 `request_file_total_bytes / request_file_count / material_batch_id`，也支持对应 `X-Relay-*` Headers。
-- 聚合总量缺失且无法确定为单文件时，Relay Fail-Safe 地选择 Gemini Files API，避免把实际 >99 MiB 的多文件请求错误走 External URL。
-- `>99 MiB` Files API 路径会抑制 input-file Supabase fallback，即使旧客户端仍带 `relay_backed/always`，也不会把原始文件写 Supabase。
+- Relay 下载/接收材料后直接以实际 bytes 写入 `actual_size`；SHA-256 与 size 都由 Relay 计算。
+- 缺少 `request_file_total_bytes` 时不再保守走 Gemini Files API。单文件 547024 bytes 这类场景会直接判定为 `<=99 MiB`，进入 Supabase Signed External URL。
+- 真正调用模型前，Relay 对 Session + Request 的最终 `material_ids` 重新读取 `actual_size` 并求和。
+- Request 总量 `<=99 MiB`：Supabase Private Bucket -> Signed URL -> `gemini_external_url` -> Gemini `fileData.fileUri`。
+- Request 总量 `>99 MiB`：Gemini Files API -> `gemini_file_uri`。若多个小文件此前已有 External URL bridge，Relay 会在 dispatch 前升格到 Files API，并删除输入文件 Supabase 副本。
+- 0.5.2 的 `request_file_total_bytes/request_file_count/material_batch_id` 与 `X-Relay-*` headers 继续兼容，但只用于诊断，不能覆盖 Relay 自己的实际 size。
 - 无新增 SQL migration。
+
+详细实现见 `GEMINI_RELAY_AUTHORITATIVE_SIZE_0.5.3_IMPLEMENTATION.md`。
 
 ## 关键边界
 

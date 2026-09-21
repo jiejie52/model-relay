@@ -957,6 +957,7 @@ async def create_request(
             route=session_route,
         )
     material_hashes: dict[str, str] = {}
+    material_total_bytes = 0
     for material_id in effective_material_ids:
         material = await repo.get_material(
             material_id, tenant_id=tenant_id, conversation_hash=conversation_hash
@@ -964,6 +965,31 @@ async def create_request(
         if not material or material.get("status") in {"failed", "deleted", "reupload_required", "receiving", "binding"}:
             raise HTTPException(status_code=409, detail=f"Material is not usable: {material_id}")
         material_hashes[material_id] = str(material.get("sha256") or "")
+        raw_size = material.get("actual_size")
+        if raw_size is None:
+            raw_size = material.get("size_bytes")
+        if raw_size is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "MATERIAL_SIZE_MISSING", "material_id": material_id},
+            )
+        material_total_bytes += int(raw_size)
+
+    if provider == "gemini":
+        threshold = int(getattr(settings, "gemini_files_threshold_bytes", 99 * 1024 * 1024))
+        log_info(
+            logger,
+            "gemini_request_size_calculated",
+            session_id=str(session_id),
+            provider=provider,
+            model=model,
+            connection_id=connection_id,
+            material_count=len(effective_material_ids),
+            material_total_bytes=material_total_bytes,
+            threshold_bytes=threshold,
+            selected_transport=("supabase_external_url" if material_total_bytes <= threshold else "gemini_files"),
+            decision_source="relay_request_material_sum",
+        )
 
     snapshot = {
         "schema_version": "relay-request/2.1",
@@ -974,6 +1000,7 @@ async def create_request(
         "instructions": body.instructions,
         "material_ids": body.material_ids,
         "material_hashes": material_hashes,
+        "material_total_bytes": material_total_bytes,
         "provider": provider,
         "connection_id": connection_id,
         "model": model,

@@ -1,26 +1,34 @@
-Model Relay 0.5.2 verification
-Date: 2026-09-21
-Baseline: model-relay-v2 0.5.1
+Model Relay 0.5.3 verification
+==============================
 
-Result
-======
-python -m compileall -q app tests                       PASS
-PYTHONPATH=. pytest -q                                  62 passed
-API import / version smoke                              PASS (0.5.2-gemini-dual-transport)
-Worker import smoke                                     PASS
+Baseline: model-relay-v2 0.5.2
+Target:   model-relay-v2 0.5.3-relay-authoritative-size
 
-0.5.2 regression coverage
-=========================
-- Gemini aggregate <= 99 MiB -> Supabase fallback object + Signed URL binding, no Files API call
-- Exact 99 MiB boundary remains on External URL path
-- Gemini aggregate > 99 MiB -> Files API binding, no Supabase input-object write
-- >99 MiB suppresses legacy relay_backed/always input-file storage policy
-- Missing multi-file aggregate -> conservative Files API path
-- Explicit single-file count -> aggregate inferred from actual bytes
-- Expired gemini_external_url -> re-sign Supabase URL without Files API upload
-- Existing provider-native/fallback/account-scope/Kimi/raw-error/routing/logging tests remain green
+1. Python compileall
+   python -m compileall -q app tests
+   PASS
 
-Notes
-=====
-- Tests use fakes/mocks for Supabase and Provider HTTP; no real AIHubMix, Gemini Files API, Supabase project, Railway or SAE network integration was executed in this environment.
-- No database migration is required from 0.5.1 to 0.5.2.
+2. Unit tests
+   PYTHONPATH=. pytest -q
+   63 passed in 2.24s
+   PASS
+
+3. API/Worker import smoke
+   RELAY_API_TOKEN=dummy SUPABASE_URL=https://example.supabase.co SUPABASE_SECRET_KEY=dummy PYTHONPATH=. python -c 'import app.api; import app.worker'
+   API version: 0.5.3-relay-authoritative-size
+   PASS
+
+4. Gemini current-failure regression
+   actual_size=547024 bytes, no caller aggregate
+   -> supabase_external_url
+   -> decision_source=relay_actual_bytes
+   PASS
+
+5. Gemini multi-file authoritative request sum
+   60 MiB + 60 MiB, threshold 99 MiB
+   -> gemini_files
+   -> decision_source=relay_request_material_sum
+   -> External URL input copies removed after Files binding succeeds
+   PASS (unit-covered with scaled byte threshold)
+
+No new SQL migration is required.

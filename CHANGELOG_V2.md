@@ -1,5 +1,16 @@
 # Model Relay Changelog
 
+## 0.5.3 Relay-Authoritative Gemini Size
+
+- Gemini file-size authority moved from caller aggregate hints to Relay-measured bytes.
+- `/v2/materials` uses actual received bytes; missing `request_file_total_bytes` no longer forces Gemini Files API.
+- Before provider dispatch Relay sums the exact Request material `actual_size` values and makes the final `<=99 MiB` / `>99 MiB` transport decision.
+- Multi-file batches that cross the threshold are promoted from External URL bindings to Gemini Files API before inference; the input-file Supabase fallback copies are removed after provider binding succeeds.
+- Caller total/count/batch fields remain compatibility diagnostics only and cannot override Relay routing.
+- Legacy 0.5.2 small materials that only have a Files API binding and no fallback bytes fail closed with `MATERIAL_REUPLOAD_REQUIRED` when a <=99 MiB request requires External URL.
+- Added authoritative-size and request-level promotion/cleanup structured logs.
+- No database migration.
+
 ## 0.5.2 Gemini Dual Transport
 
 - Gemini inference route remains `GeminiNativeAdapter`; only the material transport changes.

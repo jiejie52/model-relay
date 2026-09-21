@@ -1,6 +1,6 @@
-# Model Relay 0.5.2 部署与迁移关键操作
+# Model Relay 0.5.3 部署与迁移关键操作
 
-本版本以 `0.5.1` 为基线，新增 Gemini 双材料传输策略，同时保留服务端 RouteResolver、默认全 Connection 可用、完整上传日志和 Raw Error。
+本版本以 `0.5.2` 为基线，把 Gemini 文件大小判断改为 Relay authoritative size，同时保留服务端 RouteResolver、默认全 Connection 可用、完整上传日志和 Raw Error。
 
 1. **Route 仍由 Relay 服务端决定**：Dify 只传 `provider + model`，不负责 `connection_id / target_connection_id`。
 2. **Gemini 按当前 Request 文件总量选材料传输**：`<=99 MiB` 使用 Supabase Signed External URL；`>99 MiB` 使用 Gemini Files API。两条路径都继续由 `GeminiNativeAdapter` 推理。
@@ -8,7 +8,7 @@
 
 ## 1. 数据库
 
-**0.5.1 -> 0.5.2 不需要执行新的 SQL。**
+**0.5.2 -> 0.5.3 不需要执行新的 SQL。**
 
 现有 0.4.1 数据库应已经执行过：
 
@@ -19,7 +19,7 @@ sql/003_relay_v2_session_request_material.sql
 sql/004_provider_native_file_ingress.sql
 ```
 
-0.5.2 继续复用现有 `relay_materials / provider_material_bindings / material_fallback_objects` 与 Session/Request schema，因此无需新 migration。
+0.5.3 继续复用现有 `relay_materials.actual_size / provider_material_bindings / material_fallback_objects` 与 Session/Request binding snapshot，因此无需新 migration。
 
 ## 2. Railway：Grok + Gemini Native
 
@@ -116,25 +116,22 @@ ROUTE_CATALOG_JSON={"revision":"relay-route-catalog/2026-09-21.2","routes":[{"pr
 
 错误会分别返回 `ROUTE_NOT_FOUND`、`ROUTE_MODEL_UNSUPPORTED`、`ROUTE_CONNECTION_DISABLED`、`ROUTE_CONNECTION_NOT_CONFIGURED`、`ROUTE_ADAPTER_NOT_REGISTERED` 或 `ROUTE_FILE_ADAPTER_NOT_REGISTERED`，不再把配置缺失混成 `ROUTE_NOT_FOUND`。
 
-## 5. Material API：Gemini 99 MiB 双传输策略
+## 5. Material API：Gemini 99 MiB Relay 权威计算策略
 
-`/v2/materials` 仍然一次创建一个 Material。为了严格按“本次模型请求全部文件总和”判断，调用方应把同一批文件的聚合信息随每个 Material 一起提交：
+`/v2/materials` 仍然一次创建一个 Material，但调用方**不再需要计算总字节数**。Relay 会读取实际文件 bytes、写入 `actual_size`，并在真正的 Session Request 冻结时对最终材料集合自行求和。
 
-```text
-request_file_total_bytes = 当前 Request 全部上传文件原始字节总和
-request_file_count       = 当前 Request 文件数
-material_batch_id        = 本次材料批次的稳定关联 ID（建议）
-```
-
-也可以通过 Headers 传：
+0.5.2 的以下字段仍可提交，但只是兼容/诊断 hint，不能控制 transport：
 
 ```text
+request_file_total_bytes
+request_file_count
+material_batch_id
 X-Relay-Request-File-Total-Bytes
 X-Relay-Request-File-Count
 X-Relay-Material-Batch-Id
 ```
 
-JSON body 字段存在时优先于 Header。多个文件必须对同一批次发送相同的 `request_file_total_bytes / request_file_count / material_batch_id`。
+如果 hint 与 Relay 实际测量不一致，会打印 `gemini_client_size_hint_ignored`。
 
 ### Gemini <= 99 MiB 示例
 
@@ -147,10 +144,7 @@ JSON body 字段存在时优先于 Header。多个文件必须对同一批次发
   "purpose": "inference_input",
   "filename": "report.pdf",
   "content_type": "application/pdf",
-  "source_url": "https://...temporary...",
-  "request_file_total_bytes": 73400320,
-  "request_file_count": 2,
-  "material_batch_id": "batch-20260921-001"
+  "source_url": "https://...temporary..."
 }
 ```
 
@@ -170,17 +164,17 @@ MaterialResponse 会显示 `fallback.stored=true` 和 `provider_binding.represen
 ### Gemini > 99 MiB
 
 ```text
-request_file_total_bytes > 103809024
+Relay 在 Request 冻结时 sum(actual_size) > 103809024
  -> Gemini Files API
  -> provider binding representation=gemini_file_uri
- -> Supabase input-file object: 不创建
+ -> 删除为 External URL bridge 暂存的 input-file Supabase 副本
 ```
 
-这一分支会忽略旧客户端针对输入原始字节设置的 `relay_backed/always`，避免违反“>99 MiB 不走 Supabase”的策略。Artifact/History/Raw Error 的 Supabase 使用不受影响。
+调用方是否提交 `request_file_total_bytes` 不影响判断。Relay 对最终 Session + Request 材料集合重新求和，并在 Provider dispatch 前冻结正确 binding generation。Artifact/History/Raw Error 的 Supabase 使用不受影响。
 
-### 聚合总量缺失时
+### 不再要求调用方聚合总量
 
-如果 `request_file_total_bytes` 缺失，但 `request_file_count=1`，Relay 可用实际接收字节推断总量。若两者都不足以证明是单文件，Relay 会保守走 Gemini Files API，并记录 `gemini_request_file_total_missing`，防止多文件实际总量 >99 MiB 却错误走 External URL。
+缺少 `request_file_total_bytes/request_file_count/material_batch_id` 不再触发保守 Files API。Relay 以实际接收的 bytes 作为 Material 权威 size，并在 Request 阶段自行求和。旧字段仅用于日志诊断；不一致时记录 `gemini_client_size_hint_ignored`。
 
 ### Kimi / Grok / archive
 

@@ -338,6 +338,14 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0]
 
+    async def delete_material_fallback(self, material_id: str) -> None:
+        await self.backend.delete(
+            "material_fallback_objects", filters={"material_id": f"eq.{material_id}"}
+        )
+
+    async def delete_object(self, object_id: str) -> None:
+        await self.backend.delete("relay_objects", filters={"id": f"eq.{object_id}"})
+
     async def create_binding_attempt(self, row: dict[str, Any]) -> dict[str, Any]:
         rows = await self.backend.insert("material_binding_attempts", row)
         return rows[0]

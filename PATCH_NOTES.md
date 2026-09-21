@@ -1,3 +1,21 @@
+# Model Relay 0.5.3 Patch Notes
+
+## Relay-authoritative Gemini size
+
+0.5.3 removes the 0.5.2 dependency on caller-provided aggregate bytes. Relay measures each uploaded payload itself, persists `actual_size`, and recomputes the exact Request material total immediately before binding freeze/provider dispatch.
+
+- `<= 99 MiB`: Supabase Private Bucket + 7-day-renewable Signed URL + `gemini_external_url`.
+- `> 99 MiB`: Gemini Files API + `gemini_file_uri`.
+- `request_file_total_bytes/request_file_count/material_batch_id` are compatibility diagnostics only.
+- Missing aggregate hints no longer select Files API.
+- Multi-file Request totals are re-evaluated by Relay; if the sum crosses 99 MiB, External URL materials are promoted to Files API and their input-file Supabase copies are removed before inference.
+- Existing frozen Request snapshots remain immutable on retry.
+- No SQL migration.
+
+See `GEMINI_RELAY_AUTHORITATIVE_SIZE_0.5.3_IMPLEMENTATION.md`.
+
+---
+
 # Model Relay 0.5.2 Patch Notes
 
 ## Gemini dual material transport

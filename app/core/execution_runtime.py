@@ -106,6 +106,8 @@ class SharedExecutionRuntime:
             tenant_id=request_row["tenant_id"],
             conversation_hash=request_row["conversation_hash"],
             existing_snapshot=existing_binding_snapshot,
+            request_id=request_id,
+            session_id=session_id,
         )
         log_info(
             logger,
