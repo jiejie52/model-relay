@@ -1,4 +1,5 @@
 from functools import lru_cache
+import hashlib
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,9 +22,14 @@ class Settings(BaseSettings):
     # the existing AIHubMix connection while SAE can enable official Moonshot.
     aihubmix_api_key: SecretStr | None = None
     aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
+    # Required only when the native Gemini connection is enabled. Keep this
+    # explicit because AIHubMix Native Proxy base paths can differ by account.
+    aihubmix_gemini_base_url: str | None = None
+    aihubmix_gemini_connection_id: str = "aihubmix_gemini_native"
 
     moonshot_api_key: SecretStr | None = None
     moonshot_base_url: str = "https://api.moonshot.cn/v1"
+    moonshot_connection_id: str = "moonshot_official"
 
     enabled_connections: str = "aihubmix_default"
     default_connection_id: str = "aihubmix_default"
@@ -60,6 +66,13 @@ class Settings(BaseSettings):
     material_ingress_max_bytes: int = 104857600
     material_ingress_timeout_seconds: float = 120.0
     material_allow_http: bool = False
+    material_default_durability_policy: str = "native_first"
+    material_default_fallback_policy: str = "on_provider_unavailable"
+    gemini_file_soft_ttl_seconds: int = 172800
+    gemini_file_poll_seconds: float = 2.0
+    gemini_file_processing_timeout_seconds: float = 300.0
+    kimi_file_poll_seconds: float = 2.0
+    kimi_file_processing_timeout_seconds: float = 300.0
 
     upstream_connect_timeout_seconds: float = 30.0
     upstream_write_timeout_seconds: float = 120.0
@@ -87,6 +100,22 @@ class Settings(BaseSettings):
     def worker_pool_set(self) -> set[str]:
         pools = {x.strip() for x in self.worker_execution_pools.split(",") if x.strip()}
         return pools or {self.execution_pool}
+
+    def connection_account_scope_hash(self, connection_id: str) -> str:
+        """Opaque fingerprint used to prevent provider file reuse across keys."""
+        if connection_id == self.aihubmix_gemini_connection_id:
+            if self.aihubmix_api_key is None or not self.aihubmix_gemini_base_url:
+                raise RuntimeError("Gemini native connection is not configured")
+            material = f"{connection_id}|{self.aihubmix_gemini_base_url.rstrip('/')}|{self.aihubmix_api_key.get_secret_value()}"
+        elif connection_id == self.moonshot_connection_id:
+            if self.moonshot_api_key is None:
+                raise RuntimeError("Moonshot connection is not configured")
+            material = f"{connection_id}|{self.moonshot_root}|{self.moonshot_api_key.get_secret_value()}"
+        else:
+            # Non-native file connections do not expose a provider-side file
+            # resource, but still get a stable scope for snapshot/audit fields.
+            material = f"{connection_id}|relay-fallback"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @lru_cache

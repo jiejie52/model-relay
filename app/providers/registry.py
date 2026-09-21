@@ -22,8 +22,13 @@ class ProviderRegistry:
         enabled = self.settings.enabled_connection_set
         if "aihubmix_default" in enabled and self.settings.aihubmix_api_key is None:
             raise RuntimeError("AIHUBMIX_API_KEY is required because aihubmix_default is enabled")
-        if "moonshot_official" in enabled and self.settings.moonshot_api_key is None:
-            raise RuntimeError("MOONSHOT_API_KEY is required because moonshot_official is enabled")
+        if self.settings.aihubmix_gemini_connection_id in enabled:
+            if self.settings.aihubmix_api_key is None:
+                raise RuntimeError("AIHUBMIX_API_KEY is required because the Gemini native connection is enabled")
+            if not self.settings.aihubmix_gemini_base_url:
+                raise RuntimeError("AIHUBMIX_GEMINI_BASE_URL is required because the Gemini native connection is enabled")
+        if self.settings.moonshot_connection_id in enabled and self.settings.moonshot_api_key is None:
+            raise RuntimeError("MOONSHOT_API_KEY is required because the Moonshot connection is enabled")
 
     def register_v2(self, connection_id: str, adapter: object) -> None:
         self._v2[connection_id] = adapter

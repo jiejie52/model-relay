@@ -1,5 +1,17 @@
 # Relay v2 改造摘要
 
+## 0.4.0 Provider-native File Ingress
+
+- Gemini 输入文件默认通过 AIHubMix Gemini Native Proxy 直传 Gemini Files API，不先持久化 Supabase input-file object。
+- 新增 Gemini native generateContent Adapter，模型请求直接使用冻结的 `fileUri` binding。
+- Kimi 输入文件默认直连官方 Files API：文本 `file-extract + /content`，图片/视频使用 `ms://<file_id>`。
+- Supabase 对输入原始文件收窄为 fallback/bridge/durability；Request/History/Raw Error/Provider-derived artifact 的现有 Supabase 用法保留。
+- `material_id` 与 Provider resource 解耦，新增 account scope、binding generation、binding attempts、fallback objects、Request binding snapshot。
+- Provider file binding 失效且没有 fallback/source 时 Fail-Closed 为 `MATERIAL_REUPLOAD_REQUIRED`。
+- Files API 原始 Error 完整保真，不截断、不归一化。
+- 新增 `sql/004_provider_native_file_ingress.sql`。
+- 单元测试新增 provider-native/fallback/account-scope/Kimi wire 语义覆盖。
+
 ## 0.3.1 Error Passthrough 修复
 
 - 修复 v2 Error Envelope 只返回 `body_size/body_sha256/body_object_id`、未返回原始 Provider body 的问题。

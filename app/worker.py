@@ -13,9 +13,13 @@ from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.queue_executor import QueueExecutor
 from .materials.resolver import MaterialResolver
+from .materials.fallback_storage import FallbackObjectStorage
+from .materials.binding_resolver import BindingResolver
+from .materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
 from .persistence.object_storage import StorageRegistry
 from .persistence.supabase_storage import SupabaseObjectStorage
 from .providers.moonshot_chat import MoonshotChatAdapter
+from .providers.gemini_native import GeminiNativeAdapter
 from .providers.registry import ProviderRegistry
 from .providers.responses_v2 import ResponsesV2Adapter
 from .supabase import SupabaseBackend
@@ -34,18 +38,38 @@ class RelayWorker:
         self.repo = RelayV2Repository(self.backend, settings)
         self.storage = StorageRegistry(SupabaseObjectStorage(self.backend, settings))
         self.materials = MaterialResolver(self.repo, self.storage, settings)
+        self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
+        self.file_adapters = ProviderFileRegistry()
+        if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+            self.file_adapters.register(
+                settings.aihubmix_gemini_connection_id,
+                GeminiAIHubMixFileAdapter(settings),
+            )
+        if settings.moonshot_connection_id in settings.enabled_connection_set:
+            self.file_adapters.register(
+                settings.moonshot_connection_id,
+                KimiOfficialFileAdapter(settings, self.repo, self.storage),
+            )
+        self.bindings = BindingResolver(self.repo, self.fallback_storage, self.file_adapters)
         self.providers = ProviderRegistry(settings)
         self.providers.validate_enabled_connections()
-        self.providers.register_v2(
-            "aihubmix_default",
-            ResponsesV2Adapter(self.providers.openai_compatible, self.materials),
-        )
-        self.providers.register_v2(
-            "moonshot_official",
-            MoonshotChatAdapter(settings, self.materials, self.repo),
-        )
+        if "aihubmix_default" in settings.enabled_connection_set:
+            self.providers.register_v2(
+                "aihubmix_default",
+                ResponsesV2Adapter(self.providers.openai_compatible, self.materials),
+            )
+        if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+            self.providers.register_v2(
+                settings.aihubmix_gemini_connection_id,
+                GeminiNativeAdapter(settings),
+            )
+        if settings.moonshot_connection_id in settings.enabled_connection_set:
+            self.providers.register_v2(
+                settings.moonshot_connection_id,
+                MoonshotChatAdapter(settings, self.materials, self.repo),
+            )
         self.runtime = SharedExecutionRuntime(
-            self.repo, self.storage, self.providers, self.materials, settings
+            self.repo, self.storage, self.providers, self.materials, self.bindings, settings
         )
         self.errors = RawErrorRecorder(self.repo, self.storage, settings)
         self.queue = QueueExecutor(self.runtime, self.errors, self.repo, settings)

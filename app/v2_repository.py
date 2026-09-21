@@ -247,6 +247,12 @@ class RelayV2Repository(RelayRepository):
         rows = await self.backend.insert("relay_materials", row)
         return rows[0]
 
+    async def update_material(self, material_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
+        rows = await self.backend.update(
+            "relay_materials", values, filters={"id": f"eq.{material_id}"}
+        )
+        return rows[0] if rows else None
+
     async def get_material(
         self,
         material_id: str,
@@ -285,20 +291,25 @@ class RelayV2Repository(RelayRepository):
         *,
         material_id: str,
         connection_id: str,
-        purpose: str,
-        representation: str,
-        adapter_version: str,
+        purpose: str | None = None,
+        representation: str | None = None,
+        adapter_version: str | None = None,
+        account_scope_hash: str | None = None,
     ) -> dict[str, Any] | None:
+        filters: dict[str, str] = {
+            "material_id": f"eq.{material_id}",
+            "connection_id": f"eq.{connection_id}",
+        }
+        if purpose is not None:
+            filters["purpose"] = f"eq.{purpose}"
+        if representation is not None:
+            filters["representation"] = f"eq.{representation}"
+        if adapter_version is not None:
+            filters["adapter_version"] = f"eq.{adapter_version}"
+        if account_scope_hash is not None:
+            filters["account_scope_hash"] = f"eq.{account_scope_hash}"
         rows = await self.backend.select(
-            "provider_material_bindings",
-            filters={
-                "material_id": f"eq.{material_id}",
-                "connection_id": f"eq.{connection_id}",
-                "purpose": f"eq.{purpose}",
-                "representation": f"eq.{representation}",
-                "adapter_version": f"eq.{adapter_version}",
-            },
-            limit=1,
+            "provider_material_bindings", filters=filters, limit=1, order="generation.desc"
         )
         return rows[0] if rows else None
 
@@ -306,6 +317,36 @@ class RelayV2Repository(RelayRepository):
         rows = await self.backend.upsert(
             "provider_material_bindings",
             row,
-            on_conflict="material_id,connection_id,purpose,representation,adapter_version",
+            on_conflict=(
+                "material_id,connection_id,account_scope_hash,purpose,representation,"
+                "adapter_version,generation"
+            ),
         )
         return rows[0]
+
+    async def get_material_fallback(self, material_id: str) -> dict[str, Any] | None:
+        rows = await self.backend.select(
+            "material_fallback_objects",
+            filters={"material_id": f"eq.{material_id}"},
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    async def upsert_material_fallback(self, row: dict[str, Any]) -> dict[str, Any]:
+        rows = await self.backend.upsert(
+            "material_fallback_objects", row, on_conflict="material_id"
+        )
+        return rows[0]
+
+    async def create_binding_attempt(self, row: dict[str, Any]) -> dict[str, Any]:
+        rows = await self.backend.insert("material_binding_attempts", row)
+        return rows[0]
+
+    async def update_binding_attempt(
+        self, attempt_id: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        rows = await self.backend.update(
+            "material_binding_attempts", values, filters={"attempt_id": f"eq.{attempt_id}"}
+        )
+        return rows[0] if rows else None
+

@@ -1,115 +1,168 @@
-# Relay v2 关键操作指示
+# Model Relay 0.4.0 部署关键操作
 
-本目录是基于 `model-relay_0903` 的改造版。主协议改为 **Session -> Request -> optional Job**；`/v1/jobs` 继续作为兼容入口。
+## 1. 从 0.3.1 升级数据库
 
-## 1. 数据库升级
-
-先确认旧版本 SQL 已执行，再按顺序执行：
+现有数据库已经执行过 `001/002/003` 时，**只执行新增 migration**：
 
 ```text
-sql/001_relay_schema.sql
-sql/002_fusion_runtime.sql          # 仍需兼容旧 Fusion 时执行
-sql/003_relay_v2_session_request_material.sql
+sql/004_provider_native_file_ingress.sql
 ```
 
-`003` 新增 `relay_requests / relay_materials / relay_objects / provider_material_bindings`，并给 `relay_jobs` 增加 `request_id / execution_pool / lease_epoch / protocol_version`。
+全新数据库才按：
 
-## 2. 环境变量
+```text
+001_relay_schema.sql
+002_fusion_runtime.sql                 # 仍需旧 Fusion 时
+003_relay_v2_session_request_material.sql
+004_provider_native_file_ingress.sql
+```
 
-从 `.env.example` 复制。两地必须使用同一版本代码/镜像，只改配置。
+`004` 会让 `relay_materials.object_id` 可为空，并新增 fallback、binding attempt、account scope/generation 与 Request binding snapshot。不要重复执行 001/002/003 覆盖现有生产结构。
 
-Railway 示例：
+## 2. Gemini / Railway 配置
+
+如果 Railway 需要 AIHubMix Gemini Native：
 
 ```text
 DEPLOYMENT_ID=railway
 EXECUTION_POOL=railway-default
 WORKER_EXECUTION_POOLS=railway-default
-ENABLED_CONNECTIONS=aihubmix_default
+ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native
+
 AIHUBMIX_API_KEY=...
-DEFAULT_STORAGE_ID=supabase_shared
+AIHUBMIX_GEMINI_BASE_URL=<WF-NormalInference 中已验证的 Native Proxy base URL>
+AIHUBMIX_GEMINI_CONNECTION_ID=aihubmix_gemini_native
 ```
 
-阿里云 SAE 示例：
+`AIHUBMIX_GEMINI_BASE_URL` 不在代码里猜测，必须使用你当前已验证工作流中的值。Relay 会调用：
+
+```text
+POST <base>/upload/v1beta/files
+POST <x-goog-upload-url>        # upload, finalize
+GET  <base>/v1beta/<file.name>  # PROCESSING 时轮询
+POST <base>/v1beta/models/<model>:generateContent
+```
+
+## 3. Kimi / SAE 配置
 
 ```text
 DEPLOYMENT_ID=aliyun-sae
 EXECUTION_POOL=aliyun-default
 WORKER_EXECUTION_POOLS=aliyun-default
 ENABLED_CONNECTIONS=moonshot_official
+
 MOONSHOT_API_KEY=...
-DEFAULT_STORAGE_ID=supabase_shared
+MOONSHOT_BASE_URL=https://api.moonshot.cn/v1
+MOONSHOT_CONNECTION_ID=moonshot_official
 ```
 
-首期两边继续共用同一 Supabase Postgres + Storage。不要让两个 Worker 使用相同 `EXECUTION_POOL`，除非确实希望它们共同消费同一类任务。
+若使用国际站/其他官方 endpoint，修改 `MOONSHOT_BASE_URL`，不要复用不属于同一 account scope 的 file ID。
 
-## 3. 启动
+## 4. Supabase 的新角色
 
-API：
+下面这些 **仍使用现有 Supabase Artifact Storage**：
+
+```text
+request snapshot / raw response / raw error / session history /
+provider-derived Kimi extraction / Fusion artifacts
+```
+
+只有“原始输入文件 payload”改为 native-first。成功的 Gemini/Kimi native upload 默认不创建 Supabase input-file fallback。
+
+## 5. Material API 新调用方式
+
+上传时必须告诉 Relay 目标 connection，才能走 native file path。
+
+### Gemini
+
+```text
+POST /v2/materials
+Idempotency-Key: <stable-key>
+Content-Type: multipart/form-data
+
+file=<binary>
+tenant_id=...
+conversation_hash=...
+target_connection_id=aihubmix_gemini_native
+durability_policy=native_first
+fallback_policy=on_provider_unavailable
+```
+
+成功响应重点：
+
+```json
+{
+  "schema_version": "relay-material/2.1",
+  "status": "ready",
+  "durability": "provider_bound",
+  "ready_for": ["aihubmix_gemini_native"],
+  "fallback": {"stored": false, "object_ref": null},
+  "provider_binding": {
+    "provider": "gemini",
+    "state": "active"
+  }
+}
+```
+
+### Kimi
+
+把 `target_connection_id` 改成：
+
+```text
+moonshot_official
+```
+
+Relay 根据 MIME 在 Adapter 内决定：
+
+```text
+PDF/DOC/DOCX/TXT/MD/... -> purpose=file-extract -> GET /files/{id}/content
+image/* (SVG 除外)      -> purpose=image        -> ms://<file_id>
+video/*                  -> purpose=video        -> ms://<file_id>
+```
+
+## 6. durability / fallback 策略
+
+默认：
+
+```text
+durability_policy=native_first
+fallback_policy=on_provider_unavailable
+```
+
+含义：Provider native 成功时不存原始输入文件；只有明确的暂时不可用窗口（连接/超时/408/425/5xx/Provider processing timeout）才允许 Supabase 接住文件。`429` 默认返回 Provider 原始错误，不自动改变留存策略。
+
+如果业务明确要求长期可重绑/跨 Provider：
+
+```text
+durability_policy=relay_backed
+```
+
+此时 native 上传成功后仍会额外保存一份 fallback 原始字节。
+
+## 7. 启动
 
 ```bash
 uvicorn app.api:app --host 0.0.0.0 --port 8000
-```
-
-Worker：
-
-```bash
 python -m app.worker
 ```
 
-健康检查：`GET /health`。
-
-## 4. 新主流程
-
-1. `POST /v2/materials`：先把临时 URL/上传文件持久化，取得 `material_id`。
-2. `POST /v2/sessions`：创建 Session，固定 provider/connection/model/context policy/material base。
-3. `POST /v2/sessions/{session_id}/requests`：每轮请求都创建 Request；`execution.mode=sync` 不建 Job，`async` 才建 Job。
-4. 查询：`GET .../requests/{request_id}` 或 `/result`。
-5. 错误原文：失败 Request 的 Error Envelope 直接包含完整 `body_text`（可严格解码时）和精确 `body_base64`；`GET .../error/raw` 仍可读取 Storage 中归档的原始字节。不做 `UPSTREAM_*` 归类或摘要。
-6. `indeterminate`：表示 Provider 是否完成未知；系统不会自动再建 Job 重放。先查询/对账，必要时显式取消该 Request 后再发起新的业务请求。
-
-所有 Request 查询/取消仍要求：
+健康检查：
 
 ```text
-Authorization: Bearer <RELAY_API_TOKEN>
-X-Tenant-Id: <tenant>
-X-Conversation-Hash: <conversation_hash>
+GET /health
+version = 0.4.0-provider-native-files
 ```
 
-创建 Request 还必须提供稳定的 `Idempotency-Key`。
-
-## 5. 官方 Kimi
-
-新连接名：`moonshot_official`，Adapter：`app/providers/moonshot_chat.py`。
-
-- 普通聊天走官方 Chat Completions。
-- 图片使用持久化 Material 读取后转 Base64 wire payload。
-- 文本文档/一般文档使用 file-extract 绑定；Provider file binding 失效后会从持久化 Material 重建。
-- `provider_payload.material_mode=vision` 时，若当前材料只能走文本抽取，会 Fail-Closed，不会静默丢弃版式/视觉证据。
-- Structured Output 在 Provider wire 层适配，返回后仍使用调用方 canonical JSON Schema 校验。
-
-上线前必须用目标 Kimi 模型做真实集成测试，尤其验证文件上传/提取、图像输入、结构化输出、推理参数和原始错误返回；这些能力会随具体模型/官方协议变化。
-
-## 6. 兼容入口
-
-`/v1/jobs`、旧 `job_id` 查询/取消仍保留；旧 Fusion 执行被隔离在 `app/compatibility/legacy_worker.py`。新 v2 core/Provider 执行不再按 Fusion stage 分支。
-
-注意：兼容不包含旧的 Error 归一化策略。依赖 `UPSTREAM_BAD_REQUEST/UPSTREAM_SERVER_ERROR` 的调用方需要同步升级。
-
-## 7. 上线前最少验收
+## 8. 最少验收
 
 ```bash
+python -m compileall -q app
 python -m unittest discover -s tests -v
 ```
 
-重点再人工/集成验证：同步超时不创建第二个 Job、同键不同请求返回冲突、Worker 在 Provider dispatch 后崩溃进入 `indeterminate`、`result_stored` 后崩溃只完成 commit 不重新推理、Railway/SAE 不跨 pool 误领、原始错误 hash 与上游 body 一致。
+预发布再做 4 个真实测试：
 
-
-## 0.3.0 -> 0.3.1 快速升级
-
-本补丁不修改数据库表结构，不需要重新执行 `003`。替换代码/镜像后同时重启 Relay API 与 Worker，然后访问 `/health`，确认版本为：
-
-```text
-0.3.1-session-request-material-error-passthrough
-```
-
-业务侧重放一个会触发 Provider 4xx 的测试请求，返回 `error.body_size` 应与 `error.body_text` UTF-8 字节数一致（文本 JSON 场景），并可将 `error.body_base64` 解码回完全相同的原始响应字节。
+1. Gemini PDF native upload 成功后，Supabase input-file fallback 无新增对象。
+2. Kimi PDF 经 `file-extract -> /content` 后参与模型请求；file_id 不直接作为文本上下文。
+3. Kimi image/video 请求使用 `ms://<file_id>`。
+4. 故意触发 Gemini/Kimi Files API 4xx/5xx，核对 raw error body/headers/phase 不截断。

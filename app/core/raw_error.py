@@ -41,6 +41,8 @@ class RawErrorRecorder:
         upstream_request_id = None
         content_type = None
         content_encoding = None
+        upstream_headers: dict[str, str] | None = None
+        phase: str | None = None
 
         if isinstance(exc, ProviderHTTPError):
             raw = exc.body
@@ -48,6 +50,8 @@ class RawErrorRecorder:
             upstream_request_id = exc.request_id
             content_type = exc.content_type or "application/octet-stream"
             content_encoding = exc.content_encoding
+            upstream_headers = dict(exc.response_headers) if getattr(exc, "response_headers", None) else None
+            phase = getattr(exc, "phase", None)
         elif isinstance(exc, SupabaseError):
             raw = exc.raw_body
             upstream_http_status = exc.status_code
@@ -120,6 +124,8 @@ class RawErrorRecorder:
             "source": source,
             "upstream_http_status": upstream_http_status,
             "upstream_request_id": upstream_request_id,
+            "upstream_headers": upstream_headers,
+            "phase": phase,
             "content_type": content_type,
             "content_encoding": content_encoding,
             "body_encoding": body_encoding,

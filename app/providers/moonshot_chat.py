@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 from typing import Any
 
@@ -18,9 +17,9 @@ from ..v2_repository import RelayV2Repository
 class MoonshotChatAdapter:
     """Official Moonshot/Kimi Chat Completions adapter.
 
-    Relay material identities remain provider-neutral. Text documents are adapted
-    through Moonshot's file-extract flow and images are sent as Base64 data URLs;
-    these are wire adaptations only and never replace the persisted Material.
+    Relay material identities remain provider-neutral. Text documents use the
+    provider-derived file-extract artifact, while image/video inputs reuse the
+    frozen official Files API ms:// binding. Raw input bytes are not uploaded here.
     """
 
     adapter_version = "moonshot-chat/1"
@@ -60,7 +59,8 @@ class MoonshotChatAdapter:
         if instructions:
             messages.insert(0, {"role": "system", "content": str(instructions)})
 
-        material_parts = await self._material_parts(context)
+        material_system_messages, material_parts = await self._material_parts(context)
+        messages.extend(material_system_messages)
         user_message = self._user_message(context.snapshot.get("input"), material_parts)
         messages.append(user_message)
 
@@ -167,165 +167,55 @@ class MoonshotChatAdapter:
             },
         )
 
-    async def _material_parts(self, context: V2ExecutionContext) -> list[dict[str, Any]]:
-        parts: list[dict[str, Any]] = []
+    async def _material_parts(
+        self, context: V2ExecutionContext
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        system_messages: list[dict[str, Any]] = []
+        visual_parts: list[dict[str, Any]] = []
+        by_id = {str(x.get("material_id")): x for x in context.material_bindings}
         for material_id in context.material_ids:
-            resolved = await self.materials.resolve(
-                material_id,
-                tenant_id=context.tenant_id,
-                conversation_hash=context.conversation_hash,
-                with_bytes=True,
-            )
-            assert resolved.data is not None
-            mime = str(resolved.material.get("content_type") or "application/octet-stream")
-            filename = str(resolved.material.get("filename") or material_id)
-
-            if mime.startswith("image/"):
-                encoded = base64.b64encode(resolved.data).decode("ascii")
-                parts.append(
+            binding = by_id.get(material_id)
+            if not binding:
+                raise ProviderRequestError(
+                    "MATERIAL_BINDING_MISSING",
+                    f"Frozen Kimi binding missing for {material_id}",
+                )
+            filename = str(binding.get("filename") or material_id)
+            purpose = str(binding.get("purpose") or "")
+            if purpose == "file-extract":
+                metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+                extraction_object_id = metadata.get("extraction_object_id")
+                if not extraction_object_id:
+                    raise ProviderRequestError(
+                        "MATERIAL_BINDING_INVALID",
+                        f"Kimi text binding has no extraction artifact for {material_id}",
+                    )
+                raw = await self.materials.read_object_id(str(extraction_object_id))
+                text = raw.decode("utf-8", errors="strict")
+                system_messages.append(
                     {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                        "role": "system",
+                        "content": f"[SOURCE_FILE:{filename}]\n{text}\n[END_SOURCE_FILE:{filename}]",
                     }
                 )
                 continue
 
-            if mime.startswith("text/") or mime in {"application/json", "application/xml"}:
-                text = resolved.data.decode("utf-8", errors="replace")
-            else:
-                material_mode = str((context.snapshot.get("provider_payload") or {}).get("material_mode") or "text").lower()
-                if material_mode in {"vision", "visual", "native_visual"}:
-                    raise ProviderRequestError(
-                        "MATERIAL_REPRESENTATION_UNSUPPORTED",
-                        f"Moonshot text file-extract would discard visual/layout evidence for {filename}; a verified visual representation is required",
-                    )
-                text = await self._extract_document_text(
-                    material_id=material_id,
-                    filename=filename,
-                    mime=mime,
-                    data=resolved.data,
-                    connection_id=context.snapshot["connection_id"],
+            uri = str(binding.get("external_uri") or "")
+            if not uri.startswith("ms://"):
+                raise ProviderRequestError(
+                    "MATERIAL_BINDING_INVALID",
+                    f"Kimi visual binding has no ms:// URI for {material_id}",
                 )
-            parts.append(
-                {
-                    "type": "text",
-                    "text": f"[material {material_id}: {filename}]\n{text}",
-                }
-            )
-        return parts
-
-    async def _extract_document_text(
-        self,
-        *,
-        material_id: str,
-        filename: str,
-        mime: str,
-        data: bytes,
-        connection_id: str,
-    ) -> str:
-        existing = await self.repo.get_provider_binding(
-            material_id=material_id,
-            connection_id=connection_id,
-            purpose="file-extract",
-            representation="text",
-            adapter_version=self.adapter_version,
-        )
-        provider_file_id = existing.get("provider_file_id") if existing else None
-        if not provider_file_id:
-            provider_file_id = await self._upload_file(filename, mime, data)
-            await self.repo.upsert_provider_binding(
-                {
-                    "material_id": material_id,
-                    "connection_id": connection_id,
-                    "purpose": "file-extract",
-                    "representation": "text",
-                    "adapter_version": self.adapter_version,
-                    "provider_file_id": provider_file_id,
-                    "metadata": {},
-                }
-            )
-        try:
-            return await self._read_file_content(str(provider_file_id))
-        except ProviderHTTPError as exc:
-            if exc.status_code not in {404, 410}:
-                raise
-            # Provider binding is a disposable cache. Rebuild it from the
-            # authoritative Relay Material when the provider-side file expires.
-            provider_file_id = await self._upload_file(filename, mime, data)
-            await self.repo.upsert_provider_binding(
-                {
-                    "material_id": material_id,
-                    "connection_id": connection_id,
-                    "purpose": "file-extract",
-                    "representation": "text",
-                    "adapter_version": self.adapter_version,
-                    "provider_file_id": provider_file_id,
-                    "metadata": {"recreated": True},
-                }
-            )
-            return await self._read_file_content(str(provider_file_id))
-
-    async def _upload_file(self, filename: str, mime: str, data: bytes) -> str:
-        url = f"{self.settings.moonshot_root}/files"
-        headers = {"Authorization": f"Bearer {self.settings.moonshot_api_key.get_secret_value()}"}
-        timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
-            async with client.stream(
-                "POST",
-                url,
-                headers=headers,
-                data={"purpose": "file-extract"},
-                files={"file": (filename, data, mime)},
-            ) as response:
-                raw = await read_raw_response(response)
-                response_status = response.status_code
-                response_headers = dict(response.headers)
-        if not 200 <= response_status < 300:
-            raise ProviderHTTPError(
-                response_status,
-                raw,
-                content_type=response_headers.get("content-type"),
-                content_encoding=response_headers.get("content-encoding"),
-                request_id=self._request_id(response_headers),
-            )
-        try:
-            decoded = decode_entity(raw, response_headers.get("content-encoding"))
-            payload = json.loads(decoded.decode("utf-8"))
-            file_id = payload.get("id")
-        except Exception as exc:
-            raise ProviderHTTPError(response_status, raw, "Moonshot file upload returned invalid JSON", content_type=response_headers.get("content-type"), content_encoding=response_headers.get("content-encoding"), request_id=self._request_id(response_headers)) from exc
-        if not file_id:
-            raise ProviderRequestError("PROVIDER_FILE_BINDING", "Moonshot file upload returned no file id")
-        return str(file_id)
-
-    async def _read_file_content(self, file_id: str) -> str:
-        url = f"{self.settings.moonshot_root}/files/{file_id}/content"
-        timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
-            async with client.stream("GET", url, headers=self._headers()) as response:
-                raw = await read_raw_response(response)
-                response_status = response.status_code
-                response_headers = dict(response.headers)
-        if not 200 <= response_status < 300:
-            raise ProviderHTTPError(
-                response_status,
-                raw,
-                content_type=response_headers.get("content-type"),
-                content_encoding=response_headers.get("content-encoding"),
-                request_id=self._request_id(response_headers),
-            )
-        decoded = decode_entity(raw, response_headers.get("content-encoding"))
-        content_type = str(response_headers.get("content-type") or "")
-        if "json" in content_type:
-            try:
-                obj = json.loads(decoded.decode("utf-8"))
-                if isinstance(obj, dict):
-                    for key in ("content", "text", "data"):
-                        if isinstance(obj.get(key), str):
-                            return obj[key]
-            except Exception:
-                pass
-        return decoded.decode("utf-8", errors="replace")
+            if purpose == "image":
+                visual_parts.append({"type": "image_url", "image_url": {"url": uri}})
+            elif purpose == "video":
+                visual_parts.append({"type": "video_url", "video_url": {"url": uri}})
+            else:
+                raise ProviderRequestError(
+                    "MATERIAL_REPRESENTATION_UNSUPPORTED",
+                    f"Unsupported Kimi file purpose {purpose!r} for {filename}",
+                )
+        return system_messages, visual_parts
 
     def _headers(self) -> dict[str, str]:
         assert self.settings.moonshot_api_key is not None

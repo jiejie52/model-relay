@@ -22,6 +22,7 @@ class V2ExecutionContext:
     session: dict[str, Any]
     history: list[dict[str, Any]]
     material_ids: list[str]
+    material_bindings: list[dict[str, Any]]
     tenant_id: str
     conversation_hash: str
 

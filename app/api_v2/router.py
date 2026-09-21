@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from ..core.idempotency import request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
+from ..materials.ingress import MaterialIngressError
 from ..persistence.object_storage import ObjectLocation
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -40,6 +41,10 @@ def _settings(request: Request):
 
 def _material_ingress(request: Request):
     return request.app.state.material_ingress
+
+
+def _provider_files(request: Request):
+    return request.app.state.provider_file_registry
 
 
 def _storage(request: Request):
@@ -126,16 +131,60 @@ async def _request_envelope_hydrated(request: Request, row: dict[str, Any]) -> R
     return _request_envelope(row)
 
 
-def _material_response(row: dict[str, Any], obj: dict[str, Any]) -> MaterialResponse:
+async def _material_response(request: Request, row: dict[str, Any]) -> MaterialResponse:
+    repo = _repo(request)
+    fallback = await repo.get_material_fallback(row["id"])
+    target_connection_id = row.get("target_connection_id")
+    binding = None
+    if target_connection_id:
+        adapter = _provider_files(request).maybe_get(str(target_connection_id))
+        account_scope_hash = adapter.account_scope_hash if adapter is not None else None
+        binding = await repo.get_provider_binding(
+            material_id=row["id"],
+            connection_id=str(target_connection_id),
+            account_scope_hash=account_scope_hash,
+        )
+    status_value = str(row.get("status") or "")
+    external_status = "ready" if status_value in {"ready", "ready_provider"} else status_value
+    ready_for: list[str] = []
+    if binding and str(binding.get("state") or binding.get("processing_state") or "").lower() in {"active", "ready", "processed"}:
+        ready_for.append(str(binding["connection_id"]))
+    elif status_value == "ready" and target_connection_id and fallback:
+        # Bridge-only providers (e.g. signed-URL transport) are ready when the
+        # frozen fallback object exists even without a provider file resource.
+        ready_for.append(str(target_connection_id))
+    object_id = fallback.get("object_id") if fallback else row.get("object_id")
+    storage_id = fallback.get("storage_id") if fallback else None
+    provider_binding = None
+    if binding:
+        provider_binding = {
+            "provider": binding.get("provider"),
+            "connection_id": binding["connection_id"],
+            "state": str(binding.get("state") or binding.get("processing_state") or "unknown"),
+            "generation": int(binding.get("generation") or 1),
+            "purpose": binding.get("purpose"),
+            "representation": binding.get("representation"),
+            "expires_at": _dt(binding.get("expires_at")),
+        }
+    size_bytes = int(row.get("actual_size") or row.get("size_bytes") or 0)
     return MaterialResponse(
         material_id=row["id"],
-        status=row["status"],
+        status=external_status,
         filename=row["filename"],
         content_type=row["content_type"],
-        size=int(row["size_bytes"]),
+        size=size_bytes,
+        size_bytes=size_bytes,
         sha256=row["sha256"],
-        object_id=row["object_id"],
-        storage_id=obj["storage_id"],
+        durability=str(row.get("durability") or ("relay_backed" if fallback else "provider_bound")),
+        ready_for=ready_for,
+        fallback={
+            "stored": bool(fallback),
+            "object_ref": f"internal://objects/{object_id}" if object_id else None,
+            "storage_id": storage_id,
+        },
+        provider_binding=provider_binding,
+        object_id=object_id,
+        storage_id=storage_id,
         source_ref=row.get("source_ref"),
         parent_material_id=row.get("parent_material_id"),
         ordinal=row.get("ordinal"),
@@ -176,6 +225,10 @@ async def create_material(
             parent_material_id = str(form.get("parent_material_id") or "") or None
             ordinal = int(form["ordinal"]) if form.get("ordinal") not in (None, "") else None
             metadata = json.loads(str(form.get("metadata") or "{}"))
+            target_connection_id = str(form.get("target_connection_id") or "") or None
+            durability_policy = str(form.get("durability_policy") or _settings(request).material_default_durability_policy)
+            fallback_policy = str(form.get("fallback_policy") or _settings(request).material_default_fallback_policy)
+            declared_size = int(form["declared_size"]) if form.get("declared_size") not in (None, "") else None
             source_url = None
         else:
             payload = MaterialCreateJSON.model_validate(await request.json())
@@ -188,6 +241,10 @@ async def create_material(
             parent_material_id = payload.parent_material_id
             ordinal = payload.ordinal
             metadata = payload.metadata
+            target_connection_id = payload.target_connection_id
+            durability_policy = payload.durability_policy
+            fallback_policy = payload.fallback_policy
+            declared_size = payload.declared_size
             if payload.content_base64:
                 data = base64.b64decode(payload.content_base64, validate=True)
     except ValidationError as exc:
@@ -197,6 +254,8 @@ async def create_material(
 
     if not tenant_id or not conversation_hash:
         raise HTTPException(status_code=400, detail="tenant_id and conversation_hash are required")
+    if target_connection_id and target_connection_id not in _settings(request).enabled_connection_set:
+        raise HTTPException(status_code=409, detail=f"Connection is not enabled here: {target_connection_id}")
     try:
         row = await _material_ingress(request).create(
             tenant_id=tenant_id,
@@ -210,15 +269,16 @@ async def create_material(
             parent_material_id=parent_material_id,
             ordinal=ordinal,
             metadata=metadata,
+            target_connection_id=target_connection_id,
+            durability_policy=durability_policy,
+            fallback_policy=fallback_policy,
+            declared_size=declared_size,
         )
+    except MaterialIngressError as exc:
+        raise HTTPException(status_code=502, detail=exc.detail) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    obj = await _repo(request).get_object(
-        row["object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash
-    )
-    if not obj:
-        raise HTTPException(status_code=500, detail="material object metadata missing")
-    return _material_response(row, obj)
+    return await _material_response(request, row)
 
 
 @router.get("/materials/{material_id}", response_model=MaterialResponse)
@@ -233,12 +293,7 @@ async def get_material(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Material not found")
-    obj = await _repo(request).get_object(
-        row["object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash
-    )
-    if not obj:
-        raise HTTPException(status_code=500, detail="Material object metadata missing")
-    return _material_response(row, obj)
+    return await _material_response(request, row)
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
@@ -261,8 +316,8 @@ async def create_session(
             tenant_id=body.tenant_id,
             conversation_hash=body.conversation_hash,
         )
-        if not material or material.get("status") != "ready":
-            raise HTTPException(status_code=409, detail=f"Material is not ready: {material_id}")
+        if not material or material.get("status") in {"failed", "deleted", "reupload_required", "receiving", "binding"}:
+            raise HTTPException(status_code=409, detail=f"Material is not usable: {material_id}")
 
     settings = _settings(request)
     if body.connection_id not in settings.enabled_connection_set:
@@ -365,8 +420,8 @@ async def create_request(
         material = await repo.get_material(
             material_id, tenant_id=tenant_id, conversation_hash=conversation_hash
         )
-        if not material or material.get("status") != "ready":
-            raise HTTPException(status_code=409, detail=f"Material is not ready: {material_id}")
+        if not material or material.get("status") in {"failed", "deleted", "reupload_required", "receiving", "binding"}:
+            raise HTTPException(status_code=409, detail=f"Material is not usable: {material_id}")
         material_hashes[material_id] = str(material.get("sha256") or "")
 
     snapshot = {

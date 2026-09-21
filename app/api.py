@@ -20,10 +20,14 @@ from .api_v2.router import router as relay_v2_router
 from .persistence.object_storage import StorageRegistry
 from .persistence.supabase_storage import SupabaseObjectStorage
 from .materials.ingress import MaterialIngress
+from .materials.fallback_storage import FallbackObjectStorage
+from .materials.binding_resolver import BindingResolver
+from .materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
 from .materials.resolver import MaterialResolver
 from .providers.registry import ProviderRegistry
 from .providers.responses_v2 import ResponsesV2Adapter
 from .providers.moonshot_chat import MoonshotChatAdapter
+from .providers.gemini_native import GeminiNativeAdapter
 from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
@@ -44,20 +48,40 @@ async def lifespan(_: FastAPI):
     repo = RelayV2Repository(backend, settings)
 
     storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
-    material_ingress = MaterialIngress(repo, storage_registry, settings)
     material_resolver = MaterialResolver(repo, storage_registry, settings)
+    fallback_storage = FallbackObjectStorage(repo, storage_registry, settings)
+    file_adapters = ProviderFileRegistry()
+    if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+        file_adapters.register(
+            settings.aihubmix_gemini_connection_id,
+            GeminiAIHubMixFileAdapter(settings),
+        )
+    if settings.moonshot_connection_id in settings.enabled_connection_set:
+        file_adapters.register(
+            settings.moonshot_connection_id,
+            KimiOfficialFileAdapter(settings, repo, storage_registry),
+        )
+    material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
+    binding_resolver = BindingResolver(repo, fallback_storage, file_adapters)
     providers = ProviderRegistry(settings)
     providers.validate_enabled_connections()
-    providers.register_v2(
-        "aihubmix_default",
-        ResponsesV2Adapter(providers.openai_compatible, material_resolver),
-    )
-    providers.register_v2(
-        "moonshot_official",
-        MoonshotChatAdapter(settings, material_resolver, repo),
-    )
+    if "aihubmix_default" in settings.enabled_connection_set:
+        providers.register_v2(
+            "aihubmix_default",
+            ResponsesV2Adapter(providers.openai_compatible, material_resolver),
+        )
+    if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
+        providers.register_v2(
+            settings.aihubmix_gemini_connection_id,
+            GeminiNativeAdapter(settings),
+        )
+    if settings.moonshot_connection_id in settings.enabled_connection_set:
+        providers.register_v2(
+            settings.moonshot_connection_id,
+            MoonshotChatAdapter(settings, material_resolver, repo),
+        )
     runtime = SharedExecutionRuntime(
-        repo, storage_registry, providers, material_resolver, settings
+        repo, storage_registry, providers, material_resolver, binding_resolver, settings
     )
     raw_errors = RawErrorRecorder(repo, storage_registry, settings)
     inline_executor = InlineExecutor(runtime, raw_errors, repo, settings)
@@ -67,6 +91,9 @@ async def lifespan(_: FastAPI):
     app.state.storage_registry = storage_registry
     app.state.material_ingress = material_ingress
     app.state.material_resolver = material_resolver
+    app.state.material_fallback_storage = fallback_storage
+    app.state.provider_file_registry = file_adapters
+    app.state.binding_resolver = binding_resolver
     app.state.provider_registry = providers
     app.state.shared_runtime = runtime
     app.state.raw_error_recorder = raw_errors
@@ -77,7 +104,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.3.1-session-request-material-error-passthrough", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.4.0-provider-native-files", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -121,7 +148,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.3.1-session-request-material-error-passthrough",
+        "version": "0.4.0-provider-native-files",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "enabled_connections": sorted(settings.enabled_connection_set),

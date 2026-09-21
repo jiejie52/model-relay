@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from ..config import Settings
 from ..materials.resolver import MaterialResolver
+from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
 from ..providers.v2_base import V2ExecutionContext
@@ -28,12 +29,14 @@ class SharedExecutionRuntime:
         storage: StorageRegistry,
         providers: ProviderRegistry,
         materials: MaterialResolver,
+        bindings: BindingResolver,
         settings: Settings,
     ) -> None:
         self.repo = repo
         self.storage = storage
         self.providers = providers
         self.materials = materials
+        self.bindings = bindings
         self.settings = settings
 
     async def execute(
@@ -73,6 +76,22 @@ class SharedExecutionRuntime:
         # Stable order, no duplicate provider binding work.
         material_ids = list(dict.fromkeys(material_ids))
 
+        existing_binding_snapshot = request_row.get("material_binding_snapshot")
+        if not isinstance(existing_binding_snapshot, list):
+            existing_binding_snapshot = None
+        material_bindings = await self.bindings.freeze_for_request(
+            material_ids=material_ids,
+            connection_id=str(snapshot["connection_id"]),
+            tenant_id=request_row["tenant_id"],
+            conversation_hash=request_row["conversation_hash"],
+            existing_snapshot=existing_binding_snapshot,
+        )
+        if existing_binding_snapshot is None:
+            await self.repo.update_request(
+                request_row["id"],
+                {"material_binding_snapshot": material_bindings},
+            )
+
         adapter = self.providers.get_v2(str(snapshot["connection_id"]))
         await self.repo.update_request(
             request_row["id"],
@@ -87,6 +106,7 @@ class SharedExecutionRuntime:
                 session=session,
                 history=history,
                 material_ids=material_ids,
+                material_bindings=material_bindings,
                 tenant_id=request_row["tenant_id"],
                 conversation_hash=request_row["conversation_hash"],
             )

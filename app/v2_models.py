@@ -62,6 +62,8 @@ class RawErrorMeta(BaseModel):
     source: str
     upstream_http_status: int | None = None
     upstream_request_id: str | None = None
+    upstream_headers: dict[str, str] | None = None
+    phase: str | None = None
     content_type: str | None = None
     content_encoding: str | None = None
     body_encoding: str | None = None
@@ -100,6 +102,10 @@ class MaterialCreateJSON(BaseModel):
     source_ref: str | None = Field(default=None, max_length=1000)
     parent_material_id: str | None = Field(default=None, max_length=220)
     ordinal: int | None = None
+    target_connection_id: str | None = Field(default=None, max_length=120)
+    durability_policy: Literal["native_first", "relay_backed"] = "native_first"
+    fallback_policy: Literal["never", "on_provider_unavailable", "always"] = "on_provider_unavailable"
+    declared_size: int | None = Field(default=None, ge=0)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -110,16 +116,37 @@ class MaterialCreateJSON(BaseModel):
         return self
 
 
+class MaterialBindingResponse(BaseModel):
+    provider: str | None = None
+    connection_id: str
+    state: str
+    generation: int = 1
+    purpose: str | None = None
+    representation: str | None = None
+    expires_at: datetime | None = None
+
+
+class MaterialFallbackResponse(BaseModel):
+    stored: bool
+    object_ref: str | None = None
+    storage_id: str | None = None
+
+
 class MaterialResponse(BaseModel):
-    schema_version: str = "relay-material/2.0"
+    schema_version: str = "relay-material/2.1"
     material_id: str
     status: str
     filename: str
     content_type: str
     size: int
+    size_bytes: int
     sha256: str
-    object_id: str
-    storage_id: str
+    durability: str
+    ready_for: list[str] = Field(default_factory=list)
+    fallback: MaterialFallbackResponse
+    provider_binding: MaterialBindingResponse | None = None
+    object_id: str | None = None
+    storage_id: str | None = None
     source_ref: str | None = None
     parent_material_id: str | None = None
     ordinal: int | None = None

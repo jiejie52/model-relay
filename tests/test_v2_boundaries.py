@@ -11,6 +11,11 @@ V2_FILES = [
     ROOT / "app/execution/queue_executor.py",
     ROOT / "app/materials/ingress.py",
     ROOT / "app/materials/resolver.py",
+    ROOT / "app/materials/binding_resolver.py",
+    ROOT / "app/materials/fallback_storage.py",
+    ROOT / "app/materials/provider_files/gemini_aihubmix.py",
+    ROOT / "app/materials/provider_files/kimi_official.py",
+    ROOT / "app/providers/gemini_native.py",
     ROOT / "app/providers/moonshot_chat.py",
     ROOT / "app/providers/responses_v2.py",
 ]

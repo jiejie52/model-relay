@@ -69,6 +69,7 @@ class ResponsesV2Adapter:
 
     async def _material_prefix(self, context: V2ExecutionContext) -> list[Any]:
         items: list[Any] = []
+        by_id = {str(x.get("material_id")): x for x in context.material_bindings}
         for material_id in context.material_ids:
             resolved = await self.materials.resolve(
                 material_id,
@@ -78,12 +79,25 @@ class ResponsesV2Adapter:
             )
             mime = str(resolved.material.get("content_type") or "application/octet-stream")
             filename = str(resolved.material.get("filename") or material_id)
+            frozen = by_id.get(material_id) or {}
+            object_id = frozen.get("object_id")
+            obj = None
+            if object_id:
+                obj = await self.materials.repo.get_object(
+                    str(object_id),
+                    tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash,
+                )
+            if obj is None:
+                obj = resolved.object
+            if obj is None:
+                raise LookupError(f"material has no fallback object for Responses transport: {material_id}")
             if mime.startswith("text/") or mime in {
                 "application/json",
                 "application/xml",
                 "text/markdown",
             }:
-                data = await self.materials.read_object(resolved.object)
+                data = await self.materials.read_object(obj)
                 text = data.decode("utf-8", errors="replace")
                 items.append(
                     self.legacy.make_user_item(
@@ -92,7 +106,7 @@ class ResponsesV2Adapter:
                 )
                 continue
 
-            signed = await self.materials.sign_object(resolved.object, expires_in=3600)
+            signed = await self.materials.sign_object(obj, expires_in=3600)
             if mime.startswith("image/"):
                 content = [
                     {"type": "input_text", "text": f"Material {material_id}: {filename}"},
