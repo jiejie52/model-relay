@@ -1,35 +1,33 @@
-# Model Relay 0.4.1 Patch Notes
+# Model Relay 0.5.0 Patch Notes
 
-基线：`model-relay-v2_0.4.0`
-范围：生产日志与可观测性优化，**无 SQL migration**。
+## Route contract 2.1
 
-## 默认降噪
+- 新增 `app/routing/catalog.py`、`app/routing/route_resolver.py`。
+- `provider + model + local deployment` 由 Relay 解析为内部 `RouteBinding`。
+- 新 Session 创建时冻结内部 connection；后续 Request 只使用 Session route。
+- Material Ingress 与 Session/Inference 使用同一 route/account scope。
+- 不存在合法 route、model 不受支持、connection 未启用时 Fail-Closed，不再回退到 default Adapter。
+- 旧 `connection_id/target_connection_id` 仅作为 legacy hint；默认 mismatch 日志告警但不覆盖 server route。
+- SessionResponse / MaterialResponse 不再公开内部 `connection_id`。
 
-- `httpx/httpcore/hpack` 默认 `WARNING`：不再出现 Worker 轮询 Supabase `claim_relay_job_v2` 的每次 `200 OK`。
-- `uvicorn.access` 默认关闭：health/status/result 的正常轮询不再占据主要日志。
-- 可用 `DEPENDENCY_HTTP_LOG_LEVEL=INFO` 临时恢复依赖 HTTP access log。
+## Upload logging completion
 
-## 请求生命周期日志
+修复 0.4.1 的四个日志盲区：
 
-- `request_accepted`：Request 已持久化；带 request/session/job、sync/async、provider/connection/model/pool。
-- `job_claimed`：Worker 领取异步 Job；带 worker、lease_epoch、execution_pool。
-- `request_execution_started`、`material_bindings_frozen`、`provider_call_started`、`provider_call_completed`、`request_execution_committed`。
-- Provider 成功记录耗时、HTTP 状态、Provider request/response id、响应字节数。
+- JSON/multipart 解析失败现在记录 `material_request_parse_failed` + 最终 `material_upload_failed`。
+- owner/purpose/route/policy/payload 校验失败现在可观察。
+- readable URL / Dify 临时 URL 下载新增 `material_source_fetch_started/completed/failed`，包含 HTTP 状态、阶段、已接收字节与 traceback；日志 URL 自动去 query。
+- `MaterialIngressError` 现在总会在 API 边界输出最终 `material_upload_failed`。
 
-## 错误与流中断
+另外补充 fallback store、Material Registry、attempt audit 的阶段日志。
 
-- `provider_call_failed` / `provider_file_binding_failed` 输出 request/material 关联信息、failure_class、HTTP 状态、Provider request id、phase 和 traceback。
-- `upstream_stream_interrupted` 在已经拿到响应头但读取 body 中途断开时记录 `bytes_received/http_status/upstream_host/upstream_path`；URL query 不记录。
-- `request_executor_timeout` / `request_executor_failed` 记录最终执行层异常和 traceback。
-- `failure_class` 区分 client、upstream_rejected、upstream、upstream_timeout、upstream_transport、relay_validation、relay_configuration、relay。
+## Compatibility
 
-## 安全边界
+- `/v1/jobs` 不变。
+- 0.4.1 已有 Session/Request/Job 可继续按原冻结 connection 恢复；不会因 RouteCatalog 更新被重路由。
+- 新 Dify 应删除 Relay 内部 connection 名，只传 channel/endpoint + provider/model。
+- 迁移期推荐 `ROUTE_LEGACY_HINT_MODE=warn`；完成 Dify 瘦身后再改 `strict`。
 
-- 结构化日志不打印请求/模型正文、不打印 Raw Error body。
-- Authorization、Token、API Key、Secret 字段统一脱敏。
-- 原始 Provider Error 的完整交付机制保持 0.3.1+ 行为不变。
+## Database
 
-## 部署
-
-0.4.0 数据库无需变化。替换代码并同时重启 API 与 Worker 即可。
-
+无新增 migration。

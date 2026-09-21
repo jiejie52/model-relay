@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from ..providers.base import ProviderRequestError
+from ..observability import error as log_error
 from ..utils import utcnow
 from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
 from .provider_files.base import MaterialFile
 from .provider_files.registry import ProviderFileRegistry
+
+
+logger = logging.getLogger("model-relay-material-bindings")
 
 
 class BindingResolver:
@@ -32,12 +37,44 @@ class BindingResolver:
         existing_snapshot: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         # Once a Request has frozen bindings, retries reuse those exact provider
-        # identities instead of silently switching generations.
+        # identities instead of silently switching generations. The frozen
+        # snapshot must still belong to the Session's private route.
+        adapter = self.file_adapters.maybe_get(connection_id)
         if existing_snapshot:
+            for item in existing_snapshot:
+                frozen_connection = str(item.get("connection_id") or "")
+                if frozen_connection != connection_id:
+                    log_error(
+                        logger,
+                        "route_binding_mismatch",
+                        material_id=item.get("material_id"),
+                        expected_connection_id=connection_id,
+                        frozen_connection_id=frozen_connection,
+                        failure_class="relay_validation",
+                    )
+                    raise ProviderRequestError(
+                        "ROUTE_BINDING_MISMATCH",
+                        "Frozen material binding does not match the Session route",
+                    )
+                if adapter is not None:
+                    frozen_scope = str(item.get("account_scope_hash") or "")
+                    if frozen_scope != adapter.account_scope_hash:
+                        log_error(
+                            logger,
+                            "route_binding_mismatch",
+                            material_id=item.get("material_id"),
+                            connection_id=connection_id,
+                            expected_account_scope_hash=adapter.account_scope_hash,
+                            frozen_account_scope_hash=frozen_scope,
+                            failure_class="relay_validation",
+                        )
+                        raise ProviderRequestError(
+                            "ROUTE_BINDING_MISMATCH",
+                            "Frozen material binding belongs to a different Provider account scope",
+                        )
             return [dict(item) for item in existing_snapshot]
 
         snapshots: list[dict[str, Any]] = []
-        adapter = self.file_adapters.maybe_get(connection_id)
         for material_id in material_ids:
             material = await self.repo.get_material(
                 material_id,

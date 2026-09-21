@@ -22,6 +22,7 @@ from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
 from .providers.registry import ProviderRegistry
 from .providers.responses_v2 import ResponsesV2Adapter
+from .routing import RouteCatalog, RouteResolver
 from .supabase import SupabaseBackend
 from .v2_repository import RelayV2Repository
 from .utils import utcnow
@@ -58,17 +59,28 @@ class RelayWorker:
             self.providers.register_v2(
                 "aihubmix_default",
                 ResponsesV2Adapter(self.providers.openai_compatible, self.materials),
+                provider="grok",
             )
         if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
             self.providers.register_v2(
                 settings.aihubmix_gemini_connection_id,
                 GeminiNativeAdapter(settings),
+                provider="gemini",
             )
         if settings.moonshot_connection_id in settings.enabled_connection_set:
             self.providers.register_v2(
                 settings.moonshot_connection_id,
                 MoonshotChatAdapter(settings, self.materials, self.repo),
+                provider="kimi",
             )
+        self.route_catalog = RouteCatalog.from_settings(settings)
+        self.route_resolver = RouteResolver(
+            settings=settings,
+            catalog=self.route_catalog,
+            providers=self.providers,
+            provider_files=self.file_adapters,
+        )
+        self.route_resolver.validate_catalog()
         self.runtime = SharedExecutionRuntime(
             self.repo, self.storage, self.providers, self.materials, self.bindings, settings
         )
@@ -90,6 +102,9 @@ class RelayWorker:
             worker_id=self.worker_id,
             deployment_id=settings.deployment_id,
             execution_pools=sorted(settings.worker_pool_set),
+            route_revision=self.route_catalog.revision,
+            route_catalog_hash=self.route_catalog.catalog_hash,
+            route_providers=self.route_catalog.providers(),
         )
         while not self.stop_requested.is_set():
             try:

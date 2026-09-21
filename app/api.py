@@ -28,6 +28,7 @@ from .providers.registry import ProviderRegistry
 from .providers.responses_v2 import ResponsesV2Adapter
 from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
+from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
@@ -70,17 +71,28 @@ async def lifespan(_: FastAPI):
         providers.register_v2(
             "aihubmix_default",
             ResponsesV2Adapter(providers.openai_compatible, material_resolver),
+            provider="grok",
         )
     if settings.aihubmix_gemini_connection_id in settings.enabled_connection_set:
         providers.register_v2(
             settings.aihubmix_gemini_connection_id,
             GeminiNativeAdapter(settings),
+            provider="gemini",
         )
     if settings.moonshot_connection_id in settings.enabled_connection_set:
         providers.register_v2(
             settings.moonshot_connection_id,
             MoonshotChatAdapter(settings, material_resolver, repo),
+            provider="kimi",
         )
+    route_catalog = RouteCatalog.from_settings(settings)
+    route_resolver = RouteResolver(
+        settings=settings,
+        catalog=route_catalog,
+        providers=providers,
+        provider_files=file_adapters,
+    )
+    route_resolver.validate_catalog()
     runtime = SharedExecutionRuntime(
         repo, storage_registry, providers, material_resolver, binding_resolver, settings
     )
@@ -96,16 +108,21 @@ async def lifespan(_: FastAPI):
     app.state.provider_file_registry = file_adapters
     app.state.binding_resolver = binding_resolver
     app.state.provider_registry = providers
+    app.state.route_catalog = route_catalog
+    app.state.route_resolver = route_resolver
     app.state.shared_runtime = runtime
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
     log_info(
         logger,
         "api_started",
-        version="0.4.1-observability",
+        version="0.5.0-route-observability",
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         enabled_connections=sorted(settings.enabled_connection_set),
+        route_revision=route_catalog.revision,
+        route_catalog_hash=route_catalog.catalog_hash,
+        route_providers=route_catalog.providers(),
         dependency_http_log_level=settings.dependency_http_log_level,
         uvicorn_access_log=settings.uvicorn_access_log,
     )
@@ -116,7 +133,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.4.1-observability", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.5.0-route-observability", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -193,10 +210,11 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.4.1-observability",
+        "version": "0.5.0-route-observability",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
-        "enabled_connections": sorted(settings.enabled_connection_set),
+        "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
+        "providers": getattr(app.state, "route_catalog", None).providers() if getattr(app.state, "route_catalog", None) else [],
     }
 
 

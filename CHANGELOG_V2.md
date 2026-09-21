@@ -1,3 +1,17 @@
+# Model Relay Changelog
+
+## 0.5.0 Route Decoupling + Upload Observability
+
+- 新增 server-side RouteCatalog/RouteResolver；public contract 2.1 由 provider/model 决定内部 route。
+- Gemini/Grok/Kimi Adapter 自动选择，Material File Adapter 与 Inference Adapter 共享冻结 RouteBinding。
+- legacy connection hint 不再拥有路由权；warn 模式忽略 mismatch，strict 模式 Fail-Closed。
+- Session/Material 业务响应隐藏内部 connection_id；Session metadata 保存 route revision/hash。
+- 补齐 JSON/multipart、参数/policy、source fetch、fallback、API final failure 全链路结构化日志。
+- readable URL 日志仅保留 source origin，不记录 path/query；source fetch HTTP/transport/timeout/size/policy 失败可区分。
+- 新增 route/material route mismatch 断言，恢复时禁止静默切换 Adapter 或 account scope。
+- 无数据库 migration；继续使用 004 后的表结构。
+- 单元测试扩展到 RouteResolver、legacy hint、Fail-Closed、source fetch 与 API final-failure logging。
+
 # Relay v2 改造摘要
 
 ## 0.4.1 Production Observability

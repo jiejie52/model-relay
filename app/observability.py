@@ -121,8 +121,14 @@ def info(logger: logging.Logger, event_name: str, **fields: Any) -> None:
     event(logger, logging.INFO, event_name, **fields)
 
 
-def warning(logger: logging.Logger, event_name: str, **fields: Any) -> None:
-    event(logger, logging.WARNING, event_name, **fields)
+def warning(
+    logger: logging.Logger,
+    event_name: str,
+    *,
+    exc_info: bool | BaseException | tuple[Any, Any, Any] | None = None,
+    **fields: Any,
+) -> None:
+    event(logger, logging.WARNING, event_name, exc_info=exc_info, **fields)
 
 
 def error(

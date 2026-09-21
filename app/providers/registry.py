@@ -16,6 +16,7 @@ class ProviderRegistry:
         self.settings = settings
         self.openai_compatible = OpenAICompatibleResponsesProvider(settings)
         self._v2: dict[str, object] = {}
+        self._v2_meta: dict[str, dict[str, str]] = {}
 
 
     def validate_enabled_connections(self) -> None:
@@ -30,8 +31,21 @@ class ProviderRegistry:
         if self.settings.moonshot_connection_id in enabled and self.settings.moonshot_api_key is None:
             raise RuntimeError("MOONSHOT_API_KEY is required because the Moonshot connection is enabled")
 
-    def register_v2(self, connection_id: str, adapter: object) -> None:
+    def register_v2(self, connection_id: str, adapter: object, *, provider: str | None = None) -> None:
         self._v2[connection_id] = adapter
+        self._v2_meta[connection_id] = {
+            "provider": str(provider or "").lower(),
+            "adapter_version": str(getattr(adapter, "adapter_version", "unknown")),
+        }
+
+    def describe(self, connection_id: str) -> dict[str, str] | None:
+        value = self._v2_meta.get(connection_id)
+        if value is None:
+            return None
+        return {"connection_id": connection_id, **value}
+
+    def registered_connections(self) -> list[str]:
+        return sorted(self._v2)
 
     def get_v2(self, connection_id: str):
         if connection_id not in self.settings.enabled_connection_set:

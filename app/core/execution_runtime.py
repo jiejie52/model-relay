@@ -10,6 +10,7 @@ from ..materials.resolver import MaterialResolver
 from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
+from ..providers.base import ProviderRequestError
 from ..providers.v2_base import V2ExecutionContext
 from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
 from ..storage_paths import request_object_path_v2, session_history_request_path
@@ -76,6 +77,7 @@ class SharedExecutionRuntime:
             tenant_id=request_row["tenant_id"],
             conversation_hash=request_row["conversation_hash"],
         )
+        self._assert_frozen_route(session, snapshot, request_id=request_id)
         history: list[dict[str, Any]] = []
         if session.get("context_policy") == "conversation" and session.get("history_object_id"):
             loaded = await self._load_json_object(
@@ -111,6 +113,7 @@ class SharedExecutionRuntime:
             request_id=request_id,
             session_id=session_id,
             connection_id=snapshot.get("connection_id"),
+            route_revision=self._route_revision(session),
             material_count=len(material_ids),
             reused_snapshot=existing_binding_snapshot is not None,
             duration_ms=elapsed_ms(binding_started_ms),
@@ -142,6 +145,7 @@ class SharedExecutionRuntime:
             connection_id=snapshot.get("connection_id"),
             model=snapshot.get("model"),
             adapter_version=getattr(adapter, "adapter_version", None),
+            route_revision=self._route_revision(session),
             phase="model_inference",
             business_stage=business_stage,
             material_count=len(material_ids),
@@ -171,6 +175,7 @@ class SharedExecutionRuntime:
                 connection_id=snapshot.get("connection_id"),
                 model=snapshot.get("model"),
                 adapter_version=getattr(adapter, "adapter_version", None),
+                route_revision=self._route_revision(session),
                 phase=getattr(exc, "phase", None) or "model_inference",
                 duration_ms=elapsed_ms(provider_started_ms),
                 failure_class=exception_failure_class(exc),
@@ -190,6 +195,7 @@ class SharedExecutionRuntime:
             connection_id=snapshot.get("connection_id"),
             model=snapshot.get("model"),
             adapter_version=getattr(adapter, "adapter_version", None),
+            route_revision=self._route_revision(session),
             phase="model_inference",
             duration_ms=elapsed_ms(provider_started_ms),
             http_status=result.http_status,
@@ -328,6 +334,84 @@ class SharedExecutionRuntime:
             status="succeeded",
         )
         return compact_result
+
+    @staticmethod
+    def _route_revision(session: dict[str, Any]) -> str | None:
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        route = metadata.get("_relay_route") if isinstance(metadata.get("_relay_route"), dict) else {}
+        return str(route.get("route_revision")) if route.get("route_revision") else None
+
+    def _assert_frozen_route(
+        self,
+        session: dict[str, Any],
+        snapshot: dict[str, Any],
+        *,
+        request_id: str,
+    ) -> None:
+        expected = {
+            "provider": str(session.get("provider") or ""),
+            "model": str(session.get("model") or ""),
+            "connection_id": str(session.get("connection_id") or ""),
+        }
+        actual = {
+            "provider": str(snapshot.get("provider") or ""),
+            "model": str(snapshot.get("model") or ""),
+            "connection_id": str(snapshot.get("connection_id") or ""),
+        }
+        if actual != expected:
+            log_error(
+                logger,
+                "request_route_snapshot_mismatch",
+                request_id=request_id,
+                session_id=session.get("id"),
+                expected_provider=expected["provider"],
+                actual_provider=actual["provider"],
+                expected_model=expected["model"],
+                actual_model=actual["model"],
+                expected_connection_id=expected["connection_id"],
+                actual_connection_id=actual["connection_id"],
+                route_revision=self._route_revision(session),
+                failure_class="relay_validation",
+            )
+            raise ProviderRequestError(
+                "ROUTE_BINDING_MISMATCH",
+                "Request snapshot route does not match the frozen Session route",
+            )
+
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        route = metadata.get("_relay_route") if isinstance(metadata.get("_relay_route"), dict) else None
+        if route is not None:
+            frozen_connection = str(route.get("connection_id") or "")
+            if frozen_connection and frozen_connection != expected["connection_id"]:
+                log_error(
+                    logger,
+                    "session_route_metadata_mismatch",
+                    request_id=request_id,
+                    session_id=session.get("id"),
+                    connection_id=expected["connection_id"],
+                    route_metadata_connection_id=frozen_connection,
+                    route_revision=route.get("route_revision"),
+                    failure_class="relay_validation",
+                )
+                raise ProviderRequestError(
+                    "ROUTE_BINDING_MISMATCH",
+                    "Session route metadata does not match its frozen connection",
+                )
+
+        adapter_meta = self.providers.describe(expected["connection_id"])
+        if adapter_meta is None:
+            raise ProviderRequestError(
+                "ROUTE_CONNECTION_DISABLED",
+                "The Session's frozen Relay connection is not available on this worker",
+            )
+        registered_provider = str(adapter_meta.get("provider") or "")
+        # Old pre-route sessions do not carry _relay_route and may have legacy
+        # provider labels. New route-frozen Sessions are strict.
+        if route is not None and registered_provider and registered_provider != expected["provider"].lower():
+            raise ProviderRequestError(
+                "ROUTE_BINDING_MISMATCH",
+                "The frozen Session provider does not match the registered Adapter",
+            )
 
     async def _load_json_object(
         self, object_id: str, *, tenant_id: str, conversation_hash: str

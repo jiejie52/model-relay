@@ -9,14 +9,17 @@ from pydantic import BaseModel, Field, model_validator
 
 ContextPolicy = Literal["conversation", "explicit"]
 ExecutionMode = Literal["sync", "async"]
+MaterialPurpose = Literal["inference_input", "archive"]
 
 
 class SessionCreateRequest(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=200)
     conversation_hash: str = Field(min_length=1, max_length=256)
     provider: str = Field(min_length=1, max_length=80)
-    connection_id: str = Field(min_length=1, max_length=120)
     model: str = Field(min_length=1, max_length=200)
+    # Contract 2.1 compatibility only. Relay RouteResolver is authoritative and
+    # never lets this legacy hint select or override an Adapter.
+    connection_id: str | None = Field(default=None, max_length=120)
     context_policy: ContextPolicy = "conversation"
     material_ids: list[str] = Field(default_factory=list)
     execution_pool: str | None = Field(default=None, max_length=120)
@@ -24,18 +27,18 @@ class SessionCreateRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
-    schema_version: str = "relay-session/2.0"
+    schema_version: str = "relay-session/2.1"
     session_id: UUID
     tenant_id: str
     conversation_hash: str
     provider: str
-    connection_id: str
     model: str
     context_policy: ContextPolicy
     material_ids: list[str]
     history_version: int
     active_request_id: UUID | None = None
     execution_pool: str
+    route_revision: str | None = None
     created_at: datetime | None = None
     expires_at: datetime | None = None
 
@@ -48,6 +51,8 @@ class SessionRequestCreate(BaseModel):
     input: Any
     instructions: str | None = None
     material_ids: list[str] = Field(default_factory=list)
+    # Contract 2.1 callers omit these. They remain optional during the Relay-first
+    # compatibility window and are treated only as assertions/hints.
     provider: str | None = Field(default=None, max_length=80)
     connection_id: str | None = Field(default=None, max_length=120)
     model: str | None = Field(default=None, max_length=200)
@@ -80,7 +85,7 @@ class RawErrorMeta(BaseModel):
 
 
 class RequestEnvelope(BaseModel):
-    schema_version: str = "relay-session/2.0"
+    schema_version: str = "relay-session/2.1"
     session_id: UUID
     request_id: UUID
     job_id: UUID | None = None
@@ -102,6 +107,10 @@ class MaterialCreateJSON(BaseModel):
     source_ref: str | None = Field(default=None, max_length=1000)
     parent_material_id: str | None = Field(default=None, max_length=220)
     ordinal: int | None = None
+    provider: str | None = Field(default=None, max_length=80)
+    model: str | None = Field(default=None, max_length=200)
+    purpose: MaterialPurpose = "inference_input"
+    # Legacy compatibility hint only. RouteResolver remains authoritative.
     target_connection_id: str | None = Field(default=None, max_length=120)
     durability_policy: Literal["native_first", "relay_backed"] = "native_first"
     fallback_policy: Literal["never", "on_provider_unavailable", "always"] = "on_provider_unavailable"
@@ -109,21 +118,23 @@ class MaterialCreateJSON(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def one_source(self) -> "MaterialCreateJSON":
+    def validate_material_request(self) -> "MaterialCreateJSON":
         count = int(bool(self.source_url)) + int(bool(self.content_base64))
         if count != 1:
             raise ValueError("exactly one of source_url or content_base64 is required")
+        if self.purpose == "inference_input" and (not self.provider or not self.model):
+            raise ValueError("provider and model are required for inference_input material")
         return self
 
 
 class MaterialBindingResponse(BaseModel):
     provider: str | None = None
-    connection_id: str
     state: str
     generation: int = 1
     purpose: str | None = None
     representation: str | None = None
     expires_at: datetime | None = None
+    route_revision: str | None = None
 
 
 class MaterialFallbackResponse(BaseModel):
@@ -133,7 +144,7 @@ class MaterialFallbackResponse(BaseModel):
 
 
 class MaterialResponse(BaseModel):
-    schema_version: str = "relay-material/2.1"
+    schema_version: str = "relay-material/2.2"
     material_id: str
     status: str
     filename: str
@@ -141,6 +152,10 @@ class MaterialResponse(BaseModel):
     size: int
     size_bytes: int
     sha256: str
+    provider: str | None = None
+    model: str | None = None
+    purpose: str = "inference_input"
+    route_revision: str | None = None
     durability: str
     ready_for: list[str] = Field(default_factory=list)
     fallback: MaterialFallbackResponse

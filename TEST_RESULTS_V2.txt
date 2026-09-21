@@ -1,94 +1,65 @@
-Model Relay 0.4.1 verification
-================================
+Model Relay 0.5.0 validation
+============================
 
-$ python -m compileall -q app tests
-PASS
+Baseline: model-relay-v2 0.4.1
+Target:   0.5.0-route-observability
+Date:     2026-09-21
 
-$ python -m unittest discover -s tests -v
-test_corpus_hash_ignores_volatile_signed_urls (test_fusion_contract.FusionContractTests.test_corpus_hash_ignores_volatile_signed_urls) ... ok
-test_corpus_ingest_is_immutable_and_idempotent (test_fusion_contract.FusionContractTests.test_corpus_ingest_is_immutable_and_idempotent) ... ok
-test_current_dsl_corpus_contract_is_accepted (test_fusion_contract.FusionContractTests.test_current_dsl_corpus_contract_is_accepted) ... ok
-test_fusion_model_stage_does_not_require_current_query (test_fusion_contract.FusionContractTests.test_fusion_model_stage_does_not_require_current_query) ... ok
-test_fusion_provider_payload_forces_json_object_transport (test_fusion_contract.FusionContractTests.test_fusion_provider_payload_forces_json_object_transport) ... ok
-test_global_adjudication_singleton_container_normalization (test_fusion_contract.FusionContractTests.test_global_adjudication_singleton_container_normalization) ... ok
-test_normal_stage_still_requires_current_query (test_fusion_contract.FusionContractTests.test_normal_stage_still_requires_current_query) ... ok
-test_dependency_polling_loggers_are_suppressed_by_default (test_observability.ObservabilityTests.test_dependency_polling_loggers_are_suppressed_by_default) ... ok
-test_stream_interruption_is_logged_with_partial_byte_count (test_observability.ObservabilityTests.test_stream_interruption_is_logged_with_partial_byte_count) ... ok
-test_structured_event_redacts_secrets (test_observability.ObservabilityTests.test_structured_event_redacts_secrets) ... ok
-test_binding_scope_mismatch_without_fallback_requires_reupload (test_provider_native_files.ProviderNativeFileTests.test_binding_scope_mismatch_without_fallback_requires_reupload) ... ok
-test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct (test_provider_native_files.ProviderNativeFileTests.test_kimi_mime_mapping_keeps_text_and_visual_semantics_distinct) ... ok
-test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes (test_provider_native_files.ProviderNativeFileTests.test_kimi_model_uses_extracted_text_and_ms_file_uris_not_raw_bytes) ... ok
-test_native_success_does_not_store_input_file_in_fallback (test_provider_native_files.ProviderNativeFileTests.test_native_success_does_not_store_input_file_in_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","filename":"report.pdf","content_type":"application/pdf","size_bytes":21,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
-2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":21,"content_type":"application/pdf"}
-2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_ready","duration_ms":0}
-2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_completed","material_id":"mat_b321f71d74b742ceaed7e71ee58d3c44","provider":"gemini","connection_id":"native-conn","status":"ready_provider","durability":"provider_bound","fallback_stored":false,"duration_ms":0}
-ok
-test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback (test_provider_native_files.ProviderNativeFileTests.test_provider_429_is_returned_raw_instead_of_silently_stored_as_fallback) ... 2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","filename":"report.pdf","content_type":"application/pdf","size_bytes":26,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
-2026-09-21 05:45:47,518 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":26,"content_type":"application/pdf"}
-2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_29b71ced11ff45bbb49193acef0f7be9","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"phase":"provider_file_upload","duration_ms":0,"failure_class":"upstream_rejected","upstream_http_status":429,"stream_interrupted":false,"exception_type":"ProviderHTTPError"}
-Traceback (most recent call last):
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
-    result = await adapter.prepare(material_file, generation=generation)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
-    raise self.failure
-app.providers.base.ProviderHTTPError: Upstream provider request failed
-ok
-test_provider_failure_does_not_silently_change_retention_when_fallback_disabled (test_provider_native_files.ProviderNativeFileTests.test_provider_failure_does_not_silently_change_retention_when_fallback_disabled) ... 2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","filename":"report.pdf","content_type":"application/pdf","size_bytes":12,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"never","source_kind":"inline"}
-2026-09-21 05:45:47,519 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":12,"content_type":"application/pdf"}
-2026-09-21 05:45:47,519 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_01ddfbeba7ab4c49a133761f7c85f587","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
-Traceback (most recent call last):
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
-    result = await adapter.prepare(material_file, generation=generation)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
-    raise self.failure
-app.providers.base.ProviderRequestError: provider processing timeout
-ok
-test_provider_temporary_failure_uses_fallback_only_when_policy_allows (test_provider_native_files.ProviderNativeFileTests.test_provider_temporary_failure_uses_fallback_only_when_policy_allows) ... 2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"material_ingress_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","filename":"report.pdf","content_type":"application/pdf","size_bytes":11,"target_connection_id":"native-conn","durability_policy":"native_first","fallback_policy":"on_provider_unavailable","source_kind":"inline"}
-2026-09-21 05:45:47,520 INFO model-relay-materials {"event":"provider_file_binding_started","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"size_bytes":11,"content_type":"application/pdf"}
-2026-09-21 05:45:47,520 ERROR model-relay-materials {"event":"provider_file_binding_failed","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","adapter_version":"fake-native/1","generation":1,"duration_ms":0,"failure_class":"upstream_timeout","stream_interrupted":false,"exception_type":"ProviderRequestError"}
-Traceback (most recent call last):
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/app/materials/ingress.py", line 226, in create
-    result = await adapter.prepare(material_file, generation=generation)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/model-relay-v2_0.4.1/model-relay-v2/tests/test_provider_native_files.py", line 152, in prepare
-    raise self.failure
-app.providers.base.ProviderRequestError: provider processing timeout
-2026-09-21 05:45:47,520 WARNING model-relay-materials {"event":"material_provider_fallback_activated","material_id":"mat_52f1af28ff6843f2a751c59e2dfe9ddd","provider":"gemini","connection_id":"native-conn","failure_class":"upstream_timeout","retention_policy":"provider-unavailable","duration_ms":0}
-ok
-test_provider_execute_sends_json_schema_to_responses (test_structured_output.ProviderStructuredOutputIntegrationTests.test_provider_execute_sends_json_schema_to_responses) ... ok
-test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation (test_structured_output.StructuredOutputExecutionTests.test_fusion_execution_accepts_arbitrary_caller_schema_and_skips_legacy_business_validation) ... ok
-test_caller_schema_disables_legacy_global_output_contract_in_prompt (test_structured_output.StructuredOutputTests.test_caller_schema_disables_legacy_global_output_contract_in_prompt) ... ok
-test_dify_payload_output_schema_is_resolved_without_business_inspection (test_structured_output.StructuredOutputTests.test_dify_payload_output_schema_is_resolved_without_business_inspection) ... ok
-test_explicit_caller_instructions_are_not_replaced (test_structured_output.StructuredOutputTests.test_explicit_caller_instructions_are_not_replaced) ... ok
-test_fusion_provider_payload_uses_caller_schema_instead_of_json_object (test_structured_output.StructuredOutputTests.test_fusion_provider_payload_uses_caller_schema_instead_of_json_object) ... ok
-test_gemini_projected_schema_never_contains_array_without_items (test_structured_output.StructuredOutputTests.test_gemini_projected_schema_never_contains_array_without_items) ... ok
-test_gemini_projection_drops_optional_array_without_items (test_structured_output.StructuredOutputTests.test_gemini_projection_drops_optional_array_without_items) ... ok
-test_gemini_projection_fails_closed_for_required_array_without_items (test_structured_output.StructuredOutputTests.test_gemini_projection_fails_closed_for_required_array_without_items) ... ok
-test_gemini_projection_removes_native_response_schema_unsupported_keywords (test_structured_output.StructuredOutputTests.test_gemini_projection_removes_native_response_schema_unsupported_keywords) ... ok
-test_gemini_transport_uses_projected_schema_but_returns_canonical_spec (test_structured_output.StructuredOutputTests.test_gemini_transport_uses_projected_schema_but_returns_canonical_spec) ... ok
-test_generic_schema_validation_accepts_and_rejects_without_domain_logic (test_structured_output.StructuredOutputTests.test_generic_schema_validation_accepts_and_rejects_without_domain_logic) ... ok
-test_legacy_fusion_transport_still_defaults_to_json_object (test_structured_output.StructuredOutputTests.test_legacy_fusion_transport_still_defaults_to_json_object) ... ok
-test_non_gemini_responses_mapping_preserves_schema_exactly (test_structured_output.StructuredOutputTests.test_non_gemini_responses_mapping_preserves_schema_exactly) ... ok
-test_top_level_provider_neutral_contract_is_accepted (test_structured_output.StructuredOutputTests.test_top_level_provider_neutral_contract_is_accepted) ... ok
-test_v2_core_has_no_fusion_stage_branching (test_v2_boundaries.V2BoundaryTests.test_v2_core_has_no_fusion_stage_branching) ... ok
-test_v2_error_path_has_no_upstream_error_classification (test_v2_boundaries.V2BoundaryTests.test_v2_error_path_has_no_upstream_error_classification) ... ok
-test_030_archived_error_is_hydrated_for_idempotent_replay (test_v2_core.RelayV2CoreTests.test_030_archived_error_is_hydrated_for_idempotent_replay) ... ok
-test_360_byte_json_provider_error_is_returned_inline_losslessly (test_v2_core.RelayV2CoreTests.test_360_byte_json_provider_error_is_returned_inline_losslessly) ... ok
-test_binary_provider_error_keeps_binary_encoding_and_exact_base64 (test_v2_core.RelayV2CoreTests.test_binary_provider_error_keeps_binary_encoding_and_exact_base64) ... ok
-test_provider_registry_is_connection_scoped (test_v2_core.RelayV2CoreTests.test_provider_registry_is_connection_scoped) ... ok
-test_raw_provider_error_is_archived_without_truncation (test_v2_core.RelayV2CoreTests.test_raw_provider_error_is_archived_without_truncation) ... ok
-test_request_identity_changes_when_execution_relevant_input_changes (test_v2_core.RelayV2CoreTests.test_request_identity_changes_when_execution_relevant_input_changes) ... ok
-test_session_request_allows_sync_without_job_semantics (test_v2_core.RelayV2CoreTests.test_session_request_allows_sync_without_job_semantics) ... ok
+1. Syntax / bytecode compile
+----------------------------
+Command:
+  python -m compileall -q app
+Result:
+  PASS
 
-----------------------------------------------------------------------
-Ran 41 tests in 0.023s
+2. Unit tests
+-------------
+Command:
+  python -m unittest discover -s tests -v
+Result:
+  PASS - 54 tests
 
-OK
+Coverage added in 0.5.0 includes:
+- Gemini provider/model -> server-side Gemini Native route
+- Grok/Kimi deterministic route resolution
+- legacy connection hints warn/ignore and strict reject modes
+- unsupported/disabled routes fail closed
+- public v2 contract no longer requires connection_id
+- inference material requires provider/model; archive material does not
+- source fetch lifecycle logs with HTTP status/bytes/phase
+- source URL query is not logged
+- invalid JSON/multipart emits parse failure + final material_upload_failed
+- schema validation logs do not echo base64 file payloads
+- policy validation failure logs
+- MaterialIngressError always emits API final material_upload_failed
+- existing provider-native file, raw-error, structured-output and v2 recovery tests remain green
 
-$ API import smoke
-PASS version=0.4.1-observability
+3. Railway configuration smoke
+-------------------------------
+Configuration:
+  DEPLOYMENT_ID=railway
+  ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native
+Result:
+  PASS
+  routes:
+    gemini / gemini-* -> aihubmix_gemini_native
+    grok   / grok-*   -> aihubmix_default
+  RouteCatalog validation passed.
 
-$ Worker import smoke
-PASS
+4. Aliyun SAE configuration smoke
+---------------------------------
+Configuration:
+  DEPLOYMENT_ID=aliyun-sae
+  ENABLED_CONNECTIONS=moonshot_official
+Result:
+  PASS
+  routes:
+    kimi / kimi-* -> moonshot_official
+  RouteCatalog validation passed.
+
+5. Key deployment facts
+-----------------------
+- No new SQL migration from 0.4.1 to 0.5.0.
+- Existing 0.4.0 sql/004_provider_native_file_ingress.sql remains prerequisite.
+- Route fields are frozen in Session metadata / Request snapshots.
+- Existing Sessions are not automatically re-routed.

@@ -1,0 +1,336 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import logging
+from typing import Any
+
+from ..config import Settings
+from ..materials.provider_files.registry import ProviderFileRegistry
+from ..observability import error as log_error, info as log_info, warning as log_warning
+from ..providers.registry import ProviderRegistry
+from .catalog import RouteCatalog
+
+
+logger = logging.getLogger("model-relay-routing")
+
+
+@dataclass(frozen=True)
+class RouteIntent:
+    provider: str
+    model: str
+    purpose: str
+    deployment_id: str
+
+
+@dataclass(frozen=True)
+class RouteBinding:
+    provider: str
+    model: str
+    connection_id: str
+    route_revision: str
+    route_binding_hash: str
+    account_scope_hash: str
+    inference_adapter_version: str
+    file_adapter_version: str | None
+    execution_pool: str
+    purpose: str
+
+    def internal_metadata(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "connection_id": self.connection_id,
+            "route_revision": self.route_revision,
+            "route_binding_hash": self.route_binding_hash,
+            "account_scope_hash": self.account_scope_hash,
+            "inference_adapter_version": self.inference_adapter_version,
+            "file_adapter_version": self.file_adapter_version,
+            "execution_pool": self.execution_pool,
+        }
+
+
+class RouteResolutionError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        provider: str,
+        model: str,
+        purpose: str,
+        internal_connection_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.provider = provider
+        self.model = model
+        self.purpose = purpose
+        self.internal_connection_id = internal_connection_id
+
+    def public_detail(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "provider": self.provider,
+            "model": self.model,
+            "purpose": self.purpose,
+        }
+
+
+class RouteResolver:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        catalog: RouteCatalog,
+        providers: ProviderRegistry,
+        provider_files: ProviderFileRegistry,
+    ) -> None:
+        self.settings = settings
+        self.catalog = catalog
+        self.providers = providers
+        self.provider_files = provider_files
+
+    def validate_catalog(self) -> None:
+        for entry in self.catalog.entries:
+            if entry.deployment_id not in (None, "*", self.settings.deployment_id):
+                continue
+            if entry.connection_id not in self.settings.enabled_connection_set:
+                raise RuntimeError(
+                    f"Route catalog references disabled connection {entry.connection_id!r} "
+                    f"for provider {entry.provider!r}"
+                )
+            provider_meta = self.providers.describe(entry.connection_id)
+            if provider_meta is None:
+                raise RuntimeError(
+                    f"Route catalog connection {entry.connection_id!r} has no registered inference adapter"
+                )
+            registered_provider = str(provider_meta.get("provider") or "").lower()
+            if registered_provider and registered_provider != entry.provider.lower():
+                raise RuntimeError(
+                    f"Route catalog provider {entry.provider!r} does not match inference adapter "
+                    f"provider {registered_provider!r} for {entry.connection_id!r}"
+                )
+            file_meta = self.provider_files.describe(entry.connection_id)
+            if entry.requires_file_adapter and file_meta is None:
+                raise RuntimeError(
+                    f"Route catalog connection {entry.connection_id!r} requires a Provider File Adapter"
+                )
+            if file_meta is not None:
+                file_provider = str(file_meta.get("provider") or "").lower()
+                if file_provider and file_provider != entry.provider.lower():
+                    raise RuntimeError(
+                        f"Route catalog provider {entry.provider!r} does not match file adapter "
+                        f"provider {file_provider!r} for {entry.connection_id!r}"
+                    )
+        log_info(
+            logger,
+            "route_catalog_validated",
+            deployment_id=self.settings.deployment_id,
+            route_revision=self.catalog.revision,
+            route_catalog_hash=self.catalog.catalog_hash,
+            route_count=len(self.catalog.entries),
+            enabled_connections=sorted(self.settings.enabled_connection_set),
+        )
+
+    def resolve(self, *, provider: str, model: str, purpose: str) -> RouteBinding:
+        provider_n = str(provider or "").strip().lower()
+        model_n = str(model or "").strip()
+        purpose_n = str(purpose or "").strip() or "request"
+        intent = RouteIntent(provider_n, model_n, purpose_n, self.settings.deployment_id)
+        try:
+            if not provider_n or not model_n:
+                raise RouteResolutionError(
+                    "ROUTE_INTENT_INVALID",
+                    "provider and model are required for Relay route resolution",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                )
+            try:
+                entry = self.catalog.match(
+                    provider=provider_n,
+                    model=model_n,
+                    deployment_id=self.settings.deployment_id,
+                )
+            except ValueError as exc:
+                raise RouteResolutionError(
+                    "ROUTE_CATALOG_AMBIGUOUS",
+                    "Relay route catalog has more than one equally preferred route",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                ) from exc
+            if entry is None:
+                if self.catalog.has_provider(provider_n, deployment_id=self.settings.deployment_id):
+                    raise RouteResolutionError(
+                        "ROUTE_MODEL_UNSUPPORTED",
+                        "The selected model is not supported by the configured Relay route",
+                        provider=provider_n,
+                        model=model_n,
+                        purpose=purpose_n,
+                    )
+                raise RouteResolutionError(
+                    "ROUTE_NOT_FOUND",
+                    "No Relay route is configured for this provider/model on the current deployment",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                )
+            if entry.connection_id not in self.settings.enabled_connection_set:
+                raise RouteResolutionError(
+                    "ROUTE_CONNECTION_DISABLED",
+                    "The resolved Relay route is not enabled on the current deployment",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                    internal_connection_id=entry.connection_id,
+                )
+            provider_meta = self.providers.describe(entry.connection_id)
+            if provider_meta is None:
+                raise RouteResolutionError(
+                    "ROUTE_CONNECTION_DISABLED",
+                    "The resolved Relay inference adapter is not registered on the current deployment",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                    internal_connection_id=entry.connection_id,
+                )
+            registered_provider = str(provider_meta.get("provider") or "").lower()
+            if registered_provider and registered_provider != provider_n:
+                raise RouteResolutionError(
+                    "ROUTE_CONFIG_INVALID",
+                    "Relay route provider does not match the registered inference adapter",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                    internal_connection_id=entry.connection_id,
+                )
+            file_meta = self.provider_files.describe(entry.connection_id)
+            if entry.requires_file_adapter and file_meta is None:
+                raise RouteResolutionError(
+                    "ROUTE_CONNECTION_DISABLED",
+                    "The resolved Relay route requires a Provider File Adapter that is not registered",
+                    provider=provider_n,
+                    model=model_n,
+                    purpose=purpose_n,
+                    internal_connection_id=entry.connection_id,
+                )
+            if file_meta is not None:
+                file_provider = str(file_meta.get("provider") or "").lower()
+                if file_provider and file_provider != provider_n:
+                    raise RouteResolutionError(
+                        "ROUTE_CONFIG_INVALID",
+                        "Relay route provider does not match the registered Provider File Adapter",
+                        provider=provider_n,
+                        model=model_n,
+                        purpose=purpose_n,
+                        internal_connection_id=entry.connection_id,
+                    )
+            scope_hash = self.settings.connection_account_scope_hash(entry.connection_id)
+            canonical = {
+                "provider": provider_n,
+                "model": model_n,
+                "connection_id": entry.connection_id,
+                "route_revision": self.catalog.revision,
+                "account_scope_hash": scope_hash,
+                "inference_adapter_version": provider_meta.get("adapter_version"),
+                "file_adapter_version": file_meta.get("adapter_version") if file_meta else None,
+                "execution_pool": self.settings.execution_pool,
+            }
+            binding_hash = hashlib.sha256(
+                json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            binding = RouteBinding(
+                provider=provider_n,
+                model=model_n,
+                connection_id=entry.connection_id,
+                route_revision=self.catalog.revision,
+                route_binding_hash=binding_hash,
+                account_scope_hash=scope_hash,
+                inference_adapter_version=str(provider_meta.get("adapter_version") or "unknown"),
+                file_adapter_version=(str(file_meta.get("adapter_version")) if file_meta else None),
+                execution_pool=self.settings.execution_pool,
+                purpose=purpose_n,
+            )
+            log_info(
+                logger,
+                "route_resolved",
+                provider=provider_n,
+                model=model_n,
+                purpose=purpose_n,
+                deployment_id=self.settings.deployment_id,
+                execution_pool=self.settings.execution_pool,
+                route_revision=binding.route_revision,
+                route_catalog_hash=self.catalog.catalog_hash,
+                connection_id=binding.connection_id,
+                adapter_version=binding.inference_adapter_version,
+                file_adapter_version=binding.file_adapter_version,
+            )
+            return binding
+        except RouteResolutionError as exc:
+            log_error(
+                logger,
+                "route_resolution_failed",
+                provider=intent.provider,
+                model=intent.model,
+                purpose=intent.purpose,
+                deployment_id=intent.deployment_id,
+                route_revision=self.catalog.revision,
+                route_catalog_hash=self.catalog.catalog_hash,
+                reason=exc.code,
+                connection_id=exc.internal_connection_id,
+                enabled_connections=sorted(self.settings.enabled_connection_set),
+                failure_class="relay_configuration" if exc.code != "ROUTE_INTENT_INVALID" else "client",
+            )
+            raise
+
+    def handle_legacy_hint(
+        self,
+        *,
+        client_hint: str | None,
+        resolved: RouteBinding,
+        caller_version: str | None = None,
+        scope: str,
+    ) -> None:
+        if not client_hint:
+            return
+        hint = str(client_hint)
+        if hint == resolved.connection_id:
+            return
+        fields = {
+            "client_hint": hint,
+            "resolved_connection_id": resolved.connection_id,
+            "provider": resolved.provider,
+            "model": resolved.model,
+            "purpose": resolved.purpose,
+            "route_revision": resolved.route_revision,
+            "caller_version": caller_version,
+            "scope": scope,
+        }
+        mode = str(self.settings.route_legacy_hint_mode or "warn").lower()
+        if mode == "strict":
+            log_error(
+                logger,
+                "legacy_connection_hint_mismatch",
+                failure_class="client",
+                enforcement="reject",
+                **fields,
+            )
+            raise RouteResolutionError(
+                "LEGACY_CONNECTION_HINT_MISMATCH",
+                "Legacy connection hint does not match the server-resolved route",
+                provider=resolved.provider,
+                model=resolved.model,
+                purpose=resolved.purpose,
+                internal_connection_id=resolved.connection_id,
+            )
+        log_warning(
+            logger,
+            "legacy_connection_hint_mismatch",
+            enforcement="ignored",
+            **fields,
+        )

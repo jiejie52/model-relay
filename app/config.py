@@ -36,6 +36,15 @@ class Settings(BaseSettings):
     enabled_connections: str = "aihubmix_default"
     default_connection_id: str = "aihubmix_default"
 
+    # Public routing contract 2.1: callers provide provider/model only. The
+    # deployment-local catalog resolves and freezes the private connection_id.
+    route_revision: str = "relay-route-catalog/2026-09-21.1"
+    route_catalog_json: str | None = None
+    route_legacy_hint_mode: str = "warn"  # warn | strict
+    route_gemini_model_pattern: str = "gemini-*"
+    route_grok_model_pattern: str = "grok-*"
+    route_kimi_model_pattern: str = "kimi-*"
+
     # Same source image, different deployment configuration.
     deployment_id: str = "railway"
     execution_pool: str = "railway-default"
