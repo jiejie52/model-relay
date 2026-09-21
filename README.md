@@ -1,6 +1,16 @@
-# Model Relay 0.5.3 - Relay-Authoritative Gemini Size
+# Model Relay 0.5.4 - Supabase Signed URL Normalization
 
-本版本以 `model-relay-v2 0.5.2` 为基线。Gemini 仍固定使用服务端 RouteResolver + `GeminiNativeAdapter`，但文件大小判断改为 **Relay 自己测量并在 Request 冻结时重新聚合**。调用方不再负责提供权威总字节数。
+本版本以 `model-relay-v2 0.5.3` 为基线，修复 Supabase Storage 签名接口返回相对 `signedURL` 时的 URL 拼接错误。Gemini 的 Relay-authoritative 99 MiB 判断、RouteResolver、`GeminiNativeAdapter` 与双传输策略保持不变。
+
+## 0.5.4 关键变化
+
+- 修复 `/object/sign/...` 被错误拼成 `<SUPABASE_URL>/object/sign/...` 的问题；正确结果为 `<SUPABASE_URL>/storage/v1/object/sign/...`。
+- 参考 `WF-NormalInference_20260910-NoComments.yml` 已验证逻辑：相对签名路径以 Storage API base `<root>/storage/v1` 为基准解析。
+- 同时兼容绝对 URL、`/storage/v1/...`、`storage/v1/...`、`/object/sign/...` 与 `object/sign/...`，避免重复或遗漏 `/storage/v1`。
+- 99 MiB 阈值、Supabase Private Bucket、7 天 Signed URL、Gemini Files API 大文件路径均不变。
+- 无新增 SQL migration。
+
+详细实现见 `SUPABASE_SIGNED_URL_NORMALIZATION_0.5.4_IMPLEMENTATION.md`。
 
 ## 0.5.3 关键变化
 

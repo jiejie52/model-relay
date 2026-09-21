@@ -1,3 +1,22 @@
+# Model Relay 0.5.4 Patch Notes
+
+## Supabase Signed URL normalization
+
+0.5.3 correctly selected `supabase_external_url` for small Gemini Requests, but `SupabaseBackend.storage_sign_read_url()` incorrectly joined a relative Supabase response such as `/object/sign/...` directly to the project root. The resulting URL omitted `/storage/v1` and Gemini/AIHubMix failed to fetch it with `URL_ERROR-ERROR_NOT_FOUND`.
+
+0.5.4 resolves relative Signed URLs against the Supabase Storage API base, following the proven WF-NormalInference pattern:
+
+- absolute `https://...` -> unchanged
+- `/storage/v1/...` -> project root + path
+- `/object/sign/...` -> project root + `/storage/v1` + path
+- relative variants without the leading slash are normalized equivalently
+- no changes to the 99 MiB threshold or Gemini Files API path
+- no SQL migration
+
+See `SUPABASE_SIGNED_URL_NORMALIZATION_0.5.4_IMPLEMENTATION.md`.
+
+---
+
 # Model Relay 0.5.3 Patch Notes
 
 ## Relay-authoritative Gemini size

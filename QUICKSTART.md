@@ -1,6 +1,6 @@
-# Model Relay 0.5.3 部署与迁移关键操作
+# Model Relay 0.5.4 部署与迁移关键操作
 
-本版本以 `0.5.2` 为基线，把 Gemini 文件大小判断改为 Relay authoritative size，同时保留服务端 RouteResolver、默认全 Connection 可用、完整上传日志和 Raw Error。
+本版本以 `0.5.3` 为基线，仅修复 Supabase Signed URL normalization；Relay-authoritative size、Gemini 双传输、服务端 RouteResolver、完整上传日志和 Raw Error 均保持不变。
 
 1. **Route 仍由 Relay 服务端决定**：Dify 只传 `provider + model`，不负责 `connection_id / target_connection_id`。
 2. **Gemini 按当前 Request 文件总量选材料传输**：`<=99 MiB` 使用 Supabase Signed External URL；`>99 MiB` 使用 Gemini Files API。两条路径都继续由 `GeminiNativeAdapter` 推理。
@@ -8,7 +8,7 @@
 
 ## 1. 数据库
 
-**0.5.2 -> 0.5.3 不需要执行新的 SQL。**
+**0.5.3 -> 0.5.4 不需要执行新的 SQL。**
 
 现有 0.4.1 数据库应已经执行过：
 
@@ -19,7 +19,7 @@ sql/003_relay_v2_session_request_material.sql
 sql/004_provider_native_file_ingress.sql
 ```
 
-0.5.3 继续复用现有 `relay_materials.actual_size / provider_material_bindings / material_fallback_objects` 与 Session/Request binding snapshot，因此无需新 migration。
+0.5.4 只修改 Signed URL 解析逻辑，继续复用现有 `relay_materials.actual_size / provider_material_bindings / material_fallback_objects` 与 Session/Request binding snapshot，因此无需新 migration。
 
 ## 2. Railway：Grok + Gemini Native
 
@@ -64,6 +64,18 @@ Gemini 推理 route 始终是 `GeminiNativeAdapter`，但输入文件传输分�
   -> ACTIVE fileUri
   -> generateContent(fileData.fileUri=<Gemini fileUri>)
 ```
+
+0.5.4 对 Supabase `signedURL` 的 normalization 规则：
+
+```text
+https://...                   -> 原样使用
+/storage/v1/object/...       -> SUPABASE_URL + path
+storage/v1/object/...        -> SUPABASE_URL + / + path
+/object/sign/...             -> SUPABASE_URL + /storage/v1 + path
+object/sign/...              -> SUPABASE_URL + /storage/v1/ + path
+```
+
+这与 `WF-NormalInference_20260910-NoComments.yml` 的关键做法一致：相对 `signedURL` 必须基于 `storage_base = root + /storage/v1` 解析，而不能直接拼到项目 root。
 
 ## 3. Aliyun SAE：Kimi Official
 

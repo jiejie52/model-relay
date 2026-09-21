@@ -1,34 +1,13 @@
-Model Relay 0.5.3 verification
-==============================
+Model Relay 0.5.4 verification
 
-Baseline: model-relay-v2 0.5.2
-Target:   model-relay-v2 0.5.3-relay-authoritative-size
+compileall: PASS
+API import: PASS
+Worker import: PASS
+pytest: 68 passed in 2.60s
 
-1. Python compileall
-   python -m compileall -q app tests
-   PASS
-
-2. Unit tests
-   PYTHONPATH=. pytest -q
-   63 passed in 2.24s
-   PASS
-
-3. API/Worker import smoke
-   RELAY_API_TOKEN=dummy SUPABASE_URL=https://example.supabase.co SUPABASE_SECRET_KEY=dummy PYTHONPATH=. python -c 'import app.api; import app.worker'
-   API version: 0.5.3-relay-authoritative-size
-   PASS
-
-4. Gemini current-failure regression
-   actual_size=547024 bytes, no caller aggregate
-   -> supabase_external_url
-   -> decision_source=relay_actual_bytes
-   PASS
-
-5. Gemini multi-file authoritative request sum
-   60 MiB + 60 MiB, threshold 99 MiB
-   -> gemini_files
-   -> decision_source=relay_request_material_sum
-   -> External URL input copies removed after Files binding succeeds
-   PASS (unit-covered with scaled byte threshold)
-
-No new SQL migration is required.
+Regression focus:
+- /object/sign/... -> <SUPABASE_URL>/storage/v1/object/sign/...
+- /storage/v1/... remains single-prefixed
+- absolute signed URL preserved
+- relative object/sign/... normalized against Storage API base
+- empty signed URL fails closed

@@ -7,6 +7,36 @@ import httpx
 from .config import Settings
 
 
+def _normalize_supabase_signed_url(supabase_root: str, signed_url: str) -> str:
+    """Normalize Supabase Storage signed URL responses to an absolute URL.
+
+    Supabase may return either an absolute URL, a path rooted at
+    ``/storage/v1/...``, or a Storage-relative path such as
+    ``/object/sign/...``.  The latter must be resolved against the Storage API
+    base (``<project>/storage/v1``), not the project root.  This mirrors the
+    proven WF-NormalInference behavior while remaining compatible with both
+    current Supabase response shapes.
+    """
+    root = str(supabase_root or "").strip().rstrip("/")
+    signed = str(signed_url or "").strip()
+    if not root or not signed:
+        raise RuntimeError("Supabase signed URL normalization received an empty root or URL")
+
+    if signed.startswith(("https://", "http://")):
+        return signed
+
+    # Some Supabase deployments/clients return an already Storage-rooted path.
+    if signed.startswith("/storage/v1/"):
+        return root + signed
+    if signed.startswith("storage/v1/"):
+        return root + "/" + signed
+
+    storage_base = root + "/storage/v1"
+    if signed.startswith("/"):
+        return storage_base + signed
+    return storage_base + "/" + signed
+
+
 class SupabaseError(RuntimeError):
     """Lossless Supabase HTTP failure.
 
@@ -239,9 +269,7 @@ class SupabaseBackend:
         signed = data.get("signedURL") or data.get("signedUrl") or data.get("signed_url")
         if not signed:
             raise RuntimeError("Supabase did not return a signed URL")
-        if str(signed).startswith("http"):
-            return str(signed)
-        return f"{self.settings.supabase_root}{signed}"
+        return _normalize_supabase_signed_url(self.settings.supabase_root, str(signed))
 
     async def storage_delete(self, object_path: str) -> None:
         bucket = quote(self.settings.supabase_bucket, safe="")

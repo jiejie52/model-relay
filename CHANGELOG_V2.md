@@ -1,5 +1,14 @@
 # Model Relay Changelog
 
+## 0.5.4 Supabase Signed URL Normalization
+
+- Fixed Supabase Storage `signedURL` normalization for relative `/object/sign/...` responses.
+- Relative Storage paths are now resolved against `<SUPABASE_URL>/storage/v1`, matching the proven WF-NormalInference Supabase bridge behavior.
+- Added compatibility for absolute URLs and already Storage-rooted `/storage/v1/...` responses without duplicating the prefix.
+- Gemini Relay-authoritative `<=99 MiB` / `>99 MiB` transport decision is unchanged.
+- Added 5 regression tests for Signed URL response shapes; full suite now passes 68 tests.
+- No database migration.
+
 ## 0.5.3 Relay-Authoritative Gemini Size
 
 - Gemini file-size authority moved from caller aggregate hints to Relay-measured bytes.
