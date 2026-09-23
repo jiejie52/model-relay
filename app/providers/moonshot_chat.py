@@ -22,7 +22,7 @@ class MoonshotChatAdapter:
     frozen official Files API ms:// binding. Raw input bytes are not uploaded here.
     """
 
-    adapter_version = "moonshot-chat/4"
+    adapter_version = "moonshot-chat/5"
     _PROTECTED = {"model", "messages", "response_format", "stream", "reasoning_effort", "thinking"}
 
     def __init__(
@@ -229,6 +229,14 @@ class MoonshotChatAdapter:
 
             think_level = str(snapshot.get("think_level") or "auto").strip().lower() or "auto"
             model = str(snapshot.get("model") or "").strip().lower()
+
+            # K2.7 Code is always-thinking. Relay normalizes every caller depth
+            # to effective ``on`` and the native Kimi wire explicitly enables
+            # Thinking using thinking.type, rather than inventing an effort.
+            if cls._is_kimi_k27_code(model):
+                payload["thinking"] = {"type": "enabled"}
+                return
+
             if think_level in {"low", "high", "max"}:
                 if not cls._supports_reasoning_effort(model):
                     raise ProviderRequestError(
@@ -248,6 +256,10 @@ class MoonshotChatAdapter:
             for key, value in provider_payload.items():
                 if key not in cls._PROTECTED and key != "material_mode":
                     payload[key] = value
+
+    @staticmethod
+    def _is_kimi_k27_code(model: str) -> bool:
+        return str(model or "").strip().lower().startswith("kimi-k2.7-code")
 
     @staticmethod
     def _supports_reasoning_effort(model: str) -> bool:

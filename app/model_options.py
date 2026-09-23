@@ -6,7 +6,7 @@ from numbers import Real
 from typing import Any
 
 
-CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.3"
+CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.4"
 
 
 class ModelOptionError(ValueError):
@@ -109,17 +109,15 @@ _PROFILES: tuple[CapabilityProfile, ...] = (
         supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
         supported_think_levels=frozenset({"auto", "low", "high", "max"}),
     ),
-    # Dify compatibility for K2.7 Code. The model is always-thinking, while
-    # the official contract does not expose separate low/high/max effort knobs.
-    # Accept these caller values so the request is not rejected at Relay
-    # admission, then normalize them to effective ``auto`` below. This keeps
-    # requested intent for audit without pretending the Provider received an
-    # unsupported native reasoning_effort value.
+    # K2.7 Code is an always-thinking model. Caller-selected depth is not an
+    # execution knob for this model: Relay accepts any canonical/client depth
+    # label and maps it to a single effective ``on`` state. The Moonshot
+    # adapter then sends native ``thinking.type=enabled``.
     CapabilityProfile(
         provider="kimi",
         model_pattern="kimi-k2.7-code*",
         supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
-        supported_think_levels=frozenset({"auto", "low", "high", "max"}),
+        supported_think_levels=frozenset({"auto"}),
     ),
     # Other Kimi model families remain fail-closed for explicit effort until
     # the upstream model documents an equivalent reasoning_effort contract.
@@ -237,7 +235,10 @@ def resolve_model_options(
     requested = dict(options or {})
     warnings: list[str] = []
     requested_think_level = str(think_level or "auto").strip().lower() or "auto"
-    if requested_think_level not in profile.supported_think_levels:
+    kimi_k27_always_thinking = (
+        provider_n == "kimi" and model_n.lower().startswith("kimi-k2.7-code")
+    )
+    if not kimi_k27_always_thinking and requested_think_level not in profile.supported_think_levels:
         raise ModelOptionError(
             "THINK_LEVEL_UNSUPPORTED",
             f"think_level={requested_think_level!r} is not supported by the selected provider/model",
@@ -301,18 +302,14 @@ def resolve_model_options(
         )
 
     effective_think_level = requested_think_level
-    if (
-        provider_n == "kimi"
-        and model_n.lower().startswith("kimi-k2.7-code")
-        and requested_think_level in {"low", "high", "max"}
-    ):
-        # K2.7 Code is an always-thinking model. Accept Dify's canonical
-        # low/high/max selector for compatibility, but execute with Provider
-        # default semantics instead of sending an undocumented effort field.
-        effective_think_level = "auto"
+    if kimi_k27_always_thinking:
+        # K2.7 Code only runs with Thinking enabled. The user's selected depth
+        # is retained for audit but is intentionally not treated as a Provider
+        # effort level; all values collapse to the same execution identity.
+        effective_think_level = "on"
         warnings.append(
-            f"kimi-k2.7-code does not expose adjustable reasoning_effort; "
-            f"think_level={requested_think_level!r} was accepted and normalized to 'auto'"
+            f"kimi-k2.7-code is always-thinking; think_level={requested_think_level!r} "
+            "was mapped to effective Thinking ON"
         )
 
     return ResolvedModelOptions(

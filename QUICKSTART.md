@@ -1,6 +1,6 @@
-# Model Relay 0.5.4 部署与迁移关键操作
+# Model Relay 0.5.9 部署与迁移关键操作
 
-本版本以 `0.5.3` 为基线，仅修复 Supabase Signed URL normalization；Relay-authoritative size、Gemini 双传输、服务端 RouteResolver、完整上传日志和 Raw Error 均保持不变。
+> 当前增量：`kimi-k2.7-code*` 无论调用方选择何种 `think_level`，Relay 都统一映射为 Thinking ON，并由 Moonshot Adapter 发送 `thinking.type=enabled`。本增量无 SQL migration；部署后需新建 Kimi Session。
 
 1. **Route 仍由 Relay 服务端决定**：Dify 只传 `provider + model`，不负责 `connection_id / target_connection_id`。
 2. **Gemini 按当前 Request 文件总量选材料传输**：`<=99 MiB` 使用 Supabase Signed External URL；`>99 MiB` 使用 Gemini Files API。两条路径都继续由 `GeminiNativeAdapter` 推理。

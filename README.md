@@ -1,4 +1,13 @@
-# Model Relay 0.5.8 - Kimi K2.7 Dify Effort Compatibility
+# Model Relay 0.5.9 - Kimi K2.7 Forced Thinking ON
+
+## 0.5.9 关键变化
+
+- `kimi-k2.7-code*` 被建模为 **always-thinking**：无论 Dify / 调用方提交什么 `think_level` 文本值，Relay 都不再按深度枚举拒绝，而是保留原始 `requested_think_level` 仅作审计，并统一冻结为 `think_level=on`。
+- `MoonshotChatAdapter` 对 `kimi-k2.7-code*` 固定发送原生 `thinking: {"type":"enabled"}`，确保 K2.7 Code 以 Thinking ON 执行；不会向该模型发送 `reasoning_effort`。
+- 因为所有调用方思考深度最终执行语义完全相同，Request identity 使用同一 effective `think_level=on`；同一幂等键不会因为 `low/medium/high/max` 的 UI 选择不同而形成不同的 K2.7 执行语义。
+- Kimi K3 的 `low/high/max -> reasoning_effort` 行为保持不变；其他 Kimi 模型继续按既有 capability profile Fail-Closed。
+- `CAPABILITY_PROFILE_REVISION` 升级为 `relay-model-options/2026-09-23.4`，`MoonshotChatAdapter` 升级为 `moonshot-chat/5`。升级后必须创建新的 Kimi Session。
+- 无 SQL migration；Session/Request/Job、Checkpoint/Resume、Material、Route、Structured Output 合同不变。
 
 ## 0.5.8 关键变化
 
