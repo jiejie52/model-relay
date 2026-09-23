@@ -112,15 +112,31 @@ class CanonicalModelOptionsTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "THINK_LEVEL_UNSUPPORTED")
 
-    def test_gemini_36_rejects_legacy_sampling_knobs(self):
-        with self.assertRaises(ModelOptionError) as ctx:
-            resolve_model_options(
-                provider="gemini",
-                model="gemini-3.6-flash",
-                options={"temperature": 0.2},
-                think_level="medium",
-            )
-        self.assertEqual(ctx.exception.code, "OPTION_UNSUPPORTED")
+    def test_gemini_35_and_36_allow_canonical_temperature(self):
+        for model in ("gemini-3.5-flash-lite", "gemini-3.6-flash"):
+            with self.subTest(model=model):
+                resolved = resolve_model_options(
+                    provider="gemini",
+                    model=model,
+                    options={"temperature": 0.2, "max_output_tokens": 2048},
+                    think_level="medium",
+                )
+                self.assertEqual(
+                    resolved.effective_options,
+                    {"max_output_tokens": 2048, "temperature": 0.2},
+                )
+
+    def test_gemini_35_and_36_top_p_remains_fail_closed(self):
+        for model in ("gemini-3.5-flash-lite", "gemini-3.6-flash"):
+            with self.subTest(model=model):
+                with self.assertRaises(ModelOptionError) as ctx:
+                    resolve_model_options(
+                        provider="gemini",
+                        model=model,
+                        options={"top_p": 0.9},
+                        think_level="medium",
+                    )
+                self.assertEqual(ctx.exception.code, "OPTION_UNSUPPORTED")
 
     def test_gemini_v21_temperature_resume_is_translated_not_top_level(self):
         payload = {"contents": []}

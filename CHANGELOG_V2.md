@@ -1,5 +1,13 @@
 # Model Relay Changelog
 
+## 0.5.6 Gemini Temperature Capability Hotfix
+
+- Fixed `gemini-3.5-*` and `gemini-3.6-*` capability profiles so canonical `options.temperature` is accepted instead of returning `OPTION_UNSUPPORTED`.
+- Provider-neutral boundary is unchanged: callers still send `options.temperature`; Gemini Native Adapter projects it to `generationConfig.temperature`.
+- `max_output_tokens` behavior is unchanged. `top_p` remains fail-closed for Gemini 3.5/3.6 pending separate validation.
+- Kept `CAPABILITY_PROFILE_REVISION=relay-model-options/2026-09-23.1` because this release corrects the implementation to the 0.5.5 declared canonical-temperature contract rather than introducing a new caller-visible option contract.
+- No database migration; no DSL capability tables required.
+
 ## 0.5.5 Canonical Model Options + Capability Guard
 
 - Added provider-neutral `options` to v2 Session Request: `temperature`, `top_p`, `max_output_tokens`.

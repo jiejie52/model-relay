@@ -1,8 +1,21 @@
-# Model Relay 0.5.5 - Canonical Model Options + Capability Guard
+# Model Relay 0.5.6 - Gemini Temperature Capability Hotfix
 
-本版本以 `model-relay-v2 0.5.4` 为基线，把 v2 Request 的高级模型参数从 `provider_payload` 收口为 Provider-Neutral `options`，并新增 Relay Capability 校验与 Adapter 原生 Wire 投影。核心目标是：业务调用方表达参数意图，Relay 冻结生效参数，Provider Adapter 独占 Gemini / Grok / Kimi 原生字段映射。
+本版本以 `model-relay-v2 0.5.5` 为基线，修复 Gemini 3.5/3.6 capability profile 误拒绝 canonical `options.temperature` 的问题。业务 Workflow 继续只表达 Provider-Neutral options；Gemini Native Adapter 统一负责把 temperature 投影到 `generationConfig.temperature`。无需修改 Parent / Analyze / Finalize DSL。
+
+## 0.5.6 关键变化
+
+- `gemini-3.5-*` 与 `gemini-3.6-*` 现在接受 canonical `options.temperature`。
+- Gemini Native wire 继续由 Adapter 构造：`options.temperature -> generationConfig.temperature`；不会恢复 caller `provider_payload` 或顶层 `temperature`。
+- `max_output_tokens` 行为不变；`top_p` 在 3.5/3.6 仍保持 Fail-Closed，等待单独验证后再启用。
+- `CAPABILITY_PROFILE_REVISION` 保持 `relay-model-options/2026-09-23.1`：0.5.6 修复的是 0.5.5 已声明 canonical temperature contract 的实现偏差，避免现有 Session 因纯 Bugfix 被强制重建。
+- Request schema/hash、Session/Request/Job、Checkpoint/Resume、Material、Route、Structured Output 均不变。
+- 无数据库 migration。
+
+详细实现见 `GEMINI_TEMPERATURE_CAPABILITY_0.5.6_IMPLEMENTATION.md`。
 
 ## 0.5.5 关键变化
+
+本版本以 `model-relay-v2 0.5.4` 为基线，把 v2 Request 的高级模型参数从 `provider_payload` 收口为 Provider-Neutral `options`，并新增 Relay Capability 校验与 Adapter 原生 Wire 投影。核心目标是：业务调用方表达参数意图，Relay 冻结生效参数，Provider Adapter 独占 Gemini / Grok / Kimi 原生字段映射。
 
 - `/v2/sessions/{session_id}/requests` 新增 `options`，当前 canonical 支持 `temperature`、`top_p`、`max_output_tokens`。
 - Capability 同时校验 `think_level`：Gemini 支持 `auto/low/medium/high` 并映射到 Native `thinkingConfig.thinkingLevel`；Grok 4.6 额外支持 `xhigh`；当前 Kimi Adapter 未实现 reasoning-effort wire，因此非 `auto` Fail-Closed，避免“看似生效、实际忽略”。

@@ -65,18 +65,20 @@ class ResolvedModelOptions:
 # Canonical options are provider-neutral application intent. Provider adapters
 # are solely responsible for projecting these values to native wire fields.
 _PROFILES: tuple[CapabilityProfile, ...] = (
-    # Gemini 3.5/3.6 no longer expose legacy sampling controls in the same way;
-    # keep output sizing canonical but fail closed on unsupported sampling knobs.
+    # Gemini 3.5/3.6 use the same canonical temperature intent as other
+    # Gemini Native routes. The adapter owns the wire projection to
+    # generationConfig.temperature; callers never send provider-native JSON.
+    # top_p remains fail-closed for these model families until separately enabled.
     CapabilityProfile(
         provider="gemini",
         model_pattern="gemini-3.6-*",
-        supported_options=frozenset({"max_output_tokens"}),
+        supported_options=frozenset({"temperature", "max_output_tokens"}),
         supported_think_levels=frozenset({"auto", "low", "medium", "high"}),
     ),
     CapabilityProfile(
         provider="gemini",
         model_pattern="gemini-3.5-*",
-        supported_options=frozenset({"max_output_tokens"}),
+        supported_options=frozenset({"temperature", "max_output_tokens"}),
         supported_think_levels=frozenset({"auto", "low", "medium", "high"}),
     ),
     CapabilityProfile(
