@@ -6,7 +6,7 @@ from numbers import Real
 from typing import Any
 
 
-CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.1"
+CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.2"
 
 
 class ModelOptionError(ValueError):
@@ -99,8 +99,19 @@ _PROFILES: tuple[CapabilityProfile, ...] = (
         supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
         supported_think_levels=frozenset({"auto", "low", "medium", "high"}),
     ),
-    # The current Moonshot adapter has no explicit reasoning-effort wire mapping.
-    # Fail closed rather than silently pretending low/medium/high took effect.
+    # Kimi K3 exposes top-level reasoning_effort on the official API. Keep
+    # Relay's canonical think_level provider-neutral and let the Moonshot
+    # adapter own the native wire projection. ``auto`` omits the wire field
+    # and therefore uses the provider/model default.
+    CapabilityProfile(
+        provider="kimi",
+        model_pattern="kimi-k3*",
+        supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
+        supported_think_levels=frozenset({"auto", "low", "high", "max"}),
+    ),
+    # Other Kimi model families remain fail-closed for explicit effort until
+    # the upstream model documents an equivalent reasoning_effort contract.
+    # In particular, K2.7 Code is always-thinking but does not expose low/high/max.
     CapabilityProfile(
         provider="kimi",
         model_pattern="kimi-*",

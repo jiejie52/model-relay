@@ -22,8 +22,8 @@ class MoonshotChatAdapter:
     frozen official Files API ms:// binding. Raw input bytes are not uploaded here.
     """
 
-    adapter_version = "moonshot-chat/2"
-    _PROTECTED = {"model", "messages", "response_format", "stream"}
+    adapter_version = "moonshot-chat/3"
+    _PROTECTED = {"model", "messages", "response_format", "stream", "reasoning_effort", "thinking"}
 
     def __init__(
         self,
@@ -219,14 +219,28 @@ class MoonshotChatAdapter:
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
         if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
             options = snapshot.get("effective_options") or {}
-            if not isinstance(options, dict):
-                return
-            if "temperature" in options:
-                payload["temperature"] = options["temperature"]
-            if "top_p" in options:
-                payload["top_p"] = options["top_p"]
-            if "max_output_tokens" in options:
-                payload["max_tokens"] = options["max_output_tokens"]
+            if isinstance(options, dict):
+                if "temperature" in options:
+                    payload["temperature"] = options["temperature"]
+                if "top_p" in options:
+                    payload["top_p"] = options["top_p"]
+                if "max_output_tokens" in options:
+                    payload["max_tokens"] = options["max_output_tokens"]
+
+            think_level = str(snapshot.get("think_level") or "auto").strip().lower() or "auto"
+            model = str(snapshot.get("model") or "").strip().lower()
+            if think_level in {"low", "high", "max"}:
+                if not cls._supports_reasoning_effort(model):
+                    raise ProviderRequestError(
+                        "THINK_LEVEL_UNSUPPORTED",
+                        f"think_level={think_level!r} has no Kimi reasoning_effort wire mapping for model {model!r}",
+                    )
+                payload["reasoning_effort"] = think_level
+            elif think_level != "auto":
+                raise ProviderRequestError(
+                    "THINK_LEVEL_UNSUPPORTED",
+                    f"Unsupported Kimi think_level={think_level!r}",
+                )
             return
 
         provider_payload = snapshot.get("provider_payload") or {}
@@ -234,6 +248,10 @@ class MoonshotChatAdapter:
             for key, value in provider_payload.items():
                 if key not in cls._PROTECTED and key != "material_mode":
                     payload[key] = value
+
+    @staticmethod
+    def _supports_reasoning_effort(model: str) -> bool:
+        return str(model or "").strip().lower().startswith("kimi-k3")
 
     def _headers(self) -> dict[str, str]:
         assert self.settings.moonshot_api_key is not None

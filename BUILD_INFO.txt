@@ -1,5 +1,0 @@
-Model Relay V2
-Build: 2.0.5-hotfix5
-Date: 2026-09-18
-Reason: V2 Worker reached runtime but failed closed because Railway material bucket variables were not visible under the package's MATERIAL_S3_* names.
-Primary fix: accept explicit MATERIAL_S3_* plus Railway bucket reference names and AWS-compatible bucket variables, while preserving fail-closed startup when no complete bucket credential set exists.

@@ -1,6 +1,16 @@
-# Model Relay 0.5.6 - Gemini Temperature Capability Hotfix
+# Model Relay 0.5.7 - Kimi Reasoning Effort
 
 本版本以 `model-relay-v2 0.5.5` 为基线，修复 Gemini 3.5/3.6 capability profile 误拒绝 canonical `options.temperature` 的问题。业务 Workflow 继续只表达 Provider-Neutral options；Gemini Native Adapter 统一负责把 temperature 投影到 `generationConfig.temperature`。无需修改 Parent / Analyze / Finalize DSL。
+
+
+## 0.5.7 关键变化
+
+- Kimi K3 (`kimi-k3*`) 的 canonical `think_level` 新增 `low` / `high` / `max`；`auto` 继续保留。
+- MoonshotChatAdapter 将 `low/high/max` 1:1 投影为官方 Chat Completions 顶层 `reasoning_effort`；`auto` 不发送该字段，使用上游模型默认档位。
+- `reasoning_effort` 与 `thinking` 被纳入 Adapter 保护字段，调用方不能通过 legacy `provider_payload` 绕过 Relay capability。
+- 其他 `kimi-*` 仍保持 `auto`-only；K2.7 Code 不伪装支持可调 effort。
+- `CAPABILITY_PROFILE_REVISION` 升级为 `relay-model-options/2026-09-23.2`。因为能力语义发生变化，升级后应为 Kimi 新建 Session；旧 Session 提交新 Request 会按设计返回 `CAPABILITY_PROFILE_CHANGED_RECREATE_SESSION`。
+- Request schema、Session/Request/Job、Checkpoint/Resume、Material、Route、Structured Output 均不变；无数据库 migration。
 
 ## 0.5.6 关键变化
 

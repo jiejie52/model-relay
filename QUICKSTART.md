@@ -258,7 +258,9 @@ top_p
 max_output_tokens
 ```
 
-Relay 在 Request 受理时做 Capability 校验并冻结 `effective_options`；上述是 canonical option namespace，具体 provider/model 可用子集由 Relay capability profile 决定。0.5.6 中 `gemini-3.5-*` / `gemini-3.6-*` 支持 `temperature` 与 `max_output_tokens`，其中 `temperature` 由 Gemini Native Adapter 投影到 `generationConfig.temperature`；`top_p` 对这两个模型族暂保持 Fail-Closed。Gemini/Grok/Kimi 的具体字段名只在对应 Provider Adapter 内生成。`provider_payload` 仅作为 v2.1 迁移字段保留，未知 legacy wire 字段会被拒绝。
+Relay 在 Request 受理时做 Capability 校验并冻结 `effective_options`；上述是 canonical option namespace，具体 provider/model 可用子集由 Relay capability profile 决定。当前实现中 `gemini-3.5-*` / `gemini-3.6-*` 支持 `temperature` 与 `max_output_tokens`，其中 `temperature` 由 Gemini Native Adapter 投影到 `generationConfig.temperature`；`top_p` 对这两个模型族暂保持 Fail-Closed。Gemini/Grok/Kimi 的具体字段名只在对应 Provider Adapter 内生成。`provider_payload` 仅作为 v2.1 迁移字段保留，未知 legacy wire 字段会被拒绝。
+
+Kimi K3 (`kimi-k3*`) 的 `think_level` 支持 `auto/low/high/max`。其中 `low/high/max` 由 MoonshotChatAdapter 投影为顶层 `reasoning_effort`，`auto` 不发送该字段；其他 `kimi-*` 仍保持 `auto`-only，避免对没有可调 effort 合同的模型伪装支持。
 
 ## 8. 旧 Dify 兼容窗口
 
