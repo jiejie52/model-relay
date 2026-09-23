@@ -1,13 +1,17 @@
-Model Relay 0.5.4 verification
+Model Relay 0.5.5 verification
 
 compileall: PASS
 API import: PASS
 Worker import: PASS
-pytest: 68 passed in 2.60s
+pytest: 82 passed
 
 Regression focus:
-- /object/sign/... -> <SUPABASE_URL>/storage/v1/object/sign/...
-- /storage/v1/... remains single-prefixed
-- absolute signed URL preserved
-- relative object/sign/... normalized against Storage API base
-- empty signed URL fails closed
+- v2.2 canonical options freeze: options + effective_options + capability_revision
+- provider_payload known aliases migrate to canonical options; unknown wire fields fail closed
+- Gemini temperature/top_p/max_output_tokens project into generationConfig, not request top level
+- legacy v2.1 Gemini provider_payload.temperature resumes via generationConfig.temperature
+- Gemini think_level low/medium/high projects to thinkingConfig.thinkingLevel
+- Grok 4.6 xhigh accepted; Grok 4.5 xhigh rejected
+- Kimi non-auto think_level fails closed until a native mapping exists
+- request identity includes canonical option/capability semantics
+- existing routing/material/structured-output/raw-error regressions remain green

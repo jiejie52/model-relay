@@ -19,7 +19,13 @@ def stable_hash(value: Any) -> str:
 
 
 def request_identity(snapshot: dict[str, Any]) -> str:
-    """Hash every execution-relevant field frozen at acceptance time."""
+    """Hash every execution-relevant field frozen at acceptance time.
+
+    relay-request/2.2 hashes canonical requested/effective options plus the
+    capability profile revision. Older snapshots retain provider_payload in the
+    identity so in-flight 2.1 Requests remain resumable after a Relay upgrade.
+    """
+
     identity = {
         "session_id": snapshot.get("session_id"),
         "owner": {
@@ -34,8 +40,17 @@ def request_identity(snapshot: dict[str, Any]) -> str:
         "connection_id": snapshot.get("connection_id"),
         "model": snapshot.get("model"),
         "think_level": snapshot.get("think_level"),
-        "provider_payload": snapshot.get("provider_payload") or {},
         "structured_output": snapshot.get("structured_output") or {},
         "execution": snapshot.get("execution") or {},
     }
+    if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+        identity.update(
+            {
+                "options": snapshot.get("options") or {},
+                "effective_options": snapshot.get("effective_options") or {},
+                "capability_revision": snapshot.get("capability_revision"),
+            }
+        )
+    else:
+        identity["provider_payload"] = snapshot.get("provider_payload") or {}
     return stable_hash(identity)

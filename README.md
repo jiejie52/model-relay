@@ -1,6 +1,22 @@
-# Model Relay 0.5.4 - Supabase Signed URL Normalization
+# Model Relay 0.5.5 - Canonical Model Options + Capability Guard
 
-本版本以 `model-relay-v2 0.5.3` 为基线，修复 Supabase Storage 签名接口返回相对 `signedURL` 时的 URL 拼接错误。Gemini 的 Relay-authoritative 99 MiB 判断、RouteResolver、`GeminiNativeAdapter` 与双传输策略保持不变。
+本版本以 `model-relay-v2 0.5.4` 为基线，把 v2 Request 的高级模型参数从 `provider_payload` 收口为 Provider-Neutral `options`，并新增 Relay Capability 校验与 Adapter 原生 Wire 投影。核心目标是：业务调用方表达参数意图，Relay 冻结生效参数，Provider Adapter 独占 Gemini / Grok / Kimi 原生字段映射。
+
+## 0.5.5 关键变化
+
+- `/v2/sessions/{session_id}/requests` 新增 `options`，当前 canonical 支持 `temperature`、`top_p`、`max_output_tokens`。
+- Capability 同时校验 `think_level`：Gemini 支持 `auto/low/medium/high` 并映射到 Native `thinkingConfig.thinkingLevel`；Grok 4.6 额外支持 `xhigh`；当前 Kimi Adapter 未实现 reasoning-effort wire，因此非 `auto` Fail-Closed，避免“看似生效、实际忽略”。
+- 新增 `app/model_options.py` 与 `CAPABILITY_PROFILE_REVISION`；Request 受理阶段先校验 provider/model/option，再冻结 `options + effective_options + capability_revision`。
+- v2.2 Adapter 禁止把 caller dictionary 任意 merge 到 Provider JSON；Gemini 将 `temperature/top_p/max_output_tokens` 映射到 `generationConfig.temperature/topP/maxOutputTokens`，Grok Responses 映射为原生 Responses 字段，Kimi 将 `max_output_tokens` 映射为 `max_tokens`。
+- `provider_payload` 仅保留 v2.1 迁移桥：只接受可确定映射的 legacy alias；未知 provider wire 字段 Fail-Closed。
+- 修复已持久化 v2.1 Gemini Request 的恢复语义：legacy `provider_payload.temperature` 会迁移到 `generationConfig.temperature`，不再发送非法顶层 `temperature`。
+- Session RouteBinding 冻结 `capability_revision`；新 Request 若发现 Session capability 与当前版本不一致，返回 `CAPABILITY_PROFILE_CHANGED_RECREATE_SESSION`，避免参数语义静默漂移。
+- v2.2 request hash 改为包含 canonical `options/effective_options/capability_revision`；旧 v2.1 request identity 继续兼容。
+- `/health` 新增 `capability_revision`。
+- 无新增 SQL migration。
+- 回归结果：`compileall PASS`、API import PASS、Worker import PASS、`pytest 82 passed`。
+
+详细实现见 `CANONICAL_MODEL_OPTIONS_0.5.5_IMPLEMENTATION.md`。
 
 ## 0.5.4 关键变化
 

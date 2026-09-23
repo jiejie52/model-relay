@@ -20,6 +20,7 @@ from .api_v2.router import router as relay_v2_router
 from .persistence.object_storage import StorageRegistry
 from .persistence.supabase_storage import SupabaseObjectStorage
 from .materials.ingress import MaterialIngress
+from .model_options import CAPABILITY_PROFILE_REVISION
 from .materials.fallback_storage import FallbackObjectStorage
 from .materials.binding_resolver import BindingResolver
 from .materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
@@ -116,7 +117,7 @@ async def lifespan(_: FastAPI):
     log_info(
         logger,
         "api_started",
-        version="0.5.4-supabase-signed-url-normalization",
+        version="0.5.5-canonical-model-options",
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         connection_policy=settings.connection_availability_mode,
@@ -125,6 +126,7 @@ async def lifespan(_: FastAPI):
         route_revision=route_catalog.revision,
         route_catalog_hash=route_catalog.catalog_hash,
         route_providers=route_catalog.providers(),
+        capability_revision=CAPABILITY_PROFILE_REVISION,
         dependency_http_log_level=settings.dependency_http_log_level,
         uvicorn_access_log=settings.uvicorn_access_log,
     )
@@ -135,7 +137,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.5.4-supabase-signed-url-normalization", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.5.5-canonical-model-options", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -212,11 +214,12 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.5.4-supabase-signed-url-normalization",
+        "version": "0.5.5-canonical-model-options",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
         "providers": getattr(app.state, "route_catalog", None).providers() if getattr(app.state, "route_catalog", None) else [],
+        "capability_revision": CAPABILITY_PROFILE_REVISION,
     }
 
 

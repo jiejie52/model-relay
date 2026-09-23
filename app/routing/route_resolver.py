@@ -8,6 +8,7 @@ from typing import Any
 
 from ..config import Settings
 from ..materials.provider_files.registry import ProviderFileRegistry
+from ..model_options import CAPABILITY_PROFILE_REVISION
 from ..observability import error as log_error, info as log_info, warning as log_warning
 from ..providers.registry import ProviderRegistry
 from .catalog import RouteCatalog
@@ -36,6 +37,7 @@ class RouteBinding:
     file_adapter_version: str | None
     execution_pool: str
     purpose: str
+    capability_revision: str = CAPABILITY_PROFILE_REVISION
 
     def internal_metadata(self) -> dict[str, Any]:
         return {
@@ -48,6 +50,7 @@ class RouteBinding:
             "inference_adapter_version": self.inference_adapter_version,
             "file_adapter_version": self.file_adapter_version,
             "execution_pool": self.execution_pool,
+            "capability_revision": self.capability_revision,
         }
 
 
@@ -357,6 +360,7 @@ class RouteResolver:
                 "inference_adapter_version": provider_meta.get("adapter_version"),
                 "file_adapter_version": file_meta.get("adapter_version") if file_meta else None,
                 "execution_pool": self.settings.execution_pool,
+                "capability_revision": CAPABILITY_PROFILE_REVISION,
             }
             binding_hash = hashlib.sha256(
                 json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -372,6 +376,7 @@ class RouteResolver:
                 file_adapter_version=(str(file_meta.get("adapter_version")) if file_meta else None),
                 execution_pool=self.settings.execution_pool,
                 purpose=purpose_n,
+                capability_revision=CAPABILITY_PROFILE_REVISION,
             )
             log_info(
                 logger,
@@ -387,6 +392,7 @@ class RouteResolver:
                 connection_id=binding.connection_id,
                 adapter_version=binding.inference_adapter_version,
                 file_adapter_version=binding.file_adapter_version,
+                capability_revision=binding.capability_revision,
             )
             return binding
         except RouteResolutionError as exc:

@@ -15,7 +15,7 @@ class ResponsesV2Adapter:
     Request code only deals with material_id and generic input.
     """
 
-    adapter_version = "responses-v2/1"
+    adapter_version = "responses-v2/2"
 
     def __init__(
         self,

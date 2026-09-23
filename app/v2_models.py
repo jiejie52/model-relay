@@ -39,6 +39,7 @@ class SessionResponse(BaseModel):
     active_request_id: UUID | None = None
     execution_pool: str
     route_revision: str | None = None
+    capability_revision: str | None = None
     created_at: datetime | None = None
     expires_at: datetime | None = None
 
@@ -59,7 +60,13 @@ class SessionRequestCreate(BaseModel):
     think_level: str | None = Field(default=None, max_length=40)
     execution: ExecutionSpec
     structured_output: dict[str, Any] = Field(default_factory=dict)
-    provider_payload: dict[str, Any] = Field(default_factory=dict)
+    # Provider-neutral advanced model controls. These are validated by the
+    # Relay capability layer and projected to native provider wire only inside
+    # the selected connection-scoped Adapter.
+    options: dict[str, Any] = Field(default_factory=dict)
+    # v2.1 migration bridge only. New callers must use ``options``. Relay v2.2
+    # converts only known canonical aliases and rejects arbitrary wire fields.
+    provider_payload: dict[str, Any] = Field(default_factory=dict, deprecated=True)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

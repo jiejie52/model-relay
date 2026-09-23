@@ -1,5 +1,20 @@
 # Model Relay Changelog
 
+## 0.5.5 Canonical Model Options + Capability Guard
+
+- Added provider-neutral `options` to v2 Session Request: `temperature`, `top_p`, `max_output_tokens`.
+- Added `app/model_options.py` with strict capability validation and `CAPABILITY_PROFILE_REVISION`.
+- Capability profiles now validate `think_level`; Gemini low/medium/high maps to native `thinkingConfig.thinkingLevel`, Grok 4.6 alone accepts `xhigh`, and Kimi non-auto levels fail closed until a native mapping exists.
+- v2.2 freezes requested/effective options and capability revision into the Request snapshot and request hash.
+- Removed arbitrary provider wire merging from new v2 Requests. Provider-specific projection now lives only in Gemini/Grok/Kimi adapters.
+- Gemini maps canonical options into `generationConfig`; legacy v2.1 top-level `provider_payload.temperature` is translated during resume, fixing the observed generateContent 400.
+- Grok Responses maps canonical options to `temperature/top_p/max_output_tokens`; Kimi maps `max_output_tokens` to native `max_tokens`.
+- Deprecated `provider_payload` remains as a migration bridge for known aliases only; unsupported legacy wire fields fail closed.
+- Session RouteBinding now freezes `capability_revision`; new Requests reject stale capability-bound Sessions instead of silently changing option semantics.
+- `/health` exposes `capability_revision`.
+- No database migration.
+- Tests: 82 passed.
+
 ## 0.5.4 Supabase Signed URL Normalization
 
 - Fixed Supabase Storage `signedURL` normalization for relative `/object/sign/...` responses.

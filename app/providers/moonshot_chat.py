@@ -22,7 +22,7 @@ class MoonshotChatAdapter:
     frozen official Files API ms:// binding. Raw input bytes are not uploaded here.
     """
 
-    adapter_version = "moonshot-chat/1"
+    adapter_version = "moonshot-chat/2"
     _PROTECTED = {"model", "messages", "response_format", "stream"}
 
     def __init__(
@@ -69,11 +69,7 @@ class MoonshotChatAdapter:
             "messages": messages,
             "stream": False,
         }
-        provider_payload = context.snapshot.get("provider_payload") or {}
-        if isinstance(provider_payload, dict):
-            for key, value in provider_payload.items():
-                if key not in self._PROTECTED and key != "material_mode":
-                    payload[key] = value
+        self._apply_model_options(payload, context.snapshot)
 
         spec = resolve_structured_output(
             context.snapshot,
@@ -218,6 +214,26 @@ class MoonshotChatAdapter:
                     f"Unsupported Kimi file purpose {purpose!r} for {filename}",
                 )
         return system_messages, visual_parts
+
+    @classmethod
+    def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+            options = snapshot.get("effective_options") or {}
+            if not isinstance(options, dict):
+                return
+            if "temperature" in options:
+                payload["temperature"] = options["temperature"]
+            if "top_p" in options:
+                payload["top_p"] = options["top_p"]
+            if "max_output_tokens" in options:
+                payload["max_tokens"] = options["max_output_tokens"]
+            return
+
+        provider_payload = snapshot.get("provider_payload") or {}
+        if isinstance(provider_payload, dict):
+            for key, value in provider_payload.items():
+                if key not in cls._PROTECTED and key != "material_mode":
+                    payload[key] = value
 
     def _headers(self) -> dict[str, str]:
         assert self.settings.moonshot_api_key is not None

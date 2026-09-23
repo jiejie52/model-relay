@@ -79,6 +79,35 @@ class RelayV2CoreTests(unittest.TestCase):
         req = SessionRequestCreate(input="q", execution={"mode": "sync"})
         self.assertEqual(req.execution.mode, "sync")
 
+    def test_session_request_accepts_provider_neutral_options(self):
+        req = SessionRequestCreate(
+            input="q",
+            execution={"mode": "sync"},
+            options={"temperature": 0.08},
+        )
+        self.assertEqual(req.options["temperature"], 0.08)
+
+    def test_v22_request_identity_includes_effective_options_and_capability_revision(self):
+        base = {
+            "schema_version": "relay-request/2.2",
+            "session_id": "s1",
+            "tenant_id": "t",
+            "conversation_hash": "c",
+            "input": "hello",
+            "material_ids": [],
+            "provider": "gemini",
+            "connection_id": "aihubmix_gemini_native",
+            "model": "gemini-3.1-flash-lite",
+            "execution": {"mode": "sync"},
+            "structured_output": {},
+            "options": {"temperature": 0.08},
+            "effective_options": {"temperature": 0.08},
+            "capability_revision": "cap/1",
+        }
+        changed = dict(base)
+        changed["effective_options"] = {"temperature": 0.1}
+        self.assertNotEqual(request_identity(base), request_identity(changed))
+
     def test_raw_provider_error_is_archived_without_truncation(self):
         body = (b"x" * 20000) + b"END"
         repo = FakeRepo()

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from ..core.idempotency import request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
 from ..materials.ingress import MaterialIngressError
+from ..model_options import CAPABILITY_PROFILE_REVISION, ModelOptionError, resolve_model_options
 from ..observability import error as log_error, info as log_info, warning as log_warning, elapsed_ms, now_ms
 from ..persistence.object_storage import ObjectLocation
 from ..routing import RouteBinding, RouteResolutionError
@@ -108,6 +109,7 @@ def _session_response(row: dict[str, Any]) -> SessionResponse:
         active_request_id=UUID(row["active_request_id"]) if row.get("active_request_id") else None,
         execution_pool=row.get("execution_pool") or "railway-default",
         route_revision=str(route.get("route_revision")) if route.get("route_revision") else None,
+        capability_revision=(str(route.get("capability_revision")) if route.get("capability_revision") else None),
         created_at=_dt(row.get("created_at")),
         expires_at=_dt(row.get("expires_at")),
     )
@@ -839,6 +841,7 @@ async def create_session(
         connection_id=route.connection_id,
         adapter_version=route.inference_adapter_version,
         file_adapter_version=route.file_adapter_version,
+        capability_revision=route.capability_revision,
         execution_pool=route.execution_pool,
     )
     log_info(
@@ -948,6 +951,7 @@ async def create_request(
             file_adapter_version=(str(frozen_route.get("file_adapter_version")) if frozen_route.get("file_adapter_version") else None),
             execution_pool=str(session.get("execution_pool") or settings.execution_pool),
             purpose="request",
+            capability_revision=str(frozen_route.get("capability_revision") or CAPABILITY_PROFILE_REVISION),
         )
         await _validate_materials_for_route(
             request,
@@ -991,8 +995,53 @@ async def create_request(
             decision_source="relay_request_material_sum",
         )
 
+    try:
+        resolved_options = resolve_model_options(
+            provider=provider,
+            model=model,
+            options=body.options,
+            provider_payload=body.provider_payload,
+            think_level=body.think_level,
+        )
+    except ModelOptionError as exc:
+        log_warning(
+            logger,
+            "model_options_rejected",
+            session_id=str(session_id),
+            provider=provider,
+            model=model,
+            code=exc.code,
+            option=exc.option,
+            capability_revision=exc.public_detail().get("capability_revision"),
+            failure_class="client",
+        )
+        raise HTTPException(status_code=422, detail=exc.public_detail()) from exc
+
+    frozen_capability_revision = str(frozen_route.get("capability_revision") or "")
+    if frozen_capability_revision and frozen_capability_revision != resolved_options.capability_revision:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CAPABILITY_PROFILE_CHANGED_RECREATE_SESSION",
+                "message": "The Session froze an older model-option capability profile; create a new Session before submitting a new Request",
+                "session_capability_revision": frozen_capability_revision,
+                "current_capability_revision": resolved_options.capability_revision,
+            },
+        )
+
+    for warning in resolved_options.warnings:
+        log_warning(
+            logger,
+            "model_options_compatibility_warning",
+            session_id=str(session_id),
+            provider=provider,
+            model=model,
+            warning=warning,
+            capability_revision=resolved_options.capability_revision,
+        )
+
     snapshot = {
-        "schema_version": "relay-request/2.1",
+        "schema_version": "relay-request/2.2",
         "session_id": str(session_id),
         "tenant_id": tenant_id,
         "conversation_hash": conversation_hash,
@@ -1006,16 +1055,31 @@ async def create_request(
         "model": model,
         "route_revision": frozen_route.get("route_revision") if frozen_route else None,
         "route_binding_hash": frozen_route.get("route_binding_hash") if frozen_route else None,
-        "think_level": body.think_level,
+        "capability_revision": resolved_options.capability_revision,
+        "requested_think_level": resolved_options.requested_think_level,
+        "think_level": resolved_options.effective_think_level,
         "execution": body.execution.model_dump(mode="json"),
         "structured_output": body.structured_output,
+        "options": resolved_options.requested_options,
+        "effective_options": resolved_options.effective_options,
+        # Retained only for audit/migration diagnostics. v2.2 Adapters never
+        # merge this object into provider-native JSON.
         "provider_payload": body.provider_payload,
         "metadata": body.metadata,
     }
     req_hash = request_identity(snapshot)
+    # Narrow upgrade compatibility: a v2.1 caller may replay a Request accepted
+    # before 0.5.5 using provider_payload. Compare its former identity too.
+    legacy_snapshot = dict(snapshot)
+    legacy_snapshot["schema_version"] = "relay-request/2.1"
+    legacy_snapshot.pop("options", None)
+    legacy_snapshot.pop("effective_options", None)
+    legacy_snapshot.pop("capability_revision", None)
+    legacy_req_hash = request_identity(legacy_snapshot)
+
     existing = await repo.find_request_by_idempotency(session_id, idempotency_key)
     if existing:
-        if existing.get("request_hash") != req_hash:
+        if existing.get("request_hash") not in {req_hash, legacy_req_hash}:
             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
         log_info(
             logger,

@@ -400,6 +400,14 @@ class SharedExecutionRuntime:
                     "Session route metadata does not match its frozen connection",
                 )
 
+            frozen_capability = str(route.get("capability_revision") or "")
+            request_capability = str(snapshot.get("capability_revision") or "")
+            if frozen_capability and request_capability and frozen_capability != request_capability:
+                raise ProviderRequestError(
+                    "CAPABILITY_BINDING_MISMATCH",
+                    "Request model-option capability revision does not match the frozen Session capability revision",
+                )
+
         adapter_meta = self.providers.describe(expected["connection_id"])
         if adapter_meta is None:
             raise ProviderRequestError(

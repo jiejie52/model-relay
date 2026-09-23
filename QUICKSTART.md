@@ -232,7 +232,10 @@ execution_pool
   "think_level": "medium",
   "execution": {"mode": "async"},
   "structured_output": {},
-  "provider_payload": {},
+  "options": {
+    "temperature": 0.08,
+    "max_output_tokens": 8000
+  },
   "metadata": {}
 }
 ```
@@ -246,6 +249,16 @@ connection_id
 ```
 
 这些执行事实从 Session 注入 Request snapshot。RouteCatalog 后续升级也不会改变既有 Session 的 route。
+
+`options` 是 Provider-Neutral 高级参数，不是 Provider Wire。当前支持：
+
+```text
+temperature
+top_p
+max_output_tokens
+```
+
+Relay 在 Request 受理时做 Capability 校验并冻结 `effective_options`；Gemini/Grok/Kimi 的具体字段名只在对应 Provider Adapter 内生成。`provider_payload` 仅作为 v2.1 迁移字段保留，未知 legacy wire 字段会被拒绝。
 
 ## 8. 旧 Dify 兼容窗口
 

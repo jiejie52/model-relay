@@ -15,7 +15,7 @@ from ..structured_output import project_schema_for_provider, resolve_structured_
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/1"
+    adapter_version = "gemini-native-aihubmix/2"
     _PROTECTED = {"contents", "systemInstruction", "model"}
 
     def __init__(self, settings: Settings) -> None:
@@ -78,11 +78,7 @@ class GeminiNativeAdapter:
         if instructions:
             payload["systemInstruction"] = {"parts": [{"text": str(instructions)}]}
 
-        provider_payload = context.snapshot.get("provider_payload") or {}
-        if isinstance(provider_payload, dict):
-            for key, val in provider_payload.items():
-                if key not in self._PROTECTED and key not in {"material_mode"}:
-                    payload[key] = val
+        self._apply_model_options(payload, context.snapshot)
 
         spec = resolve_structured_output(
             context.snapshot,
@@ -192,6 +188,65 @@ class GeminiNativeAdapter:
             http_status=status,
             provider_request_id=self._request_id(response_headers),
         )
+
+    @classmethod
+    def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        """Project canonical Relay options to Gemini Native generationConfig.
+
+        v2.2 never merges caller dictionaries into the native request. For an
+        already-persisted v2.1 Request, known sampling keys are translated to
+        generationConfig so a pre-upgrade temperature Request can resume safely;
+        other legacy keys retain their former compatibility behavior.
+        """
+        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+            options = snapshot.get("effective_options") or {}
+            if not isinstance(options, dict):
+                return
+            generation = payload.get("generationConfig")
+            if not isinstance(generation, dict):
+                generation = {}
+                payload["generationConfig"] = generation
+            if "temperature" in options:
+                generation["temperature"] = options["temperature"]
+            if "top_p" in options:
+                generation["topP"] = options["top_p"]
+            if "max_output_tokens" in options:
+                generation["maxOutputTokens"] = options["max_output_tokens"]
+            think_level = str(snapshot.get("think_level") or "auto").lower()
+            if think_level in {"low", "medium", "high"}:
+                generation["thinkingConfig"] = {"thinkingLevel": think_level.upper()}
+            if not generation:
+                payload.pop("generationConfig", None)
+            return
+
+        provider_payload = snapshot.get("provider_payload") or {}
+        if not isinstance(provider_payload, dict):
+            return
+        generation = payload.get("generationConfig")
+        if not isinstance(generation, dict):
+            generation = {}
+        legacy_generation = provider_payload.get("generationConfig")
+        if isinstance(legacy_generation, dict):
+            generation.update(legacy_generation)
+        if "temperature" in provider_payload:
+            generation["temperature"] = provider_payload["temperature"]
+        if "top_p" in provider_payload:
+            generation["topP"] = provider_payload["top_p"]
+        if "max_output_tokens" in provider_payload:
+            generation["maxOutputTokens"] = provider_payload["max_output_tokens"]
+        if "max_tokens" in provider_payload and "maxOutputTokens" not in generation:
+            generation["maxOutputTokens"] = provider_payload["max_tokens"]
+        if generation:
+            payload["generationConfig"] = generation
+
+        translated = {
+            "generationConfig", "temperature", "top_p", "max_output_tokens",
+            "max_tokens", "material_mode",
+        }
+        for key, val in provider_payload.items():
+            if key in translated or key in cls._PROTECTED:
+                continue
+            payload[key] = val
 
     @staticmethod
     def _request_id(headers: Any) -> str | None:

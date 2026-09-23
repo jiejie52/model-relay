@@ -78,17 +78,13 @@ class OpenAICompatibleResponsesProvider:
             if think_level in {"low", "medium", "high", "xhigh"}:
                 payload["reasoning"] = {"effort": think_level}
 
-        provider_payload = request_snapshot.get("provider_payload") or {}
-        if isinstance(provider_payload, dict):
-            for key, value in provider_payload.items():
-                if key not in self._PROTECTED_OVERRIDE_KEYS:
-                    payload[key] = value
+        self._apply_model_options(payload, request_snapshot)
 
         # Generic structured-output passthrough. The adapter never inspects the
         # schema's business property names; it only maps the caller's JSON Schema
         # to the OpenAI-compatible Responses transport. This deliberately runs
-        # after provider_payload merge so an explicit caller schema overrides any
-        # legacy/fallback json_object setting.
+        # after canonical option projection so an explicit caller schema remains
+        # authoritative over any legacy/fallback json_object setting.
         try:
             apply_openai_responses_structured_output(
                 payload,
@@ -172,6 +168,26 @@ class OpenAICompatibleResponsesProvider:
             http_status=response_status,
             provider_request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
         )
+
+    @classmethod
+    def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+            options = snapshot.get("effective_options") or {}
+            if not isinstance(options, dict):
+                return
+            if "temperature" in options:
+                payload["temperature"] = options["temperature"]
+            if "top_p" in options:
+                payload["top_p"] = options["top_p"]
+            if "max_output_tokens" in options:
+                payload["max_output_tokens"] = options["max_output_tokens"]
+            return
+
+        provider_payload = snapshot.get("provider_payload") or {}
+        if isinstance(provider_payload, dict):
+            for key, value in provider_payload.items():
+                if key not in cls._PROTECTED_OVERRIDE_KEYS:
+                    payload[key] = value
 
     @staticmethod
     def make_user_item(text: str) -> dict[str, Any]:
