@@ -22,7 +22,7 @@ class MoonshotChatAdapter:
     frozen official Files API ms:// binding. Raw input bytes are not uploaded here.
     """
 
-    adapter_version = "moonshot-chat/3"
+    adapter_version = "moonshot-chat/4"
     _PROTECTED = {"model", "messages", "response_format", "stream", "reasoning_effort", "thinking"}
 
     def __init__(

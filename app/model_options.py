@@ -6,7 +6,7 @@ from numbers import Real
 from typing import Any
 
 
-CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.2"
+CAPABILITY_PROFILE_REVISION = "relay-model-options/2026-09-23.3"
 
 
 class ModelOptionError(ValueError):
@@ -109,9 +109,20 @@ _PROFILES: tuple[CapabilityProfile, ...] = (
         supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
         supported_think_levels=frozenset({"auto", "low", "high", "max"}),
     ),
+    # Dify compatibility for K2.7 Code. The model is always-thinking, while
+    # the official contract does not expose separate low/high/max effort knobs.
+    # Accept these caller values so the request is not rejected at Relay
+    # admission, then normalize them to effective ``auto`` below. This keeps
+    # requested intent for audit without pretending the Provider received an
+    # unsupported native reasoning_effort value.
+    CapabilityProfile(
+        provider="kimi",
+        model_pattern="kimi-k2.7-code*",
+        supported_options=frozenset({"temperature", "top_p", "max_output_tokens"}),
+        supported_think_levels=frozenset({"auto", "low", "high", "max"}),
+    ),
     # Other Kimi model families remain fail-closed for explicit effort until
     # the upstream model documents an equivalent reasoning_effort contract.
-    # In particular, K2.7 Code is always-thinking but does not expose low/high/max.
     CapabilityProfile(
         provider="kimi",
         model_pattern="kimi-*",
@@ -289,11 +300,26 @@ def resolve_model_options(
             model=model_n,
         )
 
+    effective_think_level = requested_think_level
+    if (
+        provider_n == "kimi"
+        and model_n.lower().startswith("kimi-k2.7-code")
+        and requested_think_level in {"low", "high", "max"}
+    ):
+        # K2.7 Code is an always-thinking model. Accept Dify's canonical
+        # low/high/max selector for compatibility, but execute with Provider
+        # default semantics instead of sending an undocumented effort field.
+        effective_think_level = "auto"
+        warnings.append(
+            f"kimi-k2.7-code does not expose adjustable reasoning_effort; "
+            f"think_level={requested_think_level!r} was accepted and normalized to 'auto'"
+        )
+
     return ResolvedModelOptions(
         requested_options={key: effective[key] for key in sorted(effective)},
         effective_options={key: effective[key] for key in sorted(effective)},
         requested_think_level=requested_think_level,
-        effective_think_level=requested_think_level,
+        effective_think_level=effective_think_level,
         capability_revision=CAPABILITY_PROFILE_REVISION,
         warnings=tuple(warnings),
     )

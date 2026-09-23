@@ -1,4 +1,13 @@
-# Model Relay 0.5.7 - Kimi Reasoning Effort
+# Model Relay 0.5.8 - Kimi K2.7 Dify Effort Compatibility
+
+## 0.5.8 关键变化
+
+- 修复 Dify 对 `kimi-k2.7-code` 发送 `think_level=low/high/max` 时被 Relay 422 `THINK_LEVEL_UNSUPPORTED` 拒绝的问题。
+- `kimi-k2.7-code*` 现在接受 canonical `auto/low/high/max`。由于 K2.7 Code 为固定 Thinking ON，且官方接口没有公开该模型可调 `reasoning_effort` 合同，`low/high/max` 会保留为 `requested_think_level`，执行时规范化为 `think_level=auto`，不会向上游伪造不受支持的 effort 字段。
+- Kimi K3 继续保持 `low/high/max -> reasoning_effort` 的原生 1:1 投影。
+- `CAPABILITY_PROFILE_REVISION` 升级为 `relay-model-options/2026-09-23.3`，`MoonshotChatAdapter` 升级为 `moonshot-chat/4`。升级后请新建 Kimi Session。
+
+---
 
 本版本以 `model-relay-v2 0.5.5` 为基线，修复 Gemini 3.5/3.6 capability profile 误拒绝 canonical `options.temperature` 的问题。业务 Workflow 继续只表达 Provider-Neutral options；Gemini Native Adapter 统一负责把 temperature 投影到 `generationConfig.temperature`。无需修改 Parent / Analyze / Finalize DSL。
 

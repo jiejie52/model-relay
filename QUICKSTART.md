@@ -502,3 +502,8 @@ ENABLED_CONNECTIONS=aihubmix_default
 CONNECTION_AVAILABILITY_MODE=allowlist
 ENABLED_CONNECTIONS=aihubmix_default,aihubmix_gemini_native,...
 ```
+
+
+## Kimi K2.7 Code 与 Dify 思考深度兼容
+
+`kimi-k2.7-code*` 接受 `think_level=auto/low/high/max`。K2.7 Code 为固定 Thinking ON；Relay 对 `low/high/max` 做受理兼容，并将 effective think level 规范化为 `auto`，因此不会在受理阶段返回 `THINK_LEVEL_UNSUPPORTED`，也不会向上游发送未经官方文档确认的 `reasoning_effort`。如需实际可调的 low/high/max effort，请使用支持该原生能力的 Kimi 模型。
