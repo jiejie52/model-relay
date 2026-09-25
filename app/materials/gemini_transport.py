@@ -12,6 +12,24 @@ GEMINI_FILES_REPRESENTATION = "gemini_file_uri"
 GEMINI_EXTERNAL_URL_ADAPTER_VERSION = "gemini-external-url-supabase/1"
 
 
+def project_gemini_input_content_type(source_content_type: str | None) -> str:
+    """Project canonical Relay material MIME into Gemini input wire MIME.
+
+    Relay keeps the source material content type unchanged in the material registry.
+    Gemini input transport uses a provider-compatible MIME only at the wire/binding
+    boundary. JSON artifacts are textual model inputs for Gemini and are projected
+    to ``text/plain`` instead of being sent as ``fileData`` with
+    ``application/json``.
+    """
+    source = str(source_content_type or "").strip()
+    if not source:
+        return "application/octet-stream"
+    normalized = source.split(";", 1)[0].strip().lower()
+    if normalized == "application/json":
+        return "text/plain"
+    return source
+
+
 @dataclass(frozen=True)
 class GeminiTransportDecision:
     mode: str  # supabase_external_url | gemini_files

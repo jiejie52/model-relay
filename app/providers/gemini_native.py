@@ -9,6 +9,7 @@ from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
+from ..materials.gemini_transport import project_gemini_input_content_type
 from ..structured_output import project_schema_for_provider, resolve_structured_output
 
 
@@ -58,7 +59,7 @@ class GeminiNativeAdapter:
             current_parts.append(
                 {
                     "fileData": {
-                        "mimeType": str(binding.get("content_type") or "application/octet-stream"),
+                        "mimeType": project_gemini_input_content_type(binding.get("content_type")),
                         "fileUri": str(file_uri),
                     }
                 }

@@ -29,6 +29,7 @@ from .gemini_transport import (
     GeminiTransportPolicyError,
     decide_gemini_transport,
     external_url_binding,
+    project_gemini_input_content_type,
 )
 from .safe_fetch import MaterialFetchError, fetch_bytes
 
@@ -647,12 +648,17 @@ class MaterialIngress:
             ingress_id=ingress_id,
         )
 
+        provider_content_type = (
+            project_gemini_input_content_type(detected_content_type)
+            if str(adapter.provider or "").lower() == "gemini"
+            else detected_content_type
+        )
         material_file = MaterialFile(
             material_id=material_id,
             tenant_id=tenant_id,
             conversation_hash=conversation_hash,
             filename=filename,
-            content_type=detected_content_type,
+            content_type=provider_content_type,
             size_bytes=len(data),
             sha256=digest,
             data=data,

@@ -15,6 +15,7 @@ from .gemini_transport import (
     GeminiTransportDecision,
     decide_gemini_request_transport,
     external_url_binding,
+    project_gemini_input_content_type,
 )
 from .provider_files.base import MaterialFile
 from .provider_files.registry import ProviderFileRegistry
@@ -308,7 +309,7 @@ class BindingResolver:
                 tenant_id=tenant_id,
                 conversation_hash=conversation_hash,
                 filename=str(material.get("filename") or material_id),
-                content_type=str(material.get("content_type") or "application/octet-stream"),
+                content_type=project_gemini_input_content_type(material.get("content_type")),
                 size_bytes=len(data),
                 sha256=str(material.get("sha256") or ""),
                 data=data,
@@ -476,7 +477,11 @@ class BindingResolver:
                     tenant_id=tenant_id,
                     conversation_hash=conversation_hash,
                     filename=str(material.get("filename") or material_id),
-                    content_type=str(material.get("content_type") or "application/octet-stream"),
+                    content_type=(
+                        project_gemini_input_content_type(material.get("content_type"))
+                        if str(getattr(adapter, "provider", "") or "").lower() == "gemini"
+                        else str(material.get("content_type") or "application/octet-stream")
+                    ),
                     size_bytes=len(data),
                     sha256=str(material.get("sha256") or ""),
                     data=data,
@@ -545,7 +550,11 @@ class BindingResolver:
             "external_file_id": binding.get("external_file_id") or binding.get("provider_file_id"),
             "external_uri": binding.get("external_uri") or binding.get("file_uri"),
             "content_sha256": material.get("sha256"),
-            "content_type": material.get("content_type"),
+            "content_type": (
+                project_gemini_input_content_type(material.get("content_type"))
+                if str(binding.get("provider") or "").lower() == "gemini"
+                else material.get("content_type")
+            ),
             "filename": material.get("filename"),
             "metadata": binding.get("metadata") or {},
         }
