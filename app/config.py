@@ -1,5 +1,6 @@
 from functools import lru_cache
 import hashlib
+import os
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -60,6 +61,21 @@ class Settings(BaseSettings):
 
     worker_max_runtime_seconds: int = 2400
     worker_poll_seconds: float = 2.0
+
+    # Railway Serverless lifecycle coupling. The API sends a short private-network
+    # wake signal when it receives application traffic; the Worker keeps polling
+    # only for a short grace window, drains all claimable jobs, then becomes
+    # network-quiescent so Railway can put it to sleep. Outside Railway this
+    # behavior stays disabled unless WORKER_WAKE_URL is explicitly configured.
+    worker_follow_api: bool = True
+    worker_api_activity_grace_seconds: float = 5.0
+    worker_wake_min_interval_seconds: float = 2.0
+    worker_wake_timeout_seconds: float = 3.0
+    worker_service_name: str = "relay-worker"
+    worker_control_host: str = "0.0.0.0"
+    worker_control_port: int = 8000
+    worker_wake_url: str | None = None
+
     job_lease_seconds: int = 120
     job_heartbeat_seconds: int = 30
     job_ttl_seconds: int = 604800
@@ -177,6 +193,30 @@ class Settings(BaseSettings):
     def worker_pool_set(self) -> set[str]:
         pools = {x.strip() for x in self.worker_execution_pools.split(",") if x.strip()}
         return pools or {self.execution_pool}
+
+    @property
+    def worker_follow_api_enabled(self) -> bool:
+        if not self.worker_follow_api:
+            return False
+        # Railway injects these variables into both services. Requiring a Railway
+        # runtime marker (or an explicit URL override) preserves the old always-on
+        # local/dev Worker behavior while making Railway deployments zero-config.
+        return bool(
+            self.worker_wake_url
+            or os.getenv("RAILWAY_PROJECT_ID")
+            or os.getenv("RAILWAY_ENVIRONMENT_ID")
+        )
+
+    @property
+    def effective_worker_wake_url(self) -> str | None:
+        explicit = str(self.worker_wake_url or "").strip()
+        if explicit:
+            return explicit
+        if not self.worker_follow_api_enabled:
+            return None
+        service = str(self.worker_service_name or "relay-worker").strip() or "relay-worker"
+        port = int(self.worker_control_port)
+        return f"http://{service}.railway.internal:{port}/wake"
 
     def connection_account_scope_hash(self, connection_id: str) -> str:
         """Opaque fingerprint used to prevent provider file reuse across keys."""

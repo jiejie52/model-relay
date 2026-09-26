@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -6,6 +8,7 @@ import base64
 import hashlib
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 
 from .config import get_settings
@@ -33,8 +36,10 @@ from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
-from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, now_ms, status_failure_class
+from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
+
+API_VERSION = "1.0.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -42,6 +47,88 @@ logger = logging.getLogger("model-relay-api")
 
 backend: SupabaseBackend | None = None
 repo: RelayV2Repository | None = None
+
+
+class WorkerWakeNotifier:
+    """Best-effort API -> Worker wake signal for Railway Serverless.
+
+    The queue remains authoritative. A wake failure never changes Request/Job
+    acceptance semantics; subsequent API traffic or Railway cold-start startup
+    polling will retry naturally.
+    """
+
+    def __init__(self) -> None:
+        self.url = settings.effective_worker_wake_url
+        self.enabled = bool(settings.worker_follow_api_enabled and self.url)
+        self._last_scheduled_at = 0.0
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._client = (
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.worker_wake_timeout_seconds),
+                follow_redirects=False,
+            )
+            if self.enabled
+            else None
+        )
+
+    def notify(self, *, reason: str) -> None:
+        if not self.enabled or self._client is None or self.url is None:
+            return
+        now = time.monotonic()
+        if now - self._last_scheduled_at < settings.worker_wake_min_interval_seconds:
+            return
+        self._last_scheduled_at = now
+        task = asyncio.create_task(self._send(reason=reason))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _send(self, *, reason: str) -> None:
+        assert self._client is not None
+        assert self.url is not None
+        headers = {
+            "Authorization": f"Bearer {settings.relay_api_token.get_secret_value()}",
+            "X-Relay-Wake-Reason": reason[:120],
+        }
+        for attempt in (1, 2):
+            try:
+                response = await self._client.post(self.url, headers=headers)
+                if 200 <= response.status_code < 300:
+                    return
+                # Railway documents that the first request to a sleeping service
+                # can return 502 while still waking it. Retry once after a short
+                # delay without blocking the caller-facing API request.
+                if attempt == 1 and response.status_code in {502, 503, 504}:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_rejected",
+                    http_status=response.status_code,
+                    attempt=attempt,
+                    failure_class="dependency",
+                )
+                return
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_failed",
+                    exc_info=True,
+                    attempt=attempt,
+                    failure_class="dependency",
+                    exception_type=type(exc).__name__,
+                )
+
+    async def close(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._client is not None:
+            await self._client.aclose()
 
 
 @asynccontextmanager
@@ -114,10 +201,11 @@ async def lifespan(_: FastAPI):
     app.state.shared_runtime = runtime
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
+    app.state.worker_wake_notifier = WorkerWakeNotifier()
     log_info(
         logger,
         "api_started",
-        version="0.5.11-gemini-external-url-projection",
+        version=API_VERSION,
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         connection_policy=settings.connection_availability_mode,
@@ -129,15 +217,20 @@ async def lifespan(_: FastAPI):
         capability_revision=CAPABILITY_PROFILE_REVISION,
         dependency_http_log_level=settings.dependency_http_log_level,
         uvicorn_access_log=settings.uvicorn_access_log,
+        worker_follow_api=settings.worker_follow_api_enabled,
+        worker_wake_configured=bool(settings.effective_worker_wake_url),
     )
     try:
         yield
     finally:
         log_info(logger, "api_stopping", deployment_id=settings.deployment_id)
+        notifier = getattr(app.state, "worker_wake_notifier", None)
+        if notifier is not None:
+            await notifier.close()
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.5.11-gemini-external-url-projection", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version=API_VERSION, lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -145,6 +238,10 @@ app.include_router(relay_v2_router)
 @app.middleware("http")
 async def relay_http_logging(request: Request, call_next):
     start_ms = now_ms()
+    wake_notifier = getattr(app.state, "worker_wake_notifier", None)
+    should_wake_worker = settings.worker_follow_api_enabled
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-start")
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -172,6 +269,11 @@ async def relay_http_logging(request: Request, call_next):
             duration_ms=elapsed_ms(start_ms),
             failure_class=status_failure_class(response.status_code),
         )
+    # A long API request may outlive the Worker's short active grace window. A
+    # second debounced signal after completion closes the enqueue/wake race without
+    # adding latency to the caller-facing response path.
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-complete")
     return response
 
 
@@ -214,12 +316,13 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.5.11-gemini-external-url-projection",
+        "version": API_VERSION,
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
         "providers": getattr(app.state, "route_catalog", None).providers() if getattr(app.state, "route_catalog", None) else [],
         "capability_revision": CAPABILITY_PROFILE_REVISION,
+        "worker_follow_api": settings.worker_follow_api_enabled,
     }
 
 
