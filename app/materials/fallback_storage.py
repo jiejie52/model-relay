@@ -103,6 +103,22 @@ class FallbackObjectStorage:
             location, expires_in=ttl
         )
 
+    async def delete_object_only(self, fallback: dict[str, Any]) -> None:
+        """Delete one stored object without touching the material fallback row.
+
+        This is used when a Gemini External URL bridge object is replaced by a
+        provider-projected copy.  The material fallback row already points at the
+        replacement, so deleting the old row would remove the new mapping.
+        """
+        object_id = str(fallback["object_id"])
+        location = ObjectLocation(
+            storage_id=fallback["storage_id"],
+            bucket=fallback["bucket"],
+            key=fallback["object_key"],
+        )
+        await self.storage.get(location.storage_id).delete(location)
+        await self.repo.delete_object(object_id)
+
     async def delete(self, fallback: dict[str, Any]) -> None:
         """Delete an input-file fallback object and its metadata.
 

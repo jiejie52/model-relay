@@ -6,7 +6,7 @@ from typing import Any
 
 from ..providers.base import ProviderRequestError
 from ..observability import error as log_error, info as log_info, warning as log_warning
-from ..utils import utcnow
+from ..utils import safe_segment, utcnow
 from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
 from .gemini_transport import (
@@ -15,6 +15,7 @@ from .gemini_transport import (
     GeminiTransportDecision,
     decide_gemini_request_transport,
     external_url_binding,
+    project_gemini_external_url_filename,
     project_gemini_input_content_type,
 )
 from .provider_files.base import MaterialFile
@@ -220,7 +221,20 @@ class BindingResolver:
                     session_id=session_id,
                     decision=decision,
                 )
-            return binding
+                return binding
+
+            # 0.5.10 projected only fileData.mimeType.  Existing External URL
+            # bindings may therefore still point to a Supabase object stored as
+            # application/json/.json.  Reuse only bindings whose backing bridge
+            # object already matches the provider-facing projection.
+            existing_fallback = await self.repo.get_material_fallback(material_id)
+            if existing_fallback and await self._gemini_external_projection_matches(
+                material=material,
+                fallback=existing_fallback,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+            ):
+                return binding
 
         fallback = await self.repo.get_material_fallback(material_id)
         generation = int((binding or {}).get("generation") or material.get("binding_generation") or 0) + 1
@@ -239,6 +253,14 @@ class BindingResolver:
                     "MATERIAL_REUPLOAD_REQUIRED",
                     f"Material {material_id} must be reuploaded so Relay can create the <=99 MiB Supabase External URL binding",
                 )
+            fallback = await self._ensure_gemini_external_projection(
+                material=material,
+                fallback=fallback,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                request_id=request_id,
+                session_id=session_id,
+            )
             ttl_seconds = max(300, min(int(self.fallback.settings.supabase_signed_url_ttl), 604800))
             signed_url = await self.fallback.sign_read_url(fallback, expires_in=ttl_seconds)
             binding = external_url_binding(
@@ -256,6 +278,15 @@ class BindingResolver:
                     "authoritative_request_total_bytes": decision.total_bytes,
                     "threshold_bytes": decision.threshold_bytes,
                     "request_reconciled": True,
+                    "source_filename": material.get("filename"),
+                    "source_content_type": material.get("content_type"),
+                    "projected_filename": project_gemini_external_url_filename(
+                        material.get("filename"), material.get("content_type")
+                    ),
+                    "projected_content_type": project_gemini_input_content_type(
+                        material.get("content_type")
+                    ),
+                    "projection_revision": "gemini-external-url-projection/1",
                 },
             )
             binding.setdefault("created_at", utcnow().isoformat())
@@ -355,6 +386,99 @@ class BindingResolver:
         )
         return binding
 
+    async def _gemini_external_projection_matches(
+        self,
+        *,
+        material: dict[str, Any],
+        fallback: dict[str, Any],
+        tenant_id: str,
+        conversation_hash: str,
+    ) -> bool:
+        object_id = str(fallback.get("object_id") or "")
+        if not object_id:
+            return False
+        obj = await self.repo.get_object(
+            object_id,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+        )
+        if not obj:
+            return False
+        expected_type = project_gemini_input_content_type(material.get("content_type"))
+        expected_name = project_gemini_external_url_filename(
+            material.get("filename"), material.get("content_type")
+        )
+        current_type = str(obj.get("content_type") or "").split(";", 1)[0].strip().lower()
+        expected_type_norm = str(expected_type or "").split(";", 1)[0].strip().lower()
+        current_name = str(fallback.get("object_key") or "").rsplit("/", 1)[-1]
+        return current_type == expected_type_norm and current_name == safe_segment(expected_name)
+
+    async def _ensure_gemini_external_projection(
+        self,
+        *,
+        material: dict[str, Any],
+        fallback: dict[str, Any],
+        tenant_id: str,
+        conversation_hash: str,
+        request_id: str | None,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        if await self._gemini_external_projection_matches(
+            material=material,
+            fallback=fallback,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+        ):
+            return fallback
+
+        material_id = str(material["id"])
+        data = await self.fallback.read(fallback)
+        projected_type = project_gemini_input_content_type(material.get("content_type"))
+        projected_name = project_gemini_external_url_filename(
+            material.get("filename"), material.get("content_type")
+        )
+        previous = dict(fallback)
+        replacement = await self.fallback.store(
+            material_id=material_id,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+            filename=projected_name,
+            content_type=projected_type,
+            data=data,
+            retention_policy="gemini-external-url-bridge",
+        )
+        await self.repo.update_material(material_id, {"object_id": replacement.get("object_id")})
+        try:
+            await self.fallback.delete_object_only(previous)
+        except Exception as exc:
+            # The new bridge is already authoritative.  Failure to remove the
+            # superseded object is visible but must not invalidate the binding.
+            log_warning(
+                logger,
+                "gemini_external_url_projection_cleanup_failed",
+                request_id=request_id,
+                session_id=session_id,
+                material_id=material_id,
+                object_id=previous.get("object_id"),
+                exception_type=type(exc).__name__,
+                failure_class="dependency",
+                reason=str(exc),
+            )
+        log_info(
+            logger,
+            "gemini_external_url_projection_rebuilt",
+            request_id=request_id,
+            session_id=session_id,
+            material_id=material_id,
+            source_filename=material.get("filename"),
+            source_content_type=material.get("content_type"),
+            projected_filename=projected_name,
+            projected_content_type=projected_type,
+            previous_object_id=previous.get("object_id"),
+            object_id=replacement.get("object_id"),
+        )
+        return replacement
+
     async def _cleanup_gemini_supabase_copy(
         self,
         *,
@@ -452,6 +576,14 @@ class BindingResolver:
 
         generation = int((binding or {}).get("generation") or material.get("binding_generation") or 0) + 1
         if self._uses_gemini_external_url(material, binding, adapter):
+            fallback = await self._ensure_gemini_external_projection(
+                material=material,
+                fallback=fallback,
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                request_id=None,
+                session_id=None,
+            )
             ttl_seconds = max(300, min(int(self.fallback.settings.supabase_signed_url_ttl), 604800))
             signed_url = await self.fallback.sign_read_url(fallback, expires_in=ttl_seconds)
             binding = external_url_binding(

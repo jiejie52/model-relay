@@ -30,6 +30,29 @@ def project_gemini_input_content_type(source_content_type: str | None) -> str:
     return source
 
 
+def project_gemini_external_url_filename(
+    source_filename: str | None,
+    source_content_type: str | None,
+) -> str:
+    """Project only the provider-facing External URL object filename.
+
+    Canonical Relay material metadata is not changed.  When Gemini's input MIME
+    projection changes a JSON artifact from ``application/json`` to
+    ``text/plain``, the Supabase bridge object must expose a matching text-file
+    name as well.  Other material types keep their original filename.
+    """
+    filename = str(source_filename or "material").strip() or "material"
+    source = str(source_content_type or "").split(";", 1)[0].strip().lower()
+    projected = project_gemini_input_content_type(source_content_type).split(";", 1)[0].strip().lower()
+    if source == projected:
+        return filename
+    if source == "application/json" and projected == "text/plain":
+        if filename.lower().endswith(".json"):
+            return filename[:-5] + ".txt"
+        return filename + ".txt"
+    return filename
+
+
 @dataclass(frozen=True)
 class GeminiTransportDecision:
     mode: str  # supabase_external_url | gemini_files

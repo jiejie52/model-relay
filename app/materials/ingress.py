@@ -29,6 +29,7 @@ from .gemini_transport import (
     GeminiTransportPolicyError,
     decide_gemini_transport,
     external_url_binding,
+    project_gemini_external_url_filename,
     project_gemini_input_content_type,
 )
 from .safe_fetch import MaterialFetchError, fetch_bytes
@@ -497,6 +498,10 @@ class MaterialIngress:
                     material_id=material_id,
                 )
             try:
+                projected_content_type = project_gemini_input_content_type(row.get("content_type"))
+                projected_filename = project_gemini_external_url_filename(
+                    row.get("filename"), row.get("content_type")
+                )
                 fallback_row = await self._store_fallback_logged(
                     ingress_id=ingress_id,
                     row=row,
@@ -504,6 +509,8 @@ class MaterialIngress:
                     retention_policy="gemini-external-url-bridge",
                     provider=provider,
                     connection_id=resolved_connection_id,
+                    filename_override=projected_filename,
+                    content_type_override=projected_content_type,
                 )
                 sign_started_ms = now_ms()
                 ttl_seconds = max(300, min(
@@ -538,6 +545,11 @@ class MaterialIngress:
                         "relay_actual_bytes": gemini_transport.total_bytes,
                         "threshold_bytes": gemini_transport.threshold_bytes,
                         "material_batch_id": material_batch_id,
+                        "source_filename": row.get("filename"),
+                        "source_content_type": row.get("content_type"),
+                        "projected_filename": projected_filename,
+                        "projected_content_type": projected_content_type,
+                        "projection_revision": "gemini-external-url-projection/1",
                     },
                 )
                 binding.setdefault("created_at", utcnow().isoformat())
@@ -868,6 +880,8 @@ class MaterialIngress:
         retention_policy: str,
         provider: str | None,
         connection_id: str | None,
+        filename_override: str | None = None,
+        content_type_override: str | None = None,
     ) -> dict[str, Any]:
         started_ms = now_ms()
         log_info(
@@ -885,8 +899,8 @@ class MaterialIngress:
                 material_id=row["id"],
                 tenant_id=row["tenant_id"],
                 conversation_hash=row["conversation_hash"],
-                filename=row["filename"],
-                content_type=row["content_type"],
+                filename=str(filename_override or row["filename"]),
+                content_type=str(content_type_override or row["content_type"]),
                 data=data,
                 retention_policy=retention_policy,
             )

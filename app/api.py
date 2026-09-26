@@ -117,7 +117,7 @@ async def lifespan(_: FastAPI):
     log_info(
         logger,
         "api_started",
-        version="0.5.10-gemini-input-mime-projection",
+        version="0.5.11-gemini-external-url-projection",
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         connection_policy=settings.connection_availability_mode,
@@ -137,7 +137,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.5.10-gemini-input-mime-projection", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version="0.5.11-gemini-external-url-projection", lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -214,7 +214,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.5.10-gemini-input-mime-projection",
+        "version": "0.5.11-gemini-external-url-projection",
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
