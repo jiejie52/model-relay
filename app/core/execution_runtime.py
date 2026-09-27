@@ -230,6 +230,15 @@ class SharedExecutionRuntime:
             },
         )
 
+        self._check_observed_contract(
+            snapshot,
+            result.observed or {},
+            request_id=request_id,
+            session_id=session_id,
+            raw_object_id=raw_object_id,
+            output_object_id=output_object_id,
+        )
+
         spec = resolve_structured_output(snapshot, fallback_name="structured_output")
         if spec is not None and spec.mode == "json_schema":
             try:
@@ -272,6 +281,7 @@ class SharedExecutionRuntime:
             "full_text_object_id": full_text_object_id,
             "raw_response_object_id": raw_object_id,
             "response_output_object_id": output_object_id,
+            "observed": result.observed or {},
         }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
@@ -343,6 +353,67 @@ class SharedExecutionRuntime:
         route = metadata.get("_relay_route") if isinstance(metadata.get("_relay_route"), dict) else {}
         return str(route.get("route_revision")) if route.get("route_revision") else None
 
+    @staticmethod
+    def _check_observed_contract(
+        snapshot: dict[str, Any],
+        observed: dict[str, Any],
+        *,
+        request_id: str,
+        session_id: str,
+        raw_object_id: str,
+        output_object_id: str,
+    ) -> None:
+        """Validate facts observed after a successful upstream response.
+
+        The check intentionally runs only after the raw success entity has been
+        archived. A strict mismatch therefore becomes a Relay contract failure
+        without discarding the upstream evidence, and it never triggers a second
+        provider dispatch.
+        """
+
+        policy = str(snapshot.get("observed_model_policy") or "audit").strip().lower()
+        if policy == "ignore":
+            return
+
+        expected_model = str(snapshot.get("model") or "").strip()
+        actual_model = str(observed.get("actual_model") or "").strip()
+        mismatch = bool(expected_model and actual_model and expected_model.lower() != actual_model.lower())
+        missing = bool(expected_model and not actual_model)
+
+        fields = {
+            "request_id": request_id,
+            "session_id": session_id,
+            "provider": snapshot.get("provider"),
+            "expected_model": expected_model or None,
+            "actual_model": actual_model or None,
+            "offering_id": snapshot.get("offering_id"),
+            "channel_id": snapshot.get("channel_id"),
+            "protocol": snapshot.get("protocol"),
+            "aihubmix_fallback": observed.get("aihubmix_fallback"),
+            "aihubmix_router_resolved_model": observed.get("aihubmix_router_resolved_model"),
+            "json_repaired": observed.get("json_repaired"),
+            "observed_model_policy": policy,
+        }
+
+        if mismatch or missing:
+            event = "upstream_model_contract_mismatch" if mismatch else "upstream_model_unobserved"
+            if policy == "strict":
+                log_error(logger, event, failure_class="provider_contract", **fields)
+                code = "UPSTREAM_MODEL_CONTRACT_MISMATCH" if mismatch else "UPSTREAM_MODEL_UNOBSERVED"
+                message = (
+                    f"Upstream executed model {actual_model!r}, but the frozen Request requires {expected_model!r}"
+                    if mismatch
+                    else f"Upstream response did not expose an observable model identity for frozen model {expected_model!r}"
+                )
+                exc = ProviderRequestError(code, message)
+                setattr(exc, "provider_success_object_id", raw_object_id)
+                setattr(exc, "provider_output_object_id", output_object_id)
+                raise exc
+            log_info(logger, event, failure_class="provider_contract_audit", **fields)
+            return
+
+        log_info(logger, "upstream_model_contract_observed", **fields)
+
     def _assert_frozen_route(
         self,
         session: dict[str, Any],
@@ -407,6 +478,20 @@ class SharedExecutionRuntime:
                     "CAPABILITY_BINDING_MISMATCH",
                     "Request model-option capability revision does not match the frozen Session capability revision",
                 )
+            frozen_contract_hash = str(route.get("capability_contract_hash") or "")
+            request_contract_hash = str(snapshot.get("capability_contract_hash") or "")
+            if frozen_contract_hash and request_contract_hash != frozen_contract_hash:
+                raise ProviderRequestError(
+                    "CAPABILITY_BINDING_MISMATCH",
+                    "Request capability-contract snapshot does not match the frozen Session contract",
+                )
+            frozen_route_hash = str(route.get("route_binding_hash") or "")
+            request_route_hash = str(snapshot.get("route_binding_hash") or "")
+            if frozen_route_hash and request_route_hash != frozen_route_hash:
+                raise ProviderRequestError(
+                    "ROUTE_BINDING_MISMATCH",
+                    "Request route binding hash does not match the frozen Session route",
+                )
 
         adapter_meta = self.providers.describe(expected["connection_id"])
         if adapter_meta is None:
@@ -417,11 +502,19 @@ class SharedExecutionRuntime:
         registered_provider = str(adapter_meta.get("provider") or "")
         # Old pre-route sessions do not carry _relay_route and may have legacy
         # provider labels. New route-frozen Sessions are strict.
-        if route is not None and registered_provider and registered_provider != expected["provider"].lower():
+        if route is not None and registered_provider and registered_provider not in {"*", expected["provider"].lower()}:
             raise ProviderRequestError(
                 "ROUTE_BINDING_MISMATCH",
                 "The frozen Session provider does not match the registered Adapter",
             )
+        if route is not None:
+            frozen_protocol = str(route.get("protocol") or "").lower()
+            adapter_protocol = str(adapter_meta.get("protocol") or "").lower()
+            if frozen_protocol and adapter_protocol and frozen_protocol != adapter_protocol:
+                raise ProviderRequestError(
+                    "ROUTE_BINDING_MISMATCH",
+                    "The frozen Session protocol does not match the registered Adapter",
+                )
 
     async def _load_json_object(
         self, object_id: str, *, tenant_id: str, conversation_hash: str

@@ -1,3 +1,22 @@
+# Model Relay 2.0.0 快速部署补充
+
+> 2.0.0 保留原有 Session/Request/Job 恢复语义，新增模型供应控制面。完整说明见 `DEPLOYMENT_2.0.0.md`；下方旧版本操作记录继续保留用于迁移追溯。
+
+最小新增环境变量：
+
+```text
+MODEL_CONTROL_PLANE_REVISION=relay-model-control-plane/2026-09-27.1
+AIHUBMIX_CHAT_CONNECTION_ID=aihubmix_chat_completions
+AIHUBMIX_CLAUDE_CONNECTION_ID=aihubmix_claude_messages
+AIHUBMIX_CLAUDE_BASE_URL=https://aihubmix.com
+```
+
+不设置 `MODEL_CONTROL_PLANE_JSON` 时使用内置 published snapshot。设置自定义快照时必须显式包含 `"status":"published"`；凭据通过 `credential_env` 引用，不写入 JSON。部署后同时检查 API 与 Worker `/health` 的 `control_plane_revision`、`control_plane_hash`、`control_plane_status` 和 `route_catalog_hash`。
+
+本版本无新增 SQL migration。已有 Session 不因发布新优先级自动换渠道；需要采用新合同/新供应关系时创建新 Session。
+
+---
+
 # Model Relay 0.5.9 部署与迁移关键操作
 
 > 当前增量：`kimi-k2.7-code*` 无论调用方选择何种 `think_level`，Relay 都统一映射为 Thinking ON，并由 Moonshot Adapter 发送 `thinking.type=enabled`。本增量无 SQL migration；部署后需新建 Kimi Session。

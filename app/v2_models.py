@@ -12,6 +12,21 @@ ExecutionMode = Literal["sync", "async"]
 MaterialPurpose = Literal["inference_input", "archive"]
 
 
+class SessionCapabilityRequirements(BaseModel):
+    """Capabilities the caller expects this sticky Session route to support.
+
+    These are routing constraints, not provider-native parameters. Request-level
+    options still pass through the frozen capability contract and fail closed if
+    a later Request asks for semantics outside the Session contract.
+    """
+
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
+    structured_output: Literal["none", "post_validate", "native"] = "none"
+    think_levels: list[str] = Field(default_factory=list)
+    required_features: list[str] = Field(default_factory=list)
+    channel_allowlist: list[str] = Field(default_factory=list)
+
+
 class SessionCreateRequest(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=200)
     conversation_hash: str = Field(min_length=1, max_length=256)
@@ -23,6 +38,7 @@ class SessionCreateRequest(BaseModel):
     context_policy: ContextPolicy = "conversation"
     material_ids: list[str] = Field(default_factory=list)
     execution_pool: str | None = Field(default=None, max_length=120)
+    capability_requirements: SessionCapabilityRequirements = Field(default_factory=SessionCapabilityRequirements)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -40,6 +56,11 @@ class SessionResponse(BaseModel):
     execution_pool: str
     route_revision: str | None = None
     capability_revision: str | None = None
+    offering_id: str | None = None
+    channel_id: str | None = None
+    protocol: str | None = None
+    capability_contract_id: str | None = None
+    control_plane_hash: str | None = None
     created_at: datetime | None = None
     expires_at: datetime | None = None
 

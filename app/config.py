@@ -1,5 +1,6 @@
 from functools import lru_cache
 import hashlib
+import os
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,6 +26,9 @@ class Settings(BaseSettings):
     # allowlist and is ignored unless CONNECTION_AVAILABILITY_MODE=allowlist.
     aihubmix_api_key: SecretStr | None = None
     aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
+    aihubmix_claude_base_url: str = "https://aihubmix.com"
+    aihubmix_chat_connection_id: str = "aihubmix_chat_completions"
+    aihubmix_claude_connection_id: str = "aihubmix_claude_messages"
     aihubmix_gemini_base_url: str | None = None
     aihubmix_gemini_connection_id: str = "aihubmix_gemini_native"
 
@@ -38,8 +42,13 @@ class Settings(BaseSettings):
 
     # Public routing contract 2.1: callers provide provider/model only. The
     # deployment-local catalog resolves and freezes the private connection_id.
-    route_revision: str = "relay-route-catalog/2026-09-21.2"
+    route_revision: str = "relay-route-catalog/2026-09-27.1"
     route_catalog_json: str | None = None
+    # 2.0 control-plane snapshot. This governs model offerings, protocol reuse,
+    # capability contracts and per-model channel priority. Configuration may
+    # reference credential *environment variable names* but never secret values.
+    model_control_plane_revision: str = "relay-model-control-plane/2026-09-27.1"
+    model_control_plane_json: str | None = None
     route_legacy_hint_mode: str = "warn"  # warn | strict
     route_gemini_model_pattern: str = "gemini-*"
     route_grok_model_pattern: str = "grok-*"
@@ -60,6 +69,21 @@ class Settings(BaseSettings):
 
     worker_max_runtime_seconds: int = 2400
     worker_poll_seconds: float = 2.0
+
+    # Railway Serverless lifecycle coupling. The API sends a short private-network
+    # wake signal when it receives application traffic; the Worker keeps polling
+    # only for a short grace window, drains all claimable jobs, then becomes
+    # network-quiescent so Railway can put it to sleep. Outside Railway this
+    # behavior stays disabled unless WORKER_WAKE_URL is explicitly configured.
+    worker_follow_api: bool = True
+    worker_api_activity_grace_seconds: float = 5.0
+    worker_wake_min_interval_seconds: float = 2.0
+    worker_wake_timeout_seconds: float = 3.0
+    worker_service_name: str = "relay-worker"
+    worker_control_host: str = "0.0.0.0"
+    worker_control_port: int = 8000
+    worker_wake_url: str | None = None
+
     job_lease_seconds: int = 120
     job_heartbeat_seconds: int = 30
     job_ttl_seconds: int = 604800
@@ -127,6 +151,8 @@ class Settings(BaseSettings):
     def known_connection_ids(self) -> set[str]:
         return {
             "aihubmix_default",
+            self.aihubmix_chat_connection_id,
+            self.aihubmix_claude_connection_id,
             self.aihubmix_gemini_connection_id,
             self.moonshot_connection_id,
         }
@@ -148,6 +174,10 @@ class Settings(BaseSettings):
         registration instead.
         """
         if connection_id == "aihubmix_default":
+            if self.aihubmix_api_key is None:
+                return False, "AIHUBMIX_API_KEY is not configured"
+            return True, None
+        if connection_id in {self.aihubmix_chat_connection_id, self.aihubmix_claude_connection_id}:
             if self.aihubmix_api_key is None:
                 return False, "AIHUBMIX_API_KEY is not configured"
             return True, None
@@ -177,6 +207,30 @@ class Settings(BaseSettings):
     def worker_pool_set(self) -> set[str]:
         pools = {x.strip() for x in self.worker_execution_pools.split(",") if x.strip()}
         return pools or {self.execution_pool}
+
+    @property
+    def worker_follow_api_enabled(self) -> bool:
+        if not self.worker_follow_api:
+            return False
+        # Railway injects these variables into both services. Requiring a Railway
+        # runtime marker (or an explicit URL override) preserves the old always-on
+        # local/dev Worker behavior while making Railway deployments zero-config.
+        return bool(
+            self.worker_wake_url
+            or os.getenv("RAILWAY_PROJECT_ID")
+            or os.getenv("RAILWAY_ENVIRONMENT_ID")
+        )
+
+    @property
+    def effective_worker_wake_url(self) -> str | None:
+        explicit = str(self.worker_wake_url or "").strip()
+        if explicit:
+            return explicit
+        if not self.worker_follow_api_enabled:
+            return None
+        service = str(self.worker_service_name or "relay-worker").strip() or "relay-worker"
+        port = int(self.worker_control_port)
+        return f"http://{service}.railway.internal:{port}/wake"
 
     def connection_account_scope_hash(self, connection_id: str) -> str:
         """Opaque fingerprint used to prevent provider file reuse across keys."""

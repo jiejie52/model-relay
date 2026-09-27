@@ -5,6 +5,7 @@ from typing import Any
 
 from .openai_compatible import OpenAICompatibleResponsesProvider
 from .v2_base import V2ExecutionContext, V2ProviderResult
+from .http_wire import observed_response_facts
 from ..materials.resolver import MaterialResolver
 
 
@@ -74,6 +75,12 @@ class ResponsesV2Adapter:
             },
             http_status=result.http_status,
             provider_request_id=result.provider_request_id,
+            observed=observed_response_facts(
+                result.response_headers,
+                body_model=(str(result.raw_json.get("model")) if result.raw_json.get("model") else None),
+                protocol="responses",
+                channel_id=(str(snapshot.get("channel_id")) if snapshot.get("channel_id") else None),
+            ),
         )
 
     async def _material_prefix(self, context: V2ExecutionContext) -> list[Any]:

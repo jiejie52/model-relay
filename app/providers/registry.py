@@ -47,10 +47,23 @@ class ProviderRegistry:
                     f"Connection {connection_id!r} is explicitly allowlisted but not configured: {reason}"
                 )
 
-    def register_v2(self, connection_id: str, adapter: object, *, provider: str | None = None) -> None:
+    def register_v2(
+        self,
+        connection_id: str,
+        adapter: object,
+        *,
+        provider: str | None = None,
+        protocol: str | None = None,
+        channel_id: str | None = None,
+    ) -> None:
         self._v2[connection_id] = adapter
         self._v2_meta[connection_id] = {
+            # Empty provider means this connection-scoped protocol adapter may
+            # serve multiple model vendors; RouteResolver still freezes the
+            # caller-visible provider in the selected ModelOffering.
             "provider": str(provider or "").lower(),
+            "protocol": str(protocol or "").lower(),
+            "channel_id": str(channel_id or ""),
             "adapter_version": str(getattr(adapter, "adapter_version", "unknown")),
         }
 

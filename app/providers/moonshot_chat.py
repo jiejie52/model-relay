@@ -163,6 +163,11 @@ class MoonshotChatAdapter:
             },
             http_status=response_status,
             provider_request_id=self._request_id(response_headers),
+            observed={
+                "actual_model": (str(data.get("model")) if data.get("model") else None),
+                "protocol": "moonshot_chat",
+                "channel_id": context.snapshot.get("channel_id") or "moonshot_official",
+            },
         )
 
     async def _material_parts(

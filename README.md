@@ -1,3 +1,20 @@
+# Model Relay 2.0.0 - Governed Multi-Model Channels
+
+## 2.0.0 关键变化
+
+- 在既有 Session / Request / Material / RouteBinding 之上新增不可变 `ModelControlPlane` 运行时快照：模型、渠道/账号、协议、CapabilityContract、ModelOffering、按模型优先级分离治理。
+- 首批内置接入 9 个 AIHubMix 目标模型；同协议模型复用 Responses / Chat Completions / Claude Messages / Gemini Native Adapter，不增加业务 Workflow 的模型分支。
+- Session 可声明 `capability_requirements`；RouteResolver 先做能力/渠道/配置/Adapter 资格过滤，再按 Offering priority 选择，并冻结完整执行合同。
+- 请求参数继续采用 requested -> effective 语义；未知参数、冲突能力、未验证思考控制 Fail-Closed。MiMo V2.6 Pro Free 当前仅开放 `think_level=auto`，不伪造未验证的上游 effort/toggle。
+- AIHubMix 成功响应记录实际模型、router/fallback/JSON-repair 等可观测事实。精确 Offering 默认 strict：实际模型与冻结模型不一致时，保留原始 2xx 归档并返回合同失败，不自动换渠道重发。
+- 自定义 `MODEL_CONTROL_PLANE_JSON` 只接受 `status=published`；API/Worker 暴露相同 revision/hash/status 供部署一致性检查。
+- 既有 Request/Job、Lease/Fencing、`dispatch_started -> indeterminate`、Material/Binding 与 Structured Output canonical post-validation 不变；无 SQL migration。
+- 免费模型 quota 当前仅为治理 metadata；分布式共享额度与 delayed queue 不在 2.0.0 内。
+
+部署与自定义多渠道配置见 `DEPLOYMENT_2.0.0.md`。
+
+---
+
 # Model Relay 0.5.9 - Kimi K2.7 Forced Thinking ON
 
 ## 0.5.9 关键变化

@@ -29,8 +29,20 @@ class OpenAICompatibleResponsesProvider:
         "prompt_cache_key",
     }
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        connection_id: str = "aihubmix_default",
+        channel_id: str = "aihubmix",
+    ) -> None:
         self.settings = settings
+        self.base_url = (base_url or settings.aihubmix_root).rstrip("/")
+        self.api_key = api_key
+        self.connection_id = connection_id
+        self.channel_id = channel_id
 
     async def execute(
         self,
@@ -71,12 +83,14 @@ class OpenAICompatibleResponsesProvider:
         if instructions:
             payload["instructions"] = instructions
 
-        if self._is_grok(provider, model):
-            payload["include"] = ["reasoning.encrypted_content"]
-            if session and session.get("prompt_cache_key"):
-                payload["prompt_cache_key"] = session["prompt_cache_key"]
-            if think_level in {"low", "medium", "high", "xhigh"}:
-                payload["reasoning"] = {"effort": think_level}
+        self._apply_reasoning(
+            payload,
+            request_snapshot,
+            provider=provider,
+            model=model,
+            think_level=think_level,
+            session=session,
+        )
 
         self._apply_model_options(payload, request_snapshot)
 
@@ -96,7 +110,7 @@ class OpenAICompatibleResponsesProvider:
 
         base_url = (
             ((request_snapshot.get("upstream") or {}).get("base_url"))
-            or self.settings.aihubmix_root
+            or self.base_url
         ).rstrip("/")
         url = f"{base_url}/responses"
 
@@ -106,13 +120,18 @@ class OpenAICompatibleResponsesProvider:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        if self.settings.aihubmix_api_key is None:
+        api_key = self.api_key or (
+            self.settings.aihubmix_api_key.get_secret_value()
+            if self.settings.aihubmix_api_key is not None
+            else None
+        )
+        if not api_key:
             raise ProviderRequestError(
                 "CONNECTION_NOT_CONFIGURED",
-                "AIHUBMIX_API_KEY is not configured for this connection",
+                f"Credential is not configured for connection {self.connection_id}",
             )
         headers = {
-            "Authorization": f"Bearer {self.settings.aihubmix_api_key.get_secret_value()}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Accept-Encoding": "identity",
@@ -167,7 +186,42 @@ class OpenAICompatibleResponsesProvider:
             response_output=output,
             http_status=response_status,
             provider_request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
+            response_headers=response_headers,
         )
+
+
+    @classmethod
+    def _apply_reasoning(
+        cls,
+        payload: dict[str, Any],
+        snapshot: dict[str, Any],
+        *,
+        provider: str,
+        model: str,
+        think_level: str,
+        session: dict[str, Any] | None,
+    ) -> None:
+        contract = snapshot.get("capability_contract")
+        thinking = contract.get("thinking") if isinstance(contract, dict) and isinstance(contract.get("thinking"), dict) else {}
+        strategy = str(thinking.get("wire_strategy") or "").lower()
+        if strategy == "responses_reasoning_effort":
+            if bool(thinking.get("include_encrypted_reasoning")):
+                payload["include"] = ["reasoning.encrypted_content"]
+                if session and session.get("prompt_cache_key"):
+                    payload["prompt_cache_key"] = session["prompt_cache_key"]
+            if think_level not in {"", "auto", "on", "off"}:
+                payload["reasoning"] = {"effort": think_level}
+            elif think_level == "none":
+                payload["reasoning"] = {"effort": "none"}
+            return
+
+        # Compatibility for persisted pre-2.0 Grok Requests.
+        if cls._is_grok(provider, model):
+            payload["include"] = ["reasoning.encrypted_content"]
+            if session and session.get("prompt_cache_key"):
+                payload["prompt_cache_key"] = session["prompt_cache_key"]
+            if think_level in {"low", "medium", "high", "xhigh"}:
+                payload["reasoning"] = {"effort": think_level}
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:

@@ -14,7 +14,12 @@ from pydantic import ValidationError
 from ..core.idempotency import request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
 from ..materials.ingress import MaterialIngressError
-from ..model_options import CAPABILITY_PROFILE_REVISION, ModelOptionError, resolve_model_options
+from ..model_options import (
+    CAPABILITY_PROFILE_REVISION,
+    ModelOptionError,
+    resolve_model_options,
+    validate_structured_output_capability,
+)
 from ..observability import error as log_error, info as log_info, warning as log_warning, elapsed_ms, now_ms
 from ..persistence.object_storage import ObjectLocation
 from ..routing import RouteBinding, RouteResolutionError
@@ -110,6 +115,11 @@ def _session_response(row: dict[str, Any]) -> SessionResponse:
         execution_pool=row.get("execution_pool") or "railway-default",
         route_revision=str(route.get("route_revision")) if route.get("route_revision") else None,
         capability_revision=(str(route.get("capability_revision")) if route.get("capability_revision") else None),
+        offering_id=(str(route.get("offering_id")) if route.get("offering_id") else None),
+        channel_id=(str(route.get("channel_id")) if route.get("channel_id") else None),
+        protocol=(str(route.get("protocol")) if route.get("protocol") else None),
+        capability_contract_id=(str(route.get("capability_contract_id")) if route.get("capability_contract_id") else None),
+        control_plane_hash=(str(route.get("control_plane_hash")) if route.get("control_plane_hash") else None),
         created_at=_dt(row.get("created_at")),
         expires_at=_dt(row.get("expires_at")),
     )
@@ -232,6 +242,21 @@ async def _material_response(request: Request, row: dict[str, Any]) -> MaterialR
     )
 
 
+def _material_modality(content_type: Any) -> str:
+    mime = str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    if mime.startswith("text/") or mime in {"application/json", "application/xml", "application/yaml", "application/x-yaml"}:
+        return "text"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime == "application/pdf" or mime.startswith("application/"):
+        return "document"
+    return "binary"
+
+
 async def _validate_materials_for_route(
     request: Request,
     *,
@@ -264,6 +289,36 @@ async def _validate_materials_for_route(
                 "code": "MATERIAL_NOT_USABLE",
                 "material_id": material_id,
             })
+
+        contract = route.capability_contract if isinstance(route.capability_contract, dict) else {}
+        allowed_modalities = {
+            str(x).strip().lower()
+            for x in (contract.get("input_modalities") or [])
+            if str(x).strip()
+        }
+        modality = _material_modality(material.get("content_type"))
+        if allowed_modalities and modality not in allowed_modalities:
+            log_warning(
+                logger,
+                "material_capability_validation_failed",
+                material_id=material_id,
+                provider=route.provider,
+                model=route.model,
+                offering_id=route.offering_id,
+                channel_id=route.channel_id,
+                content_type=material.get("content_type"),
+                modality=modality,
+                allowed_modalities=sorted(allowed_modalities),
+                failure_class="client",
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "MATERIAL_MODALITY_UNSUPPORTED",
+                    "material_id": material_id,
+                    "modality": modality,
+                },
+            )
 
         desired_binding = None
         if file_adapter is not None:
@@ -740,6 +795,7 @@ async def create_session(
         "context_policy": body.context_policy,
         "material_ids": body.material_ids,
         "execution_pool": body.execution_pool or settings.execution_pool,
+        "capability_requirements": body.capability_requirements.model_dump(mode="json"),
         "metadata": body.metadata,
     }
     session_hash = stable_hash(session_intent)
@@ -761,7 +817,10 @@ async def create_session(
 
     try:
         route = _route_resolver(request).resolve(
-            provider=body.provider, model=body.model, purpose="session"
+            provider=body.provider,
+            model=body.model,
+            purpose="session",
+            requirements=body.capability_requirements.model_dump(mode="json"),
         )
         _route_resolver(request).handle_legacy_hint(
             client_hint=body.connection_id,
@@ -842,6 +901,11 @@ async def create_session(
         adapter_version=route.inference_adapter_version,
         file_adapter_version=route.file_adapter_version,
         capability_revision=route.capability_revision,
+        offering_id=route.offering_id,
+        channel_id=route.channel_id,
+        protocol=route.protocol,
+        capability_contract_id=route.capability_contract_id,
+        control_plane_hash=route.control_plane_hash,
         execution_pool=route.execution_pool,
     )
     log_info(
@@ -952,6 +1016,16 @@ async def create_request(
             execution_pool=str(session.get("execution_pool") or settings.execution_pool),
             purpose="request",
             capability_revision=str(frozen_route.get("capability_revision") or CAPABILITY_PROFILE_REVISION),
+            offering_id=(str(frozen_route.get("offering_id")) if frozen_route.get("offering_id") else None),
+            channel_id=(str(frozen_route.get("channel_id")) if frozen_route.get("channel_id") else None),
+            protocol=(str(frozen_route.get("protocol")) if frozen_route.get("protocol") else None),
+            capability_contract_id=(str(frozen_route.get("capability_contract_id")) if frozen_route.get("capability_contract_id") else None),
+            capability_contract_hash=(str(frozen_route.get("capability_contract_hash")) if frozen_route.get("capability_contract_hash") else None),
+            capability_contract=(dict(frozen_route.get("capability_contract")) if isinstance(frozen_route.get("capability_contract"), dict) else None),
+            control_plane_hash=(str(frozen_route.get("control_plane_hash")) if frozen_route.get("control_plane_hash") else None),
+            capability_requirements=(dict(frozen_route.get("capability_requirements")) if isinstance(frozen_route.get("capability_requirements"), dict) else {}),
+            observed_model_policy=str(frozen_route.get("observed_model_policy") or "audit"),
+            quota=(dict(frozen_route.get("quota")) if isinstance(frozen_route.get("quota"), dict) else {}),
         )
         await _validate_materials_for_route(
             request,
@@ -1002,6 +1076,21 @@ async def create_request(
             options=body.options,
             provider_payload=body.provider_payload,
             think_level=body.think_level,
+            capability_contract=(
+                dict(frozen_route.get("capability_contract"))
+                if isinstance(frozen_route.get("capability_contract"), dict)
+                else None
+            ),
+        )
+        structured_output_guarantee = validate_structured_output_capability(
+            provider=provider,
+            model=model,
+            structured_output=body.structured_output,
+            capability_contract=(
+                dict(frozen_route.get("capability_contract"))
+                if isinstance(frozen_route.get("capability_contract"), dict)
+                else None
+            ),
         )
     except ModelOptionError as exc:
         log_warning(
@@ -1018,7 +1107,12 @@ async def create_request(
         raise HTTPException(status_code=422, detail=exc.public_detail()) from exc
 
     frozen_capability_revision = str(frozen_route.get("capability_revision") or "")
-    if frozen_capability_revision and frozen_capability_revision != resolved_options.capability_revision:
+    frozen_contract = frozen_route.get("capability_contract")
+    if (
+        not isinstance(frozen_contract, dict)
+        and frozen_capability_revision
+        and frozen_capability_revision != resolved_options.capability_revision
+    ):
         raise HTTPException(
             status_code=409,
             detail={
@@ -1053,13 +1147,22 @@ async def create_request(
         "provider": provider,
         "connection_id": connection_id,
         "model": model,
+        "offering_id": frozen_route.get("offering_id") if frozen_route else None,
+        "channel_id": frozen_route.get("channel_id") if frozen_route else None,
+        "protocol": frozen_route.get("protocol") if frozen_route else None,
+        "control_plane_hash": frozen_route.get("control_plane_hash") if frozen_route else None,
         "route_revision": frozen_route.get("route_revision") if frozen_route else None,
         "route_binding_hash": frozen_route.get("route_binding_hash") if frozen_route else None,
         "capability_revision": resolved_options.capability_revision,
+        "capability_contract_id": frozen_route.get("capability_contract_id") if frozen_route else None,
+        "capability_contract_hash": frozen_route.get("capability_contract_hash") if frozen_route else None,
+        "capability_contract": (dict(frozen_route.get("capability_contract")) if isinstance(frozen_route.get("capability_contract"), dict) else None),
+        "observed_model_policy": str(frozen_route.get("observed_model_policy") or "audit") if frozen_route else "audit",
         "requested_think_level": resolved_options.requested_think_level,
         "think_level": resolved_options.effective_think_level,
         "execution": body.execution.model_dump(mode="json"),
         "structured_output": body.structured_output,
+        "structured_output_guarantee": structured_output_guarantee,
         "options": resolved_options.requested_options,
         "effective_options": resolved_options.effective_options,
         # Retained only for audit/migration diagnostics. v2.2 Adapters never

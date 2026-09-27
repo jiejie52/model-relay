@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -6,9 +8,11 @@ import base64
 import hashlib
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 
 from .config import get_settings
+from .control_plane import ModelControlPlane
 from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
 from .v2_repository import RelayV2Repository
 from .security import require_owner_headers, require_relay_auth
@@ -26,15 +30,17 @@ from .materials.binding_resolver import BindingResolver
 from .materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
 from .materials.resolver import MaterialResolver
 from .providers.registry import ProviderRegistry
-from .providers.responses_v2 import ResponsesV2Adapter
+from .providers.factory import register_protocol_adapters
 from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
 from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
-from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, now_ms, status_failure_class
+from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
+
+API_VERSION = "2.0.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -42,6 +48,88 @@ logger = logging.getLogger("model-relay-api")
 
 backend: SupabaseBackend | None = None
 repo: RelayV2Repository | None = None
+
+
+class WorkerWakeNotifier:
+    """Best-effort API -> Worker wake signal for Railway Serverless.
+
+    The queue remains authoritative. A wake failure never changes Request/Job
+    acceptance semantics; subsequent API traffic or Railway cold-start startup
+    polling will retry naturally.
+    """
+
+    def __init__(self) -> None:
+        self.url = settings.effective_worker_wake_url
+        self.enabled = bool(settings.worker_follow_api_enabled and self.url)
+        self._last_scheduled_at = 0.0
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._client = (
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.worker_wake_timeout_seconds),
+                follow_redirects=False,
+            )
+            if self.enabled
+            else None
+        )
+
+    def notify(self, *, reason: str) -> None:
+        if not self.enabled or self._client is None or self.url is None:
+            return
+        now = time.monotonic()
+        if now - self._last_scheduled_at < settings.worker_wake_min_interval_seconds:
+            return
+        self._last_scheduled_at = now
+        task = asyncio.create_task(self._send(reason=reason))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _send(self, *, reason: str) -> None:
+        assert self._client is not None
+        assert self.url is not None
+        headers = {
+            "Authorization": f"Bearer {settings.relay_api_token.get_secret_value()}",
+            "X-Relay-Wake-Reason": reason[:120],
+        }
+        for attempt in (1, 2):
+            try:
+                response = await self._client.post(self.url, headers=headers)
+                if 200 <= response.status_code < 300:
+                    return
+                # Railway documents that the first request to a sleeping service
+                # can return 502 while still waking it. Retry once after a short
+                # delay without blocking the caller-facing API request.
+                if attempt == 1 and response.status_code in {502, 503, 504}:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_rejected",
+                    http_status=response.status_code,
+                    attempt=attempt,
+                    failure_class="dependency",
+                )
+                return
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_failed",
+                    exc_info=True,
+                    attempt=attempt,
+                    failure_class="dependency",
+                    exception_type=type(exc).__name__,
+                )
+
+    async def close(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._client is not None:
+            await self._client.aclose()
 
 
 @asynccontextmanager
@@ -66,32 +154,39 @@ async def lifespan(_: FastAPI):
         )
     material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
     binding_resolver = BindingResolver(repo, fallback_storage, file_adapters)
+    control_plane = ModelControlPlane.from_settings(settings)
     providers = ProviderRegistry(settings)
     providers.validate_enabled_connections()
-    if settings.connection_is_active("aihubmix_default"):
-        providers.register_v2(
-            "aihubmix_default",
-            ResponsesV2Adapter(providers.openai_compatible, material_resolver),
-            provider="grok",
-        )
+    register_protocol_adapters(
+        settings=settings,
+        control_plane=control_plane,
+        providers=providers,
+        materials=material_resolver,
+        repo=repo,
+    )
     if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
         providers.register_v2(
             settings.aihubmix_gemini_connection_id,
             GeminiNativeAdapter(settings),
             provider="gemini",
+            protocol="gemini_native",
+            channel_id="aihubmix",
         )
     if settings.connection_is_active(settings.moonshot_connection_id):
         providers.register_v2(
             settings.moonshot_connection_id,
             MoonshotChatAdapter(settings, material_resolver, repo),
             provider="kimi",
+            protocol="moonshot_chat",
+            channel_id="moonshot_official",
         )
-    route_catalog = RouteCatalog.from_settings(settings)
+    route_catalog = RouteCatalog.from_settings(settings, control_plane=control_plane)
     route_resolver = RouteResolver(
         settings=settings,
         catalog=route_catalog,
         providers=providers,
         provider_files=file_adapters,
+        control_plane=control_plane,
     )
     route_resolver.validate_catalog()
     runtime = SharedExecutionRuntime(
@@ -109,15 +204,17 @@ async def lifespan(_: FastAPI):
     app.state.provider_file_registry = file_adapters
     app.state.binding_resolver = binding_resolver
     app.state.provider_registry = providers
+    app.state.model_control_plane = control_plane
     app.state.route_catalog = route_catalog
     app.state.route_resolver = route_resolver
     app.state.shared_runtime = runtime
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
+    app.state.worker_wake_notifier = WorkerWakeNotifier()
     log_info(
         logger,
         "api_started",
-        version="0.5.11-gemini-external-url-projection",
+        version=API_VERSION,
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         connection_policy=settings.connection_availability_mode,
@@ -125,19 +222,26 @@ async def lifespan(_: FastAPI):
         configured_file_connections=file_adapters.registered_connections(),
         route_revision=route_catalog.revision,
         route_catalog_hash=route_catalog.catalog_hash,
+        control_plane_revision=control_plane.revision,
+        control_plane_hash=control_plane.control_plane_hash,
         route_providers=route_catalog.providers(),
         capability_revision=CAPABILITY_PROFILE_REVISION,
         dependency_http_log_level=settings.dependency_http_log_level,
         uvicorn_access_log=settings.uvicorn_access_log,
+        worker_follow_api=settings.worker_follow_api_enabled,
+        worker_wake_configured=bool(settings.effective_worker_wake_url),
     )
     try:
         yield
     finally:
         log_info(logger, "api_stopping", deployment_id=settings.deployment_id)
+        notifier = getattr(app.state, "worker_wake_notifier", None)
+        if notifier is not None:
+            await notifier.close()
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version="0.5.11-gemini-external-url-projection", lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version=API_VERSION, lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -145,6 +249,10 @@ app.include_router(relay_v2_router)
 @app.middleware("http")
 async def relay_http_logging(request: Request, call_next):
     start_ms = now_ms()
+    wake_notifier = getattr(app.state, "worker_wake_notifier", None)
+    should_wake_worker = settings.worker_follow_api_enabled
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-start")
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -172,6 +280,11 @@ async def relay_http_logging(request: Request, call_next):
             duration_ms=elapsed_ms(start_ms),
             failure_class=status_failure_class(response.status_code),
         )
+    # A long API request may outlive the Worker's short active grace window. A
+    # second debounced signal after completion closes the enqueue/wake race without
+    # adding latency to the caller-facing response path.
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-complete")
     return response
 
 
@@ -214,12 +327,17 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
-        "version": "0.5.11-gemini-external-url-projection",
+        "version": API_VERSION,
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
+        "route_catalog_hash": getattr(app.state, "route_catalog", None).catalog_hash if getattr(app.state, "route_catalog", None) else None,
+        "control_plane_revision": getattr(app.state, "model_control_plane", None).revision if getattr(app.state, "model_control_plane", None) else settings.model_control_plane_revision,
+        "control_plane_status": getattr(app.state, "model_control_plane", None).status if getattr(app.state, "model_control_plane", None) else None,
+        "control_plane_hash": getattr(app.state, "model_control_plane", None).control_plane_hash if getattr(app.state, "model_control_plane", None) else None,
         "providers": getattr(app.state, "route_catalog", None).providers() if getattr(app.state, "route_catalog", None) else [],
         "capability_revision": CAPABILITY_PROFILE_REVISION,
+        "worker_follow_api": settings.worker_follow_api_enabled,
     }
 
 

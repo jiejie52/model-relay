@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 
 from .base import ProviderHTTPError, ProviderRequestError
-from .http_wire import decode_entity, read_raw_response
+from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
 from ..materials.gemini_transport import project_gemini_input_content_type
@@ -188,6 +188,12 @@ class GeminiNativeAdapter:
             },
             http_status=status,
             provider_request_id=self._request_id(response_headers),
+            observed=observed_response_facts(
+                response_headers,
+                body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
+                protocol="gemini_native",
+                channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
+            ),
         )
 
     @classmethod

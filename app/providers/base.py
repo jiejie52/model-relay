@@ -13,6 +13,7 @@ class ProviderResult:
     response_output: list[Any]
     http_status: int | None = None
     provider_request_id: str | None = None
+    response_headers: dict[str, Any] | None = None
 
 
 class ProviderRequestError(RuntimeError):

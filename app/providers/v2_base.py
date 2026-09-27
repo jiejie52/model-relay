@@ -16,6 +16,10 @@ class V2ProviderResult:
     history_entry: dict[str, Any]
     http_status: int | None = None
     provider_request_id: str | None = None
+    # Facts observed from the upstream success response. They are distinct from
+    # caller-requested and Relay-effective semantics and are used for audit /
+    # contract checks without changing execution identity after dispatch.
+    observed: dict[str, Any] | None = None
 
 
 @dataclass
