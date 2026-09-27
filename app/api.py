@@ -40,7 +40,9 @@ from .execution.inline_executor import InlineExecutor
 from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
 
+
 API_VERSION = "2.0.0"
+
 
 settings = get_settings()
 configure_logging(settings)
