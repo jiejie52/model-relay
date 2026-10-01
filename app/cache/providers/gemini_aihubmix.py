@@ -24,7 +24,7 @@ class GeminiAIHubMixCacheResourceAdapter:
     dispatch rights remain in Relay core.
     """
 
-    adapter_version = "gemini-cache-aihubmix/1"
+    adapter_version = "gemini-cache-aihubmix/2"
 
     def __init__(
         self,
@@ -49,8 +49,35 @@ class GeminiAIHubMixCacheResourceAdapter:
         material_bindings: list[dict[str, Any]],
         session: dict[str, Any],
         ttl_seconds: int | None,
+        provider_physical_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # The current user input/materials are deliberately excluded.  The
+        if isinstance(provider_physical_plan, dict):
+            physical = provider_physical_plan
+            payload = dict(physical.get("cached_prefix") or {})
+            return {
+                "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
+                "projection_version": str(physical.get("projector_version") or ""),
+                "layout_version": str(physical.get("layout_version") or ""),
+                "physical_plan_hash": str(physical.get("physical_plan_hash") or ""),
+                "cached_prefix_wire_hash": str(physical.get("cached_prefix_wire_hash") or ""),
+                "uncached_suffix_wire_hash": str(physical.get("uncached_suffix_wire_hash") or ""),
+                "occurrence_mapping_hash": str(physical.get("occurrence_mapping_hash") or ""),
+                "cache_spec": dict(physical.get("cache_spec") or {}),
+                "model": str(physical.get("model") or snapshot.get("model") or ""),
+                "prefix_version": int(physical.get("prefix_version") or 0),
+                "reuse_key": str(physical.get("reuse_key") or ""),
+                "content_fingerprint": str(physical.get("content_fingerprint") or ""),
+                "compatible_prefix_fingerprints": dict(physical.get("compatible_prefix_fingerprints") or {}),
+                "provider_payload": payload,
+                "cacheable": bool(physical.get("cacheable")),
+                "ttl_seconds": int(ttl_seconds) if isinstance(ttl_seconds, int) and ttl_seconds > 0 else 3600,
+                "context_plan_hash": context_plan.get("context_plan_hash"),
+                "material_binding_hash": stable_hash(material_bindings),
+                "measurement_order": str(physical.get("measurement_order") or "before_lookup"),
+            }
+
+        # Legacy 3.1 Sessions keep their frozen projection. The current user
+        # input/materials are deliberately excluded.  The
         # reusable prefix is: system instruction + committed history turns.
         # The current request and history after a reused prefix remain suffix.
         prefix_version = len(history) if session.get("context_policy") == "conversation" else 0
@@ -137,7 +164,8 @@ class GeminiAIHubMixCacheResourceAdapter:
             json_body=body,
             phase="gemini_cache_create",
         )
-        handle = self.validate_handle(data.get("name"))
+        raw_handle = data.get("name")
+        handle = self.validate_handle(raw_handle) if raw_handle not in (None, "") else None
         return {
             "handle": handle,
             "expire_time": data.get("expireTime"),

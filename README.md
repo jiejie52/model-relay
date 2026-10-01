@@ -1,3 +1,23 @@
+# Model Relay 3.2.0 - Gemini Physical Cache Projection
+
+## 3.2.0 版本定位
+
+以 3.1.0 为基线，本版把 Gemini 缓存执行收紧到统一的、按 Session 冻结版本的 `GeminiPhysicalCachePlan`。Canonical Session / Material / History 不变；新的 Provider-facing layout 将 Session Material 真正放入 CachedContent，并保证 `countTokens -> CacheSpec fingerprint -> CachedContent create -> generateContent` 消费同一份物理计划。
+
+### 3.2.0 核心变化
+
+- 新 Gemini Session 冻结 `gemini-physical-cache-layout/2`；旧 Session 不回填，继续沿用 3.1 投影。
+- `cached_prefix` 承载 Session stable Material；`uncached_suffix` 承载 request/stage instruction、projected dynamic history、current input。
+- Material occurrence mapping 只改变 Gemini 物理投影，不改 canonical history；缓存命中时不会重复发送 Session Material。
+- 新布局严格先执行 `countTokens(exact cached_prefix)`，低于 minimum 时 final mechanism=None，并发送完整 uncached context。
+- `ProviderHTTPError.body/request_id/status/phase` 先脱敏/伪匿名再写 cache operation ledger 与结构化日志；模型推理 ProviderHTTPError 结构化日志也使用相同安全观察。
+- 创建未拿到 cache handle 时 operation 进入 `unknown`，打印 `cache_handle_unavailable_no_recreate`，本版**不做重新创建，也不新增 reconciler**。
+- 无新增 SQL；继续要求 `sql/005_relay_cache_control.sql` + `sql/006_gemini_stateful_cache.sql`。
+
+部署见 `DEPLOYMENT_3.2.0.md`，验证见 `VALIDATION_3.2.0.md`，改动明细见 `CHANGELOG_3.2.0.md`。
+
+---
+
 # Model Relay 3.1.0 - Gemini Stateful Cache Closure
 
 ## 3.1.0 版本定位

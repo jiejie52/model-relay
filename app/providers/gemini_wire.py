@@ -58,6 +58,22 @@ def project_history_contents(
     return result
 
 
+def project_material_part(binding: dict[str, Any], *, material_id: str | None = None) -> dict[str, Any]:
+    file_uri = binding.get("external_uri")
+    if not file_uri:
+        label = material_id or str(binding.get("material_id") or "material")
+        raise ProviderRequestError(
+            "MATERIAL_BINDING_INVALID",
+            f"Gemini binding has no file URI for {label}",
+        )
+    return {
+        "fileData": {
+            "mimeType": project_gemini_input_content_type(binding.get("content_type")),
+            "fileUri": str(file_uri),
+        }
+    }
+
+
 def project_current_user_content(
     snapshot: dict[str, Any],
     *,
@@ -73,20 +89,7 @@ def project_current_user_content(
                 "MATERIAL_BINDING_MISSING",
                 f"Frozen Gemini binding missing for {material_id}",
             )
-        file_uri = binding.get("external_uri")
-        if not file_uri:
-            raise ProviderRequestError(
-                "MATERIAL_BINDING_INVALID",
-                f"Gemini binding has no file URI for {material_id}",
-            )
-        parts.append(
-            {
-                "fileData": {
-                    "mimeType": project_gemini_input_content_type(binding.get("content_type")),
-                    "fileUri": str(file_uri),
-                }
-            }
-        )
+        parts.append(project_material_part(binding, material_id=str(material_id)))
 
     value = snapshot.get("input")
     if isinstance(value, str):

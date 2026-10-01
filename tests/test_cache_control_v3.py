@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -19,9 +20,16 @@ from app.cache.usage import normalize_cache_usage
 from app.config import Settings
 from app.control_plane import ModelControlPlane
 from app.core.idempotency import caller_intent_hash, request_identity
+from app.core.provider_error_observation import provider_http_error_observation
 from app.providers.base import ProviderHTTPError
 from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
+from app.providers.gemini_physical import (
+    GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_SESSION_PROJECTION_METADATA_KEY,
+    build_gemini_physical_cache_plan,
+    frozen_session_projection_metadata,
+)
 from app.providers.v2_base import V2ExecutionContext
 from app.v2_models import ExecutionSpec, SessionRequestCreate
 
@@ -996,3 +1004,497 @@ def test_gemini_native_cache_reference_is_reserved_from_legacy_provider_payload(
     )
     assert "cachedContent" not in payload
     assert payload["generationConfig"]["temperature"] == 0.2
+
+
+
+def _gemini_v2_session(*, material_manifest=None):
+    return {
+        "id": "s-v2",
+        "context_policy": "conversation",
+        "material_manifest": list(material_manifest or []),
+        "metadata": {
+            GEMINI_SESSION_PROJECTION_METADATA_KEY: frozen_session_projection_metadata(),
+            "_relay_route": {"account_scope_hash": "acct"},
+        },
+    }
+
+
+def _gemini_binding(material_id: str, uri: str, *, sha: str) -> dict:
+    return {
+        "material_id": material_id,
+        "binding_generation": 1,
+        "binding_kind": "gemini_file_uri",
+        "representation": "gemini_file_uri",
+        "connection_id": "aihubmix_gemini_native",
+        "account_scope_hash": "acct",
+        "provider": "gemini",
+        "external_uri": uri,
+        "content_sha256": sha,
+        "content_type": "application/pdf",
+        "filename": f"{material_id}.pdf",
+    }
+
+
+def test_gemini_physical_plan_moves_session_material_into_cached_prefix_and_strips_history_occurrence():
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "request-stage-instruction",
+        "input": "current question",
+        "protocol_profile_hash": "profile",
+        "capability_contract_hash": "cap",
+        "cache_contract_hash": "cache",
+    }
+    bindings = [
+        _gemini_binding("m-session", "https://files.example/session", sha="sha-session"),
+        _gemini_binding("m-request", "https://files.example/request", sha="sha-request"),
+    ]
+    history = [
+        {
+            "transport_history": {
+                "kind": "gemini_native",
+                "user_content": {
+                    "role": "user",
+                    "parts": [
+                        {"fileData": {"mimeType": "application/pdf", "fileUri": "https://files.example/session"}},
+                        {"text": "old question"},
+                    ],
+                },
+                "model_content": {"role": "model", "parts": [{"text": "old answer"}]},
+                "material_occurrences": [
+                    {
+                        "material_id": "m-session",
+                        "part_index": 0,
+                        "placement": "cached_prefix",
+                        "representation_digest": "digest-session",
+                    }
+                ],
+            }
+        }
+    ]
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=history,
+        material_ids=["m-session", "m-request"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+
+    assert plan["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
+    assert plan["cacheable"] is True
+    cached_wire = json.dumps(plan["cached_prefix"], ensure_ascii=False)
+    assert "https://files.example/session" in cached_wire
+    assert "https://files.example/request" not in cached_wire
+    assert "request-stage-instruction" not in cached_wire
+
+    suffix_wire = json.dumps(plan["uncached_suffix"], ensure_ascii=False)
+    assert "request-stage-instruction" in suffix_wire
+    assert "old question" in suffix_wire and "old answer" in suffix_wire
+    assert "https://files.example/session" not in suffix_wire
+    assert "https://files.example/request" in suffix_wire
+    assert "current question" in suffix_wire
+
+    full_wire = json.dumps(plan["full_uncached_payload"], ensure_ascii=False)
+    assert "https://files.example/session" in full_wire
+    assert "https://files.example/request" in full_wire
+    assert "old question" in full_wire and "current question" in full_wire
+    assert any(
+        x.get("source") == "history"
+        and x.get("material_id") == "m-session"
+        and x.get("placement") == "cached_prefix"
+        for x in plan["occurrence_mapping"]
+    )
+
+
+def test_gemini_v2_cache_spec_consumes_exact_physical_cached_prefix():
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic-stage",
+        "input": "question",
+    }
+    bindings = [_gemini_binding("m-session", "https://files.example/session", sha="sha-session")]
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    adapter = GeminiAIHubMixCacheResourceAdapter(settings())
+    spec = adapter.build_spec(
+        snapshot=snapshot,
+        history=[],
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=bindings,
+        session=session,
+        ttl_seconds=600,
+        provider_physical_plan=plan,
+    )
+    assert spec["provider_payload"] == plan["cached_prefix"]
+    assert spec["content_fingerprint"] == plan["content_fingerprint"]
+    assert spec["reuse_key"] == plan["reuse_key"]
+    assert spec["physical_plan_hash"] == plan["physical_plan_hash"]
+    assert spec["measurement_order"] == "before_lookup"
+    assert "dynamic-stage" not in json.dumps(spec["provider_payload"])
+
+
+def test_gemini_v2_generate_payload_uses_exact_uncached_suffix_with_cache_handle():
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "stage instruction",
+        "input": "current",
+    }
+    bindings = [_gemini_binding("m-session", "https://files.example/session", sha="sha-session")]
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    context = V2ExecutionContext(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        tenant_id="t",
+        conversation_hash="c",
+        cache_execution_binding={
+            "mechanism": "stateful_resource",
+            "provider_handle": "cachedContents/cache-v2",
+            "metadata": {
+                "physical_plan_hash": plan["physical_plan_hash"],
+                "uncached_suffix_wire_hash": plan["uncached_suffix_wire_hash"],
+            },
+        },
+        provider_physical_plan=plan,
+    )
+    payload, history_user = GeminiNativeAdapter._build_context_payload(context)
+    expected = deepcopy(plan["uncached_suffix"])
+    expected["cachedContent"] = "cachedContents/cache-v2"
+    assert payload == expected
+    assert "https://files.example/session" not in json.dumps(payload)
+    assert history_user == plan["history_entry_user_content"]
+    assert "https://files.example/session" in json.dumps(history_user)
+
+
+def test_gemini_v2_none_resolution_sends_complete_uncached_context():
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "stage instruction",
+        "input": "current",
+    }
+    bindings = [_gemini_binding("m-session", "https://files.example/session", sha="sha-session")]
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    context = V2ExecutionContext(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        tenant_id="t",
+        conversation_hash="c",
+        cache_execution_binding={"mechanism": None},
+        provider_physical_plan=plan,
+    )
+    payload, _ = GeminiNativeAdapter._build_context_payload(context)
+    assert payload == plan["full_uncached_payload"]
+    assert "cachedContent" not in payload
+    assert "https://files.example/session" in json.dumps(payload)
+
+
+def test_provider_http_error_observation_redacts_body_and_pseudonymizes_request_id():
+    exc = ProviderHTTPError(
+        503,
+        b'{"error":"Bearer topsecret","api_key":"AIza123456789012345678901234567890","nested":{"password":"p@ss"}}',
+        request_id="provider-request-raw-123",
+        phase="gemini_cache_create",
+    )
+    observed = provider_http_error_observation(exc)
+    wire = json.dumps(observed, ensure_ascii=False)
+    assert observed["status"] == 503
+    assert observed["phase"] == "gemini_cache_create"
+    assert observed["request_id"].startswith("sha256:")
+    assert "provider-request-raw-123" not in wire
+    assert "topsecret" not in wire
+    assert "AIza123456789012345678901234567890" not in wire
+    assert "p@ss" not in wire
+    assert "[redacted]" in wire
+
+
+@pytest.mark.asyncio
+async def test_stateful_manager_v2_measures_exact_prefix_before_resource_lookup():
+    events = []
+
+    class FakeAdapter:
+        adapter_version = "fake-v2/1"
+
+        def build_spec(self, **kwargs):
+            assert kwargs.get("provider_physical_plan") == {"marker": "v2"}
+            return {
+                "cacheable": True,
+                "content_fingerprint": "fp",
+                "reuse_key": "reuse",
+                "prefix_version": 0,
+                "compatible_prefix_fingerprints": {"0": "fp"},
+                "projection_version": "projector/2",
+                "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION,
+                "physical_plan_hash": "plan-hash",
+                "measurement_order": "before_lookup",
+            }
+
+        async def measure(self, *, spec):
+            events.append("measure")
+            return 2048
+
+        async def get(self, *, handle, operation=None):
+            events.append("get")
+            return {"handle": handle, "expire_time": "2099-01-01T00:00:00Z"}
+
+        async def create(self, **kwargs):
+            raise AssertionError("ready resource should be reused")
+
+    adapter = FakeAdapter()
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            return adapter
+
+    class Repo:
+        settings = settings()
+
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            return "scope"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            events.append("find")
+            return [{
+                "id": "resource-v2",
+                "generation": 1,
+                "provider_handle_ref": "cachedContents/v2",
+                "expire_time": "2099-01-01T00:00:00Z",
+                "content_fingerprint": "fp",
+                "prefix_version": 0,
+                "token_count": 1024,
+            }]
+
+    result = await StatefulResourceManager(Repo(), Registry()).prepare(
+        request_row={"id": "r", "tenant_id": "t", "conversation_hash": "c", "session_id": "s"},
+        plan={
+            "requested_mode": "on",
+            "profile_hash": "profile",
+            "mechanism_config": {"minimum_cacheable_tokens": 1024},
+        },
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        fence=ExecutionFence(owner="worker", epoch=1),
+        snapshot={"connection_id": "conn", "offering_id": "o", "model": "gemini-3.1-flash-lite"},
+        session={"metadata": {"_relay_route": {"account_scope_hash": "a"}}},
+        history=[],
+        provider_physical_plan={"marker": "v2"},
+    )
+    assert result["decision_reason"] == "resource_reused"
+    assert result["metadata"]["prefix_token_count"] == 2048
+    assert events == ["measure", "find", "get"]
+
+
+@pytest.mark.asyncio
+async def test_cache_create_provider_http_error_is_sanitized_in_ledger_and_structured_log(caplog):
+    recorded = []
+    finished = []
+
+    class FakeAdapter:
+        adapter_version = "fake/1"
+
+        def build_spec(self, **kwargs):
+            return {
+                "cacheable": True,
+                "content_fingerprint": "fp",
+                "reuse_key": "reuse",
+                "prefix_version": 0,
+                "compatible_prefix_fingerprints": {"0": "fp"},
+                "projection_version": "projector/2",
+                "measurement_order": "before_lookup",
+            }
+
+        async def measure(self, *, spec):
+            return 4096
+
+        async def create(self, *, spec, operation):
+            raise ProviderHTTPError(
+                503,
+                b'{"message":"Bearer raw-secret-token","api_key":"AIza123456789012345678901234567890"}',
+                request_id="raw-provider-request-id",
+                phase="gemini_cache_create",
+            )
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            return FakeAdapter()
+
+    class Repo:
+        settings = settings()
+
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            return "scope"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            return []
+
+        async def create_cache_operation_intent(self, **kwargs):
+            return {"op_id": "op-http-error", "lease_owner": "worker", "lease_epoch": 2}
+
+        async def start_cache_operation(self, **kwargs):
+            return True
+
+        async def record_cache_operation_observation(self, **kwargs):
+            recorded.append(kwargs)
+            return True
+
+        async def finish_cache_operation(self, **kwargs):
+            finished.append(kwargs)
+            return True
+
+    caplog.set_level(logging.INFO, logger="model-relay-cache")
+    result = await StatefulResourceManager(Repo(), Registry()).prepare(
+        request_row={"id": "r", "tenant_id": "t", "conversation_hash": "c", "session_id": "s"},
+        plan={
+            "requested_mode": "auto",
+            "allow_uncached_same_context": True,
+            "profile_hash": "profile",
+            "mechanism_config": {"minimum_cacheable_tokens": 1024},
+        },
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        fence=ExecutionFence(owner="worker", epoch=2),
+        snapshot={"connection_id": "conn", "offering_id": "o", "model": "gemini-3.1-flash-lite"},
+        session={"metadata": {"_relay_route": {"account_scope_hash": "a"}}},
+        history=[],
+    )
+    assert result["mechanism"] is None
+    assert result["decision_reason"] == "cache_create_unknown"
+    assert recorded and finished and finished[-1]["state"] == "unknown"
+    ledger_wire = json.dumps(recorded[-1], ensure_ascii=False)
+    finish_wire = json.dumps(finished[-1], ensure_ascii=False)
+    assert "raw-provider-request-id" not in ledger_wire + finish_wire
+    assert "raw-secret-token" not in ledger_wire + finish_wire
+    assert "AIza123456789012345678901234567890" not in ledger_wire + finish_wire
+    assert '"status": 503' in ledger_wire or '"status":503' in ledger_wire
+    assert "gemini_cache_create" in ledger_wire
+    assert "cache_create_provider_http_error" in caplog.text
+    assert "raw-provider-request-id" not in caplog.text
+    assert "raw-secret-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_cache_handle_is_logged_unknown_and_never_verified_or_recreated(caplog):
+    events = []
+    recorded = []
+    finished = []
+
+    class FakeAdapter:
+        adapter_version = "fake/1"
+
+        def build_spec(self, **kwargs):
+            return {
+                "cacheable": True,
+                "content_fingerprint": "fp",
+                "reuse_key": "reuse",
+                "prefix_version": 0,
+                "compatible_prefix_fingerprints": {"0": "fp"},
+                "projection_version": "projector/2",
+                "measurement_order": "before_lookup",
+            }
+
+        async def measure(self, *, spec):
+            events.append("measure")
+            return 4096
+
+        async def create(self, *, spec, operation):
+            events.append("create")
+            return {"handle": None, "provider_request_id": "raw-missing-handle-request-id"}
+
+        async def get(self, *, handle, operation=None):
+            events.append("get")
+            raise AssertionError("missing handle must never be verified")
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            return FakeAdapter()
+
+    class Repo:
+        settings = settings()
+
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            return "scope"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            events.append("find")
+            return []
+
+        async def create_cache_operation_intent(self, **kwargs):
+            events.append("claim")
+            return {"op_id": "op-missing", "lease_owner": "worker", "lease_epoch": 4}
+
+        async def start_cache_operation(self, **kwargs):
+            events.append("start")
+            return True
+
+        async def record_cache_operation_observation(self, **kwargs):
+            events.append("record")
+            recorded.append(kwargs)
+            return True
+
+        async def finish_cache_operation(self, **kwargs):
+            events.append("finish")
+            finished.append(kwargs)
+            return True
+
+        async def publish_cache_resource(self, **kwargs):
+            raise AssertionError("missing handle must never be published")
+
+    caplog.set_level(logging.INFO, logger="model-relay-cache")
+    result = await StatefulResourceManager(Repo(), Registry()).prepare(
+        request_row={"id": "r", "tenant_id": "t", "conversation_hash": "c", "session_id": "s"},
+        plan={
+            "requested_mode": "auto",
+            "allow_uncached_same_context": True,
+            "profile_hash": "profile",
+            "mechanism_config": {"minimum_cacheable_tokens": 1024},
+        },
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        fence=ExecutionFence(owner="worker", epoch=4),
+        snapshot={"connection_id": "conn", "offering_id": "o", "model": "gemini-3.1-flash-lite"},
+        session={"metadata": {"_relay_route": {"account_scope_hash": "a"}}},
+        history=[],
+    )
+    assert result["mechanism"] is None
+    assert result["decision_reason"] == "cache_handle_unavailable"
+    assert events == ["measure", "find", "claim", "start", "create", "record", "finish"]
+    assert finished[-1]["state"] == "unknown"
+    assert finished[-1]["raw_result"]["recreate_attempted"] is False
+    assert "raw-missing-handle-request-id" not in json.dumps(recorded[-1])
+    assert "cache_handle_unavailable_no_recreate" in caplog.text
+    assert "raw-missing-handle-request-id" not in caplog.text

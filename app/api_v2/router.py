@@ -25,6 +25,10 @@ from ..model_options import (
 )
 from ..observability import error as log_error, info as log_info, warning as log_warning, elapsed_ms, now_ms
 from ..persistence.object_storage import ObjectLocation
+from ..providers.gemini_physical import (
+    GEMINI_SESSION_PROJECTION_METADATA_KEY,
+    frozen_session_projection_metadata,
+)
 from ..routing import RouteBinding, RouteResolutionError
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -917,6 +921,10 @@ async def create_session(
     session_id = uuid4()
     session_metadata = dict(body.metadata)
     session_metadata["_relay_route"] = route.internal_metadata()
+    if route.provider == "gemini":
+        # Physical provider layout is frozen at Session creation. Existing
+        # Sessions created before this version keep their prior wire semantics.
+        session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata()
     row = await repo.create_session(
         {
             "id": str(session_id),
@@ -960,6 +968,11 @@ async def create_session(
         capability_contract_id=route.capability_contract_id,
         control_plane_hash=route.control_plane_hash,
         execution_pool=route.execution_pool,
+        gemini_physical_layout=(
+            session_metadata.get(GEMINI_SESSION_PROJECTION_METADATA_KEY, {}).get("layout_version")
+            if route.provider == "gemini"
+            else None
+        ),
     )
     log_info(
         logger,

@@ -1,3 +1,15 @@
+# Model Relay 3.2.0 快速部署补充
+
+> 3.2.0 以 3.1.0 为基线，新增 Gemini Session Material 的版本化物理缓存投影。无新 SQL migration；数据库仍需已有 005 + 006。
+
+部署同一 3.2.0 镜像到 API/Worker，确认两端 `/health` 都为 3.2.0。要使用 `GeminiPhysicalCachePlan` 新布局必须**新建 Gemini Session**；已有 Session 保持 3.1 wire layout。
+
+建议先用 `requested_cache_mode=on` 验证：`countTokens` 只计 exact cached_prefix；达门槛后 CachedContent create 承载 Session Material，generateContent 仅发送 cache handle + exact uncached_suffix；不足门槛时发送完整 uncached context。创建结果无 handle 时只记录 `unknown` 并打印日志，不会自动重建。
+
+完整说明见 `DEPLOYMENT_3.2.0.md`。
+
+---
+
 # Model Relay 3.1.0 快速部署补充
 
 > 本次属于现有缓存处理方式增强，按 XX.YY.ZZ 规则从 3.0.0 升级到 **3.1.0**。完整迁移见 `DEPLOYMENT_3.1.0.md`。

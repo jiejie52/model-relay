@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from typing import Any
 
@@ -11,6 +12,7 @@ from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
+from .gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION
 from .gemini_wire import (
     project_current_user_content,
     project_history_contents,
@@ -22,7 +24,7 @@ from .gemini_wire import (
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/3"
+    adapter_version = "gemini-native-aihubmix/4"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
 
     def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -129,6 +131,22 @@ class GeminiNativeAdapter:
             "raw": usage_meta,
         }
         response_id = str(data.get("responseId") or data.get("id") or "") or None
+        transport_history: dict[str, Any] = {
+            "kind": "gemini_native",
+            "user_content": user_content,
+            "model_content": model_content,
+        }
+        physical = context.provider_physical_plan
+        if isinstance(physical, dict) and physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION:
+            transport_history.update(
+                {
+                    "physical_layout_version": physical.get("layout_version"),
+                    "physical_projector_version": physical.get("projector_version"),
+                    "physical_plan_hash": physical.get("physical_plan_hash"),
+                    "material_occurrences": copy.deepcopy(physical.get("current_material_occurrences") or []),
+                }
+            )
+
         return V2ProviderResult(
             raw_bytes=raw,
             raw_json=data,
@@ -137,13 +155,7 @@ class GeminiNativeAdapter:
             usage=usage,
             cached_tokens=usage_meta.get("cachedContentTokenCount"),
             response_output=model_content,
-            history_entry={
-                "transport_history": {
-                    "kind": "gemini_native",
-                    "user_content": user_content,
-                    "model_content": model_content,
-                }
-            },
+            history_entry={"transport_history": transport_history},
             http_status=status,
             provider_request_id=self._request_id(response_headers),
             observed=observed_response_facts(
@@ -157,16 +169,62 @@ class GeminiNativeAdapter:
 
     @staticmethod
     def _build_context_payload(context: V2ExecutionContext) -> tuple[dict[str, Any], dict[str, Any]]:
-        current_user = project_current_user_content(
-            context.snapshot,
-            material_ids=context.material_ids,
-            material_bindings=context.material_bindings,
-        )
         binding = context.cache_execution_binding
         if not isinstance(binding, dict):
             raw = context.snapshot.get("_relay_cache_execution")
             binding = raw if isinstance(raw, dict) else {}
 
+        physical = context.provider_physical_plan
+        if isinstance(physical, dict) and physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION:
+            current_user = copy.deepcopy(physical.get("history_entry_user_content") or {})
+            if not isinstance(current_user, dict) or current_user.get("role") != "user":
+                raise ProviderRequestError(
+                    "GEMINI_PHYSICAL_PLAN_INVALID",
+                    "Gemini physical plan has no canonical current user Content",
+                )
+            if binding.get("mechanism") == "stateful_resource":
+                handle = validate_cached_content_handle(binding.get("provider_handle"))
+                metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+                expected_plan_hash = str(metadata.get("physical_plan_hash") or "")
+                actual_plan_hash = str(physical.get("physical_plan_hash") or "")
+                if expected_plan_hash and expected_plan_hash != actual_plan_hash:
+                    raise ProviderRequestError(
+                        "CACHE_CONTEXT_MISMATCH",
+                        "Gemini CacheExecutionBinding does not match the frozen physical plan",
+                    )
+                expected_suffix_hash = str(metadata.get("uncached_suffix_wire_hash") or "")
+                actual_suffix_hash = str(physical.get("uncached_suffix_wire_hash") or "")
+                if expected_suffix_hash and expected_suffix_hash != actual_suffix_hash:
+                    raise ProviderRequestError(
+                        "CACHE_CONTEXT_MISMATCH",
+                        "Gemini cached execution suffix differs from the frozen physical plan",
+                    )
+                payload = copy.deepcopy(physical.get("uncached_suffix") or {})
+                if not isinstance(payload.get("contents"), list):
+                    raise ProviderRequestError(
+                        "GEMINI_PHYSICAL_PLAN_INVALID",
+                        "Gemini physical plan has no uncached suffix contents",
+                    )
+                payload["cachedContent"] = handle
+                return payload, current_user
+
+            # Final cache resolution may be None because caching was off, the
+            # exact prefix was below Provider minimum, or auto degraded before
+            # model dispatch. In every case send the complete uncached context.
+            payload = copy.deepcopy(physical.get("full_uncached_payload") or {})
+            if not isinstance(payload.get("contents"), list):
+                raise ProviderRequestError(
+                    "GEMINI_PHYSICAL_PLAN_INVALID",
+                    "Gemini physical plan has no complete uncached contents",
+                )
+            return payload, current_user
+
+        # Legacy Sessions retain the 3.1 committed-history projection.
+        current_user = project_current_user_content(
+            context.snapshot,
+            material_ids=context.material_ids,
+            material_bindings=context.material_bindings,
+        )
         if binding.get("mechanism") == "stateful_resource":
             handle = validate_cached_content_handle(binding.get("provider_handle"))
             metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
@@ -181,12 +239,8 @@ class GeminiNativeAdapter:
                     "CACHE_BINDING_INVALID",
                     "Gemini cached history boundary is outside the frozen history",
                 )
-            contents = project_history_contents(
-                context.history, start_entry=cached_history_version
-            )
+            contents = project_history_contents(context.history, start_entry=cached_history_version)
             contents.append(current_user)
-            # CachedContent already carries the system instruction and committed
-            # prefix.  Never repeat either in the generateContent request.
             return {"contents": contents, "cachedContent": handle}, current_user
 
         contents = project_history_contents(context.history)

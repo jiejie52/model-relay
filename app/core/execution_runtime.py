@@ -10,11 +10,13 @@ from ..cache.contracts import CacheDecisionError, ExecutionFence
 from ..cache.orchestrator import CacheOrchestrator
 from ..cache.usage import normalize_cache_usage
 from .idempotency import stable_hash
+from .provider_error_observation import provider_http_error_observation
 from ..materials.resolver import MaterialResolver
 from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
-from ..providers.base import ProviderRequestError
+from ..providers.gemini_physical import build_gemini_physical_cache_plan, uses_physical_layout_v2
+from ..providers.base import ProviderHTTPError, ProviderRequestError
 from ..providers.v2_base import V2ExecutionContext
 from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
 from ..storage_paths import request_object_path_v2, session_history_request_path
@@ -160,6 +162,41 @@ class SharedExecutionRuntime:
                 )
 
         context_plan = snapshot.get("context_plan") if isinstance(snapshot.get("context_plan"), dict) else None
+        provider_physical_plan: dict[str, Any] | None = None
+        if (
+            is_v3
+            and str(snapshot.get("provider") or "") == "gemini"
+            and uses_physical_layout_v2(session)
+        ):
+            if context_plan is None:
+                raise ProviderRequestError(
+                    "CACHE_CONTEXT_MISMATCH",
+                    "Gemini physical projection requires the frozen ContextPlan",
+                )
+            provider_physical_plan = build_gemini_physical_cache_plan(
+                snapshot=snapshot,
+                session=session,
+                history=history,
+                material_ids=material_ids,
+                material_bindings=material_bindings,
+                context_plan=context_plan,
+            )
+            log_info(
+                logger,
+                "gemini_physical_cache_plan_frozen",
+                request_id=request_id,
+                session_id=session_id,
+                connection_id=snapshot.get("connection_id"),
+                model=snapshot.get("model"),
+                layout_version=provider_physical_plan.get("layout_version"),
+                projector_version=provider_physical_plan.get("projector_version"),
+                physical_plan_hash=provider_physical_plan.get("physical_plan_hash"),
+                cached_prefix_wire_hash=provider_physical_plan.get("cached_prefix_wire_hash"),
+                uncached_suffix_wire_hash=provider_physical_plan.get("uncached_suffix_wire_hash"),
+                occurrence_mapping_hash=provider_physical_plan.get("occurrence_mapping_hash"),
+                cacheable=provider_physical_plan.get("cacheable"),
+            )
+
         cache_binding = None
         execution_snapshot = snapshot
         if is_v3:
@@ -177,10 +214,25 @@ class SharedExecutionRuntime:
                     material_bindings=material_bindings,
                     fence=fence,
                     history=history,
+                    provider_physical_plan=provider_physical_plan,
                 )
             except CacheDecisionError as exc:
                 raise ProviderRequestError(exc.code, exc.message) from exc
             cache_binding = cache_binding_obj.canonical(include_provider_handle=True)
+            if cache_binding_obj.mechanism == "stateful_resource" and not str(cache_binding_obj.provider_handle or "").strip():
+                log_error(
+                    logger,
+                    "cache_handle_unavailable_before_install",
+                    request_id=request_id,
+                    session_id=session_id,
+                    connection_id=snapshot.get("connection_id"),
+                    physical_plan_hash=(provider_physical_plan or {}).get("physical_plan_hash"),
+                    recreate_attempted=False,
+                )
+                raise ProviderRequestError(
+                    "CACHE_HANDLE_UNAVAILABLE",
+                    "Stateful cache preparation completed without a usable Provider cache handle",
+                )
             binding_hash = cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
                 request_id=request_id,
@@ -209,6 +261,7 @@ class SharedExecutionRuntime:
                     "snapshot": snapshot,
                     "history": history,
                     "material_bindings": material_bindings,
+                    "provider_physical_plan_hash": (provider_physical_plan or {}).get("physical_plan_hash"),
                     "cache_binding": cache_binding,
                 }
             )
@@ -271,13 +324,19 @@ class SharedExecutionRuntime:
                     context_plan=context_plan,
                     cache_execution_binding=cache_binding,
                     execution_fence=(fence.canonical() if fence is not None else None),
+                    provider_physical_plan=provider_physical_plan,
                 )
             )
         except Exception as exc:
+            provider_error = (
+                provider_http_error_observation(exc)
+                if isinstance(exc, ProviderHTTPError)
+                else None
+            )
             log_error(
                 logger,
                 "provider_call_failed",
-                exc_info=True,
+                exc_info=(False if provider_error is not None else True),
                 request_id=request_id,
                 session_id=session_id,
                 provider=snapshot.get("provider"),
@@ -285,11 +344,12 @@ class SharedExecutionRuntime:
                 model=snapshot.get("model"),
                 adapter_version=getattr(adapter, "adapter_version", None),
                 route_revision=self._route_revision(session),
-                phase=getattr(exc, "phase", None) or "model_inference",
+                phase=(provider_error or {}).get("phase") or getattr(exc, "phase", None) or "model_inference",
                 duration_ms=elapsed_ms(provider_started_ms),
                 failure_class=exception_failure_class(exc),
-                upstream_http_status=getattr(exc, "status_code", None),
-                upstream_request_id=getattr(exc, "request_id", None),
+                upstream_http_status=(provider_error or {}).get("status") or getattr(exc, "status_code", None),
+                upstream_request_id=(provider_error or {}).get("request_id"),
+                provider_http_error=provider_error,
                 exception_type=type(exc).__name__,
                 stream_interrupted=getattr(exc, "stream_interrupted", False),
                 bytes_received=getattr(exc, "bytes_received", None),

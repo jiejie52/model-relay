@@ -39,6 +39,10 @@ class V2ExecutionContext:
     context_plan: dict[str, Any] | None = None
     cache_execution_binding: dict[str, Any] | None = None
     execution_fence: dict[str, Any] | None = None
+    # Provider-facing, in-memory-only physical projection. It may contain
+    # transient fileData URIs and is intentionally never persisted as the
+    # canonical Session/History; only its hashes enter the cache binding/seal.
+    provider_physical_plan: dict[str, Any] | None = None
 
 
 class V2ProviderAdapter(Protocol):

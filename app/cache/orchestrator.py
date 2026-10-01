@@ -24,6 +24,7 @@ class CacheOrchestrator:
         material_bindings: list[dict[str, Any]],
         fence: ExecutionFence,
         history: list[dict[str, Any]],
+        provider_physical_plan: dict[str, Any] | None = None,
     ) -> CacheExecutionBinding:
         plan = snapshot.get("cache_plan") if isinstance(snapshot.get("cache_plan"), dict) else {}
         plan_hash = str(snapshot.get("cache_plan_hash") or "")
@@ -80,6 +81,7 @@ class CacheOrchestrator:
                 snapshot=snapshot,
                 session=session,
                 history=history,
+                provider_physical_plan=provider_physical_plan,
             )
             return CacheExecutionBinding(
                 mechanism=prepared.get("mechanism"),
@@ -91,6 +93,8 @@ class CacheOrchestrator:
                 provider_handle=prepared.get("provider_handle"),
                 expires_at=prepared.get("expires_at"),
                 material_binding_hash=material_binding_hash,
+                projection_version=str(prepared.get("projection_version") or "relay-cache-projection/1"),
+                prefix=dict(prepared.get("prefix") or {}),
                 metadata=dict(prepared.get("metadata") or {}),
             )
 
