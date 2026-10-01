@@ -1,3 +1,19 @@
+# Model Relay 3.0.0 快速部署补充
+
+> 本次为新增缓存机制需求，按 XX.YY.ZZ 规则从 2.0.0 升级到 **3.0.0**。完整迁移见 `DEPLOYMENT_3.0.0.md`。
+
+数据库新增：
+
+```text
+sql/005_relay_cache_control.sql
+```
+
+部署顺序必须是：先应用 SQL 005，并发布可同时读取旧 Request 与 v3 Request 的 API/Worker，再允许创建 3.0 Session。新 Request 缓存意图只使用 `requested_cache_mode=off|auto|on`；Provider-native TTL/key/cache_control/cachedContent 不作为公共入口。
+
+内置 3.0.0 只把已有 Grok cache-key 路径视作 `legacy_verified implicit_prefix`；Gemini/Claude/GPT 等新缓存能力在逐 Supply 真实认证前保持 candidate，不会因模型名或兼容协议被自动启用。
+
+---
+
 # Model Relay 2.0.0 快速部署补充
 
 > 2.0.0 保留原有 Session/Request/Job 恢复语义，新增模型供应控制面。完整说明见 `DEPLOYMENT_2.0.0.md`；下方旧版本操作记录继续保留用于迁移追溯。

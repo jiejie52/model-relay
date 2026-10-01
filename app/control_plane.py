@@ -10,7 +10,7 @@ from typing import Any, Iterable
 from .config import Settings
 
 
-CONTROL_PLANE_SCHEMA_VERSION = "relay-model-control-plane/2.0"
+CONTROL_PLANE_SCHEMA_VERSION = "relay-model-control-plane/3.0"
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,10 @@ class CapabilityContract:
     input_modalities: tuple[str, ...] = ("text",)
     features: tuple[str, ...] = ()
     provider_defaults: dict[str, Any] = field(default_factory=dict)
+    # Cache capability is part of the Supply capability contract. It declares
+    # what the exact model/channel offering may do; protocol projection and
+    # policy remain separate frozen objects.
+    cache: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self) -> dict[str, Any]:
@@ -57,6 +61,7 @@ class CapabilityContract:
             "input_modalities": list(self.input_modalities),
             "features": list(self.features),
             "provider_defaults": self.provider_defaults,
+            "cache": self.cache,
             "metadata": self.metadata,
         }
 
@@ -110,12 +115,64 @@ class CapabilityContract:
 
 
 @dataclass(frozen=True)
+class ProtocolProfileSpec:
+    profile_id: str
+    revision: str
+    protocol: str
+    cache: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def canonical(self) -> dict[str, Any]:
+        return {
+            "profile_id": self.profile_id,
+            "revision": self.revision,
+            "protocol": self.protocol,
+            "cache": self.cache,
+            "metadata": self.metadata,
+        }
+
+    @property
+    def profile_hash(self) -> str:
+        return _hash_json(self.canonical())
+
+
+@dataclass(frozen=True)
+class CachePolicySpec:
+    policy_id: str
+    revision: str
+    scope: str = "session"
+    mechanism_preference: tuple[str, ...] = ()
+    auto_prepare_failure: str = "uncached_same_context"
+    on_prepare_failure: str = "fail"
+    cross_session_sharing: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def canonical(self) -> dict[str, Any]:
+        return {
+            "policy_id": self.policy_id,
+            "revision": self.revision,
+            "scope": self.scope,
+            "mechanism_preference": list(self.mechanism_preference),
+            "auto_prepare_failure": self.auto_prepare_failure,
+            "on_prepare_failure": self.on_prepare_failure,
+            "cross_session_sharing": self.cross_session_sharing,
+            "metadata": self.metadata,
+        }
+
+    @property
+    def policy_hash(self) -> str:
+        return _hash_json(self.canonical())
+
+
+@dataclass(frozen=True)
 class ModelOffering:
     offering_id: str
     provider: str
     model_pattern: str
     connection_id: str
     capability_contract_id: str
+    protocol_profile_id: str | None = None
+    cache_policy_id: str | None = None
     priority: int = 100
     deployment_id: str | None = None
     requires_file_adapter: bool = False
@@ -140,6 +197,8 @@ class ModelOffering:
             "model_pattern": self.model_pattern,
             "connection_id": self.connection_id,
             "capability_contract_id": self.capability_contract_id,
+            "protocol_profile_id": self.protocol_profile_id,
+            "cache_policy_id": self.cache_policy_id,
             "priority": self.priority,
             "deployment_id": self.deployment_id,
             "requires_file_adapter": self.requires_file_adapter,
@@ -165,6 +224,8 @@ class ModelControlPlane:
         revision: str,
         connections: Iterable[ConnectionSpec],
         capability_contracts: Iterable[CapabilityContract],
+        protocol_profiles: Iterable[ProtocolProfileSpec],
+        cache_policies: Iterable[CachePolicySpec],
         offerings: Iterable[ModelOffering],
         status: str = "published",
         release_metadata: dict[str, Any] | None = None,
@@ -174,6 +235,8 @@ class ModelControlPlane:
         self.release_metadata = dict(release_metadata or {})
         self.connections = {x.connection_id: x for x in connections}
         self.capability_contracts = {x.contract_id: x for x in capability_contracts}
+        self.protocol_profiles = {x.profile_id: x for x in protocol_profiles}
+        self.cache_policies = {x.policy_id: x for x in cache_policies}
         self.offerings = {x.offering_id: x for x in offerings}
         self._validate()
         canonical = {
@@ -184,6 +247,12 @@ class ModelControlPlane:
             "connections": [self.connections[k].canonical() for k in sorted(self.connections)],
             "capability_contracts": [
                 self.capability_contracts[k].canonical() for k in sorted(self.capability_contracts)
+            ],
+            "protocol_profiles": [
+                self.protocol_profiles[k].canonical() for k in sorted(self.protocol_profiles)
+            ],
+            "cache_policies": [
+                self.cache_policies[k].canonical() for k in sorted(self.cache_policies)
             ],
             "offerings": [self.offerings[k].canonical() for k in sorted(self.offerings)],
         }
@@ -210,10 +279,14 @@ class ModelControlPlane:
         if mode == "replace":
             connections: dict[str, ConnectionSpec] = {}
             contracts: dict[str, CapabilityContract] = {}
+            profiles: dict[str, ProtocolProfileSpec] = {}
+            policies: dict[str, CachePolicySpec] = {}
             offerings: dict[str, ModelOffering] = {}
         else:
             connections = dict(base.connections)
             contracts = dict(base.capability_contracts)
+            profiles = dict(base.protocol_profiles)
+            policies = dict(base.cache_policies)
             offerings = dict(base.offerings)
 
         for value in parsed.get("connections") or []:
@@ -222,6 +295,12 @@ class ModelControlPlane:
         for value in parsed.get("capability_contracts") or []:
             contract = cls._contract_from_mapping(value)
             contracts[contract.contract_id] = contract
+        for value in parsed.get("protocol_profiles") or []:
+            profile = cls._profile_from_mapping(value)
+            profiles[profile.profile_id] = profile
+        for value in parsed.get("cache_policies") or []:
+            policy = cls._cache_policy_from_mapping(value)
+            policies[policy.policy_id] = policy
         for value in parsed.get("offerings") or []:
             offering = cls._offering_from_mapping(value, settings.deployment_id)
             offerings[offering.offering_id] = offering
@@ -231,6 +310,8 @@ class ModelControlPlane:
             revision=revision,
             connections=connections.values(),
             capability_contracts=contracts.values(),
+            protocol_profiles=profiles.values(),
+            cache_policies=policies.values(),
             offerings=offerings.values(),
             status=status,
             release_metadata=dict(parsed.get("release_metadata") or {}),
@@ -278,6 +359,8 @@ class ModelControlPlane:
         ]
 
         contracts = _builtin_contracts()
+        protocol_profiles = _builtin_protocol_profiles()
+        cache_policies = _builtin_cache_policies()
         offerings = [
             # Existing routes remain available and keep their prior semantics.
             ModelOffering(
@@ -286,6 +369,8 @@ class ModelControlPlane:
                 model_pattern=settings.route_gemini_model_pattern,
                 connection_id=settings.aihubmix_gemini_connection_id,
                 capability_contract_id="gemini-legacy-native",
+                protocol_profile_id="gemini-native-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=100,
                 deployment_id=deployment,
                 requires_file_adapter=True,
@@ -296,6 +381,8 @@ class ModelControlPlane:
                 model_pattern=settings.route_grok_model_pattern,
                 connection_id="aihubmix_default",
                 capability_contract_id="grok-legacy-responses",
+                protocol_profile_id="responses-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=100,
                 deployment_id=deployment,
             ),
@@ -305,6 +392,8 @@ class ModelControlPlane:
                 model_pattern=settings.route_kimi_model_pattern,
                 connection_id=settings.moonshot_connection_id,
                 capability_contract_id="kimi-legacy-moonshot",
+                protocol_profile_id="moonshot-chat-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=100,
                 deployment_id=deployment,
                 requires_file_adapter=True,
@@ -316,6 +405,8 @@ class ModelControlPlane:
                 model_pattern="claude-opus-5-5",
                 connection_id=settings.aihubmix_claude_connection_id,
                 capability_contract_id="claude-opus-5-5-adaptive",
+                protocol_profile_id="claude-messages-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -326,6 +417,8 @@ class ModelControlPlane:
                 model_pattern="claude-sonnet-5",
                 connection_id=settings.aihubmix_claude_connection_id,
                 capability_contract_id="claude-sonnet-5-adaptive",
+                protocol_profile_id="claude-messages-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -336,6 +429,8 @@ class ModelControlPlane:
                 model_pattern="grok-4.7",
                 connection_id="aihubmix_default",
                 capability_contract_id="grok-4-7-responses",
+                protocol_profile_id="responses-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -346,6 +441,8 @@ class ModelControlPlane:
                 model_pattern="gpt-6-luna",
                 connection_id="aihubmix_default",
                 capability_contract_id="gpt-6-reasoning",
+                protocol_profile_id="responses-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -356,6 +453,8 @@ class ModelControlPlane:
                 model_pattern="gpt-6-sol",
                 connection_id="aihubmix_default",
                 capability_contract_id="gpt-6-reasoning",
+                protocol_profile_id="responses-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -366,6 +465,8 @@ class ModelControlPlane:
                 model_pattern="gpt-6-astra",
                 connection_id="aihubmix_default",
                 capability_contract_id="gpt-6-astra-reasoning",
+                protocol_profile_id="responses-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -376,6 +477,8 @@ class ModelControlPlane:
                 model_pattern="coding-glm-5.3-free",
                 connection_id=settings.aihubmix_chat_connection_id,
                 capability_contract_id="glm-5-3-free-chat",
+                protocol_profile_id="chat-completions-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -387,6 +490,8 @@ class ModelControlPlane:
                 model_pattern="xiaomi-mimo-v2.6-pro-free",
                 connection_id=settings.aihubmix_chat_connection_id,
                 capability_contract_id="mimo-v2-6-chat",
+                protocol_profile_id="chat-completions-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -398,6 +503,8 @@ class ModelControlPlane:
                 model_pattern="gemini-3.8-flash",
                 connection_id=settings.aihubmix_gemini_connection_id,
                 capability_contract_id="gemini-3-8-native",
+                protocol_profile_id="gemini-native-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
                 priority=200,
                 deployment_id=deployment,
                 observed_model_policy="strict",
@@ -408,6 +515,8 @@ class ModelControlPlane:
             revision=settings.model_control_plane_revision,
             connections=connections,
             capability_contracts=contracts,
+            protocol_profiles=protocol_profiles,
+            cache_policies=cache_policies,
             offerings=offerings,
             status="published",
             release_metadata={"source": "builtin", "release_id": settings.model_control_plane_revision},
@@ -426,6 +535,12 @@ class ModelControlPlane:
 
     def contract(self, contract_id: str) -> CapabilityContract | None:
         return self.capability_contracts.get(contract_id)
+
+    def protocol_profile(self, profile_id: str | None) -> ProtocolProfileSpec | None:
+        return self.protocol_profiles.get(profile_id) if profile_id else None
+
+    def cache_policy(self, policy_id: str | None) -> CachePolicySpec | None:
+        return self.cache_policies.get(policy_id) if policy_id else None
 
     def credential(self, connection_id: str, settings: Settings) -> str | None:
         spec = self.connections.get(connection_id)
@@ -478,6 +593,14 @@ class ModelControlPlane:
             if offering.capability_contract_id not in self.capability_contracts:
                 raise ValueError(
                     f"Offering {offering.offering_id!r} references unknown capability contract {offering.capability_contract_id!r}"
+                )
+            if offering.protocol_profile_id and offering.protocol_profile_id not in self.protocol_profiles:
+                raise ValueError(
+                    f"Offering {offering.offering_id!r} references unknown protocol profile {offering.protocol_profile_id!r}"
+                )
+            if offering.cache_policy_id and offering.cache_policy_id not in self.cache_policies:
+                raise ValueError(
+                    f"Offering {offering.offering_id!r} references unknown cache policy {offering.cache_policy_id!r}"
                 )
             policy = offering.observed_model_policy.lower()
             if policy not in {"ignore", "audit", "strict"}:
@@ -541,6 +664,43 @@ class ModelControlPlane:
             input_modalities=tuple(str(x) for x in (value.get("input_modalities") or ["text"])),
             features=tuple(str(x) for x in (value.get("features") or [])),
             provider_defaults=dict(value.get("provider_defaults") or {}),
+            cache=dict(value.get("cache") or {}),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+    @staticmethod
+    def _profile_from_mapping(value: Any) -> ProtocolProfileSpec:
+        if not isinstance(value, dict):
+            raise ValueError("Each protocol profile must be an object")
+        profile_id = str(value.get("profile_id") or "").strip()
+        revision = str(value.get("revision") or "").strip()
+        protocol = str(value.get("protocol") or "").strip().lower()
+        if not profile_id or not revision or not protocol:
+            raise ValueError("Protocol profiles require profile_id, revision and protocol")
+        return ProtocolProfileSpec(
+            profile_id=profile_id,
+            revision=revision,
+            protocol=protocol,
+            cache=dict(value.get("cache") or {}),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+    @staticmethod
+    def _cache_policy_from_mapping(value: Any) -> CachePolicySpec:
+        if not isinstance(value, dict):
+            raise ValueError("Each cache policy must be an object")
+        policy_id = str(value.get("policy_id") or value.get("id") or "").strip()
+        revision = str(value.get("revision") or "").strip()
+        if not policy_id or not revision:
+            raise ValueError("Cache policies require policy_id/id and revision")
+        return CachePolicySpec(
+            policy_id=policy_id,
+            revision=revision,
+            scope=str(value.get("scope") or "session"),
+            mechanism_preference=tuple(str(x) for x in (value.get("mechanism_preference") or [])),
+            auto_prepare_failure=str(value.get("auto_prepare_failure") or "uncached_same_context"),
+            on_prepare_failure=str(value.get("on_prepare_failure") or "fail"),
+            cross_session_sharing=bool(value.get("cross_session_sharing", False)),
             metadata=dict(value.get("metadata") or {}),
         )
 
@@ -559,6 +719,8 @@ class ModelControlPlane:
             raise ValueError("Model offerings require offering_id, provider, model_pattern, connection_id and capability_contract_id")
         return ModelOffering(
             **required,
+            protocol_profile_id=(str(value.get("protocol_profile_id")) if value.get("protocol_profile_id") else None),
+            cache_policy_id=(str(value.get("cache_policy_id")) if value.get("cache_policy_id") else None),
             priority=int(value.get("priority", 100)),
             deployment_id=str(value.get("deployment_id") or default_deployment),
             requires_file_adapter=bool(value.get("requires_file_adapter", False)),
@@ -593,6 +755,7 @@ def _contract(
     modalities: tuple[str, ...] = ("text",),
     features: tuple[str, ...] = (),
     provider_defaults: dict[str, Any] | None = None,
+    cache: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> CapabilityContract:
     return CapabilityContract(
@@ -604,8 +767,74 @@ def _contract(
         input_modalities=modalities,
         features=features,
         provider_defaults=dict(provider_defaults or {}),
+        cache=dict(cache or {}),
         metadata=dict(metadata or {}),
     )
+
+
+def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
+    return [
+        ProtocolProfileSpec(
+            profile_id="responses-aihubmix-v1",
+            revision="relay-protocol-profile/responses-aihubmix/2026-09-30.1",
+            protocol="responses",
+            cache={
+                "supported_mechanisms": ["implicit_prefix"],
+                "prompt_cache_key_field": "prompt_cache_key",
+                "usage_mapping": "openai_compatible",
+            },
+        ),
+        ProtocolProfileSpec(
+            profile_id="claude-messages-aihubmix-v1",
+            revision="relay-protocol-profile/claude-aihubmix/2026-09-30.1",
+            protocol="claude_messages",
+            cache={
+                "supported_mechanisms": ["breakpoint"],
+                "cache_control_field": "cache_control",
+                "usage_mapping": "claude_messages",
+            },
+        ),
+        ProtocolProfileSpec(
+            profile_id="gemini-native-aihubmix-v1",
+            revision="relay-protocol-profile/gemini-aihubmix/2026-09-30.1",
+            protocol="gemini_native",
+            cache={
+                "supported_mechanisms": ["stateful_resource"],
+                "resource_family": "cachedContents",
+                "usage_mapping": "gemini_native",
+            },
+        ),
+        ProtocolProfileSpec(
+            profile_id="chat-completions-aihubmix-v1",
+            revision="relay-protocol-profile/chat-aihubmix/2026-09-30.1",
+            protocol="chat_completions",
+            cache={"supported_mechanisms": [], "usage_mapping": "openai_compatible"},
+        ),
+        ProtocolProfileSpec(
+            profile_id="moonshot-chat-v1",
+            revision="relay-protocol-profile/moonshot/2026-09-30.1",
+            protocol="moonshot_chat",
+            cache={"supported_mechanisms": [], "usage_mapping": "openai_compatible"},
+        ),
+    ]
+
+
+def _builtin_cache_policies() -> list[CachePolicySpec]:
+    return [
+        CachePolicySpec(
+            policy_id="session-private-cache-policy-v1",
+            revision="relay-cache-policy/session-private/2026-09-30.1",
+            scope="session",
+            mechanism_preference=("stateful_resource", "breakpoint", "implicit_prefix"),
+            auto_prepare_failure="uncached_same_context",
+            on_prepare_failure="fail",
+            cross_session_sharing=False,
+            metadata={
+                "below_minimum": "none",
+                "assessment_uncertain": "none",
+            },
+        )
+    ]
 
 
 def _builtin_contracts() -> list[CapabilityContract]:
@@ -625,6 +854,14 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "level_map": {},
                 "wire_strategy": "gemini_thinking_level",
             },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["stateful_resource"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {
+                    "stateful_resource": {"threshold_mode": "unknown"}
+                },
+            },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
         ),
@@ -637,6 +874,14 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "accepted_levels": ["auto", "low", "medium", "high"],
                 "level_map": {},
                 "wire_strategy": "gemini_thinking_level",
+            },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["stateful_resource"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {
+                    "stateful_resource": {"threshold_mode": "unknown"}
+                },
             },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
@@ -652,6 +897,18 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "wire_strategy": "responses_reasoning_effort",
                 "include_encrypted_reasoning": True,
             },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["implicit_prefix"],
+                "verification_status": "legacy_verified",
+                "mechanism_profiles": {
+                    "implicit_prefix": {
+                        "threshold_mode": "not_applicable",
+                        "key_source": "legacy_session_prompt_cache_key",
+                        "send_prompt_cache_key": True,
+                    }
+                },
+            },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
         ),
@@ -665,6 +922,18 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "level_map": {},
                 "wire_strategy": "responses_reasoning_effort",
                 "include_encrypted_reasoning": True,
+            },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["implicit_prefix"],
+                "verification_status": "legacy_verified",
+                "mechanism_profiles": {
+                    "implicit_prefix": {
+                        "threshold_mode": "not_applicable",
+                        "key_source": "legacy_session_prompt_cache_key",
+                        "send_prompt_cache_key": True,
+                    }
+                },
             },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
@@ -683,6 +952,12 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "level_map": {"auto": "medium"},
                 "wire_strategy": "responses_reasoning_effort",
             },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["implicit_prefix"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {"implicit_prefix": {"threshold_mode": "unknown"}},
+            },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
         ),
@@ -695,6 +970,12 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "accepted_levels": ["auto", "low", "medium", "high", "xhigh", "max"],
                 "level_map": {"auto": "medium"},
                 "wire_strategy": "responses_reasoning_effort",
+            },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["implicit_prefix"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {"implicit_prefix": {"threshold_mode": "unknown"}},
             },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
@@ -709,6 +990,14 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "level_map": {"auto": "medium"},
                 "wire_strategy": "claude_adaptive_effort",
             },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["breakpoint"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {
+                    "breakpoint": {"threshold_mode": "unknown", "max_breakpoints": 1}
+                },
+            },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),
             provider_defaults={"max_output_tokens": 8192},
@@ -722,6 +1011,14 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "accepted_levels": ["auto", "off", "low", "medium", "high", "xhigh", "max"],
                 "level_map": {"auto": "high"},
                 "wire_strategy": "claude_adaptive_effort",
+            },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["breakpoint"],
+                "verification_status": "candidate",
+                "mechanism_profiles": {
+                    "breakpoint": {"threshold_mode": "unknown", "max_breakpoints": 1}
+                },
             },
             structured_mode="native_json_schema",
             modalities=("text", "image", "document"),

@@ -53,6 +53,14 @@ class RouteBinding:
     capability_contract_id: str | None = None
     capability_contract_hash: str | None = None
     capability_contract: dict[str, Any] | None = None
+    protocol_profile_id: str | None = None
+    protocol_profile_hash: str | None = None
+    protocol_profile: dict[str, Any] | None = None
+    cache_policy_id: str | None = None
+    cache_policy_hash: str | None = None
+    cache_policy: dict[str, Any] | None = None
+    cache_contract_hash: str | None = None
+    cache_contract: dict[str, Any] | None = None
     control_plane_hash: str | None = None
     capability_requirements: dict[str, Any] = field(default_factory=dict)
     observed_model_policy: str = "audit"
@@ -76,6 +84,14 @@ class RouteBinding:
             "capability_contract_id": self.capability_contract_id,
             "capability_contract_hash": self.capability_contract_hash,
             "capability_contract": self.capability_contract,
+            "protocol_profile_id": self.protocol_profile_id,
+            "protocol_profile_hash": self.protocol_profile_hash,
+            "protocol_profile": self.protocol_profile,
+            "cache_policy_id": self.cache_policy_id,
+            "cache_policy_hash": self.cache_policy_hash,
+            "cache_policy": self.cache_policy,
+            "cache_contract_hash": self.cache_contract_hash,
+            "cache_contract": self.cache_contract,
             "control_plane_hash": self.control_plane_hash,
             "capability_requirements": self.capability_requirements,
             "observed_model_policy": self.observed_model_policy,
@@ -387,6 +403,25 @@ class RouteResolver:
                 if capability_contract
                 else None
             )
+            protocol_profile = dict(selected.protocol_profile or {}) or None
+            cache_policy = dict(selected.cache_policy or {}) or None
+            cache_contract = (
+                dict((capability_contract or {}).get("cache") or {})
+                if isinstance((capability_contract or {}).get("cache"), dict)
+                else None
+            )
+            protocol_profile_hash = (
+                hashlib.sha256(json.dumps(protocol_profile, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                if protocol_profile else None
+            )
+            cache_policy_hash = (
+                hashlib.sha256(json.dumps(cache_policy, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                if cache_policy else None
+            )
+            cache_contract_hash = (
+                hashlib.sha256(json.dumps(cache_contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                if cache_contract else None
+            )
             canonical = {
                 "provider": provider_n,
                 "model": model_n,
@@ -403,6 +438,11 @@ class RouteResolver:
                 "capability_revision": capability_revision,
                 "capability_contract_id": selected.capability_contract_id,
                 "capability_contract_hash": capability_hash,
+                "protocol_profile_id": selected.protocol_profile_id,
+                "protocol_profile_hash": protocol_profile_hash,
+                "cache_policy_id": selected.cache_policy_id,
+                "cache_policy_hash": cache_policy_hash,
+                "cache_contract_hash": cache_contract_hash,
                 "capability_requirements": req,
                 "observed_model_policy": selected.observed_model_policy,
             }
@@ -427,6 +467,14 @@ class RouteResolver:
                 capability_contract_id=selected.capability_contract_id,
                 capability_contract_hash=capability_hash,
                 capability_contract=capability_contract,
+                protocol_profile_id=selected.protocol_profile_id,
+                protocol_profile_hash=protocol_profile_hash,
+                protocol_profile=protocol_profile,
+                cache_policy_id=selected.cache_policy_id,
+                cache_policy_hash=cache_policy_hash,
+                cache_policy=cache_policy,
+                cache_contract_hash=cache_contract_hash,
+                cache_contract=cache_contract,
                 control_plane_hash=self.catalog.control_plane_hash,
                 capability_requirements=req,
                 observed_model_policy=selected.observed_model_policy,
@@ -452,6 +500,9 @@ class RouteResolver:
                 file_adapter_version=binding.file_adapter_version,
                 capability_revision=binding.capability_revision,
                 capability_contract_id=binding.capability_contract_id,
+                protocol_profile_id=binding.protocol_profile_id,
+                cache_policy_id=binding.cache_policy_id,
+                cache_contract_hash=binding.cache_contract_hash,
                 rejected_candidate_count=len(rejections),
             )
             return binding

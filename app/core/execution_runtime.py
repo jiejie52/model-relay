@@ -6,6 +6,10 @@ from typing import Any
 from uuid import uuid4
 
 from ..config import Settings
+from ..cache.contracts import CacheDecisionError, ExecutionFence
+from ..cache.orchestrator import CacheOrchestrator
+from ..cache.usage import normalize_cache_usage
+from .idempotency import stable_hash
 from ..materials.resolver import MaterialResolver
 from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
@@ -37,6 +41,7 @@ class SharedExecutionRuntime:
         materials: MaterialResolver,
         bindings: BindingResolver,
         settings: Settings,
+        cache_orchestrator: CacheOrchestrator | None = None,
     ) -> None:
         self.repo = repo
         self.storage = storage
@@ -44,6 +49,7 @@ class SharedExecutionRuntime:
         self.materials = materials
         self.bindings = bindings
         self.settings = settings
+        self.cache = cache_orchestrator or CacheOrchestrator(repo)
 
     async def execute(
         self,
@@ -96,6 +102,20 @@ class SharedExecutionRuntime:
         # Stable order, no duplicate provider binding work.
         material_ids = list(dict.fromkeys(material_ids))
 
+        is_v3 = str(snapshot.get("schema_version") or "") == "relay-request/2.3"
+        fence: ExecutionFence | None = None
+        if is_v3:
+            if not lease_owner or lease_epoch is None:
+                raise ProviderRequestError(
+                    "CACHE_BINDING_FENCE_REJECTED",
+                    "Cache-aware Request has no active execution fence",
+                )
+            fence = ExecutionFence(
+                owner=str(lease_owner),
+                epoch=int(lease_epoch),
+                kind="async_job" if request_row.get("job_id") else "sync_request",
+            )
+
         existing_binding_snapshot = request_row.get("material_binding_snapshot")
         if not isinstance(existing_binding_snapshot, list):
             existing_binding_snapshot = None
@@ -121,19 +141,101 @@ class SharedExecutionRuntime:
             duration_ms=elapsed_ms(binding_started_ms),
         )
         if existing_binding_snapshot is None:
+            if is_v3 and fence is not None:
+                installed = await self.repo.install_request_material_binding_v3(
+                    request_id=request_id,
+                    snapshot=material_bindings,
+                    fence_owner=fence.owner,
+                    fence_epoch=fence.epoch,
+                )
+                if not installed:
+                    raise ProviderRequestError(
+                        "CACHE_BINDING_FENCE_REJECTED",
+                        "Material binding snapshot was rejected by the Request execution fence",
+                    )
+            else:
+                await self.repo.update_request(
+                    request_row["id"],
+                    {"material_binding_snapshot": material_bindings},
+                )
+
+        context_plan = snapshot.get("context_plan") if isinstance(snapshot.get("context_plan"), dict) else None
+        cache_binding = None
+        execution_snapshot = snapshot
+        if is_v3:
+            if context_plan is None or fence is None:
+                raise ProviderRequestError(
+                    "CACHE_CONTEXT_MISMATCH",
+                    "Cache-aware Request is missing its frozen ContextPlan",
+                )
+            try:
+                cache_binding_obj = await self.cache.prepare(
+                    request_row=request_row,
+                    snapshot=snapshot,
+                    session=session,
+                    context_plan=context_plan,
+                    material_bindings=material_bindings,
+                    fence=fence,
+                )
+            except CacheDecisionError as exc:
+                raise ProviderRequestError(exc.code, exc.message) from exc
+            cache_binding = cache_binding_obj.canonical(include_provider_handle=True)
+            binding_hash = cache_binding_obj.binding_hash
+            installed = await self.repo.install_cache_binding_v3(
+                request_id=request_id,
+                binding_version=cache_binding_obj.binding_version,
+                plan_hash=cache_binding_obj.plan_hash,
+                binding_hash=binding_hash,
+                final_mechanism=cache_binding_obj.mechanism,
+                resource_id=cache_binding_obj.resource_id,
+                resource_generation=cache_binding_obj.resource_generation,
+                metadata=cache_binding,
+                fence_owner=fence.owner,
+                fence_epoch=fence.epoch,
+            )
+            if not installed:
+                raise ProviderRequestError(
+                    "CACHE_BINDING_FENCE_REJECTED",
+                    "Cache execution binding was rejected by the Request execution fence",
+                )
+
+            # This digest covers the exact frozen inputs supplied to the Adapter.
+            # Provider-specific byte-level payload builders can strengthen this
+            # to a native-wire digest without changing the dispatch transaction.
+            prepared_payload_hash = stable_hash(
+                {
+                    "schema_version": "relay-prepared-execution/1",
+                    "snapshot": snapshot,
+                    "history": history,
+                    "material_bindings": material_bindings,
+                    "cache_binding": cache_binding,
+                }
+            )
+            sealed = await self.repo.seal_cache_and_dispatch_v3(
+                request_id=request_id,
+                binding_version=cache_binding_obj.binding_version,
+                binding_hash=binding_hash,
+                payload_hash=prepared_payload_hash,
+                fence_owner=fence.owner,
+                fence_epoch=fence.epoch,
+            )
+            if not sealed:
+                raise ProviderRequestError(
+                    "CACHE_BINDING_FENCE_REJECTED",
+                    "Request dispatch seal was rejected; Provider dispatch is forbidden",
+                )
+            execution_snapshot = dict(snapshot)
+            execution_snapshot["_relay_cache_execution"] = cache_binding
+        else:
             await self.repo.update_request(
                 request_row["id"],
-                {"material_binding_snapshot": material_bindings},
+                {
+                    "provider_dispatch_state": "dispatch_started",
+                    "started_at": request_row.get("started_at") or utcnow().isoformat(),
+                },
             )
 
         adapter = self.providers.get_v2(str(snapshot["connection_id"]))
-        await self.repo.update_request(
-            request_row["id"],
-            {
-                "provider_dispatch_state": "dispatch_started",
-                "started_at": request_row.get("started_at") or utcnow().isoformat(),
-            },
-        )
         provider_started_ms = now_ms()
         metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
         input_value = snapshot.get("input") if isinstance(snapshot.get("input"), dict) else {}
@@ -151,11 +253,12 @@ class SharedExecutionRuntime:
             phase="model_inference",
             business_stage=business_stage,
             material_count=len(material_ids),
+            cache_mechanism=(cache_binding or {}).get("mechanism"),
         )
         try:
             result = await adapter.execute(
                 V2ExecutionContext(
-                    snapshot=snapshot,
+                    snapshot=execution_snapshot,
                     session=session,
                     history=history,
                     material_ids=material_ids,
@@ -164,6 +267,9 @@ class SharedExecutionRuntime:
                     conversation_hash=request_row["conversation_hash"],
                     request_id=request_id,
                     session_id=session_id,
+                    context_plan=context_plan,
+                    cache_execution_binding=cache_binding,
+                    execution_fence=(fence.canonical() if fence is not None else None),
                 )
             )
         except Exception as exc:
@@ -221,14 +327,15 @@ class SharedExecutionRuntime:
         # Persist the upstream success body before any Relay parser/schema gate.
         # If validation fails, the original 2xx entity remains available for
         # diagnosis instead of being replaced by a synthetic Relay error.
-        await self.repo.update_request(
-            request_row["id"],
-            {
-                "provisional_result_object_id": raw_object_id,
-                "provisional_output_object_id": output_object_id,
-                "provider_response_id": result.response_id,
-            },
-        )
+        if not is_v3:
+            await self.repo.update_request(
+                request_row["id"],
+                {
+                    "provisional_result_object_id": raw_object_id,
+                    "provisional_output_object_id": output_object_id,
+                    "provider_response_id": result.response_id,
+                },
+            )
 
         self._check_observed_contract(
             snapshot,
@@ -283,6 +390,25 @@ class SharedExecutionRuntime:
             "response_output_object_id": output_object_id,
             "observed": result.observed or {},
         }
+        cache_usage = None
+        if is_v3:
+            plan = snapshot.get("cache_plan") if isinstance(snapshot.get("cache_plan"), dict) else {}
+            usage_observation = normalize_cache_usage(
+                protocol=(str(snapshot.get("protocol")) if snapshot.get("protocol") else None),
+                usage=result.usage,
+                effective_mechanism=(cache_binding or {}).get("mechanism"),
+                requested_mode=str(snapshot.get("requested_cache_mode") or "auto"),
+            )
+            cache_usage = usage_observation.canonical()
+            compact_result["cache"] = {
+                "requested_cache_mode": snapshot.get("requested_cache_mode"),
+                "planned_mechanism": plan.get("planned_mechanism"),
+                "effective_cache_mechanism": (cache_binding or {}).get("mechanism"),
+                "execution_mechanism": (cache_binding or {}).get("mechanism"),
+                "resolution_status": plan.get("resolution_status") or "finalized",
+                "decision_reason": (cache_binding or {}).get("decision_reason") or plan.get("decision_reason"),
+                **cache_usage,
+            }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
                 str(compact_result.get("text") or ""),
@@ -305,30 +431,59 @@ class SharedExecutionRuntime:
                 int(request_row["expected_history_version"]) + 1,
             )
 
-        await self.repo.update_request(
-            request_row["id"],
-            {
-                "provider_dispatch_state": "result_stored",
-                "provisional_result_object_id": raw_object_id,
-                "provisional_output_object_id": output_object_id,
-                "provisional_history_object_id": history_object_id,
-                "provisional_compact_result": compact_result,
-                "provider_response_id": result.response_id,
-            },
-        )
-
-        ok = await self.repo.complete_request(
-            request_id=request_row["id"],
-            session_id=request_row["session_id"],
-            history_object_id=history_object_id,
-            result_object_id=raw_object_id,
-            output_object_id=output_object_id,
-            compact_result=compact_result,
-            provider_response_id=result.response_id,
-            expected_history_version=int(request_row["expected_history_version"]),
-            lease_owner=lease_owner,
-            lease_epoch=lease_epoch,
-        )
+        if is_v3:
+            assert fence is not None
+            stored = await self.repo.store_result_v3(
+                request_id=request_id,
+                result_object_id=raw_object_id,
+                output_object_id=output_object_id,
+                history_object_id=history_object_id,
+                compact_result=compact_result,
+                provider_response_id=result.response_id,
+                cache_usage=cache_usage,
+                fence_owner=fence.owner,
+                fence_epoch=fence.epoch,
+            )
+            if not stored:
+                raise SessionConflictError(
+                    "Provider result was archived but a stale execution fence could not publish result_stored"
+                )
+            ok = await self.repo.complete_request_v3(
+                request_id=request_id,
+                session_id=session_id,
+                history_object_id=history_object_id,
+                result_object_id=raw_object_id,
+                output_object_id=output_object_id,
+                compact_result=compact_result,
+                provider_response_id=result.response_id,
+                expected_history_version=int(request_row["expected_history_version"]),
+                fence_owner=fence.owner,
+                fence_epoch=fence.epoch,
+            )
+        else:
+            await self.repo.update_request(
+                request_row["id"],
+                {
+                    "provider_dispatch_state": "result_stored",
+                    "provisional_result_object_id": raw_object_id,
+                    "provisional_output_object_id": output_object_id,
+                    "provisional_history_object_id": history_object_id,
+                    "provisional_compact_result": compact_result,
+                    "provider_response_id": result.response_id,
+                },
+            )
+            ok = await self.repo.complete_request(
+                request_id=request_row["id"],
+                session_id=request_row["session_id"],
+                history_object_id=history_object_id,
+                result_object_id=raw_object_id,
+                output_object_id=output_object_id,
+                compact_result=compact_result,
+                provider_response_id=result.response_id,
+                expected_history_version=int(request_row["expected_history_version"]),
+                lease_owner=lease_owner,
+                lease_epoch=lease_epoch,
+            )
         if not ok:
             raise SessionConflictError(
                 "Request result was persisted but the atomic Session commit was rejected"
@@ -492,6 +647,19 @@ class SharedExecutionRuntime:
                     "ROUTE_BINDING_MISMATCH",
                     "Request route binding hash does not match the frozen Session route",
                 )
+            if str(snapshot.get("schema_version") or "") == "relay-request/2.3":
+                for key, code in (
+                    ("protocol_profile_hash", "CACHE_CONTEXT_MISMATCH"),
+                    ("cache_policy_hash", "CACHE_CONTEXT_MISMATCH"),
+                    ("cache_contract_hash", "CACHE_CONTEXT_MISMATCH"),
+                ):
+                    frozen_value = str(route.get(key) or "")
+                    request_value = str(snapshot.get(key) or "")
+                    if frozen_value and request_value != frozen_value:
+                        raise ProviderRequestError(
+                            code,
+                            f"Request {key} does not match the frozen Session cache contract",
+                        )
 
         adapter_meta = self.providers.describe(expected["connection_id"])
         if adapter_meta is None:

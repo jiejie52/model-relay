@@ -9,6 +9,7 @@ from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
+from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..materials.gemini_transport import project_gemini_input_content_type
 from ..structured_output import project_schema_for_provider, resolve_structured_output
 
@@ -205,7 +206,7 @@ class GeminiNativeAdapter:
         generationConfig so a pre-upgrade temperature Request can resume safely;
         other legacy keys retain their former compatibility behavior.
         """
-        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+        if str(snapshot.get("schema_version") or "") in CANONICAL_REQUEST_VERSIONS:
             options = snapshot.get("effective_options") or {}
             if not isinstance(options, dict):
                 return

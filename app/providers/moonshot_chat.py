@@ -9,6 +9,7 @@ from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import read_raw_response, decode_entity
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
+from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..materials.resolver import MaterialResolver
 from ..structured_output import resolve_structured_output
 from ..v2_repository import RelayV2Repository
@@ -222,7 +223,7 @@ class MoonshotChatAdapter:
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
-        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+        if str(snapshot.get("schema_version") or "") in CANONICAL_REQUEST_VERSIONS:
             options = snapshot.get("effective_options") or {}
             if isinstance(options, dict):
                 if "temperature" in options:

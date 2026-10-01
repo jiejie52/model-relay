@@ -11,8 +11,11 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from pydantic import ValidationError
 
-from ..core.idempotency import request_identity, stable_hash
+from ..core.idempotency import caller_intent_hash, request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
+from ..cache.context_plan import build_context_plan
+from ..cache.intent_resolver import CacheIntentResolver
+from ..cache.contracts import CacheDecisionError
 from ..materials.ingress import MaterialIngressError
 from ..model_options import (
     CAPABILITY_PROFILE_REVISION,
@@ -64,6 +67,42 @@ def _route_resolver(request: Request):
 
 def _storage(request: Request):
     return request.app.state.storage_registry
+
+
+async def _store_request_json_artifact(
+    request: Request,
+    *,
+    tenant_id: str,
+    conversation_hash: str,
+    session_id: str,
+    request_id: str,
+    filename: str,
+    value: Any,
+) -> str:
+    """Persist an immutable Request-side JSON artifact and return relay_objects.id."""
+    object_id = f"obj_{uuid4().hex}"
+    raw = json_bytes(value)
+    digest = hashlib.sha256(raw).hexdigest()
+    path = request_object_path_v2(
+        _settings(request), tenant_id, conversation_hash, session_id, request_id, filename
+    )
+    backend = _storage(request).get(_settings(request).default_storage_id)
+    location = await backend.put_bytes(path, raw, content_type="application/json")
+    await _repo(request).create_object(
+        {
+            "id": object_id,
+            "tenant_id": tenant_id,
+            "conversation_hash": conversation_hash,
+            "storage_id": location.storage_id,
+            "bucket": location.bucket,
+            "object_key": location.key,
+            "sha256": digest,
+            "size_bytes": len(raw),
+            "content_type": "application/json",
+            "created_at": utcnow().isoformat(),
+        }
+    )
+    return object_id
 
 
 def _inline(request: Request):
@@ -120,6 +159,9 @@ def _session_response(row: dict[str, Any]) -> SessionResponse:
         protocol=(str(route.get("protocol")) if route.get("protocol") else None),
         capability_contract_id=(str(route.get("capability_contract_id")) if route.get("capability_contract_id") else None),
         control_plane_hash=(str(route.get("control_plane_hash")) if route.get("control_plane_hash") else None),
+        protocol_profile_id=(str(route.get("protocol_profile_id")) if route.get("protocol_profile_id") else None),
+        cache_policy_id=(str(route.get("cache_policy_id")) if route.get("cache_policy_id") else None),
+        cache_contract_hash=(str(route.get("cache_contract_hash")) if route.get("cache_contract_hash") else None),
         created_at=_dt(row.get("created_at")),
         expires_at=_dt(row.get("expires_at")),
     )
@@ -128,6 +170,16 @@ def _session_response(row: dict[str, Any]) -> SessionResponse:
 def _request_envelope(row: dict[str, Any]) -> RequestEnvelope:
     error = row.get("error") if isinstance(row.get("error"), dict) else None
     execution_mode = str(row.get("execution_mode") or "async")
+    cache_summary = None
+    compact = row.get("compact_result") if isinstance(row.get("compact_result"), dict) else None
+    if compact and isinstance(compact.get("cache"), dict):
+        cache_summary = compact.get("cache")
+    else:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if isinstance(metadata.get("_relay_cache"), dict):
+            cache_summary = dict(metadata.get("_relay_cache") or {})
+        if isinstance(row.get("cache_usage"), dict):
+            cache_summary = {**(cache_summary or {}), **row["cache_usage"]}
     return RequestEnvelope(
         session_id=UUID(str(row["session_id"])),
         request_id=UUID(str(row["id"])),
@@ -137,6 +189,7 @@ def _request_envelope(row: dict[str, Any]) -> RequestEnvelope:
         history_version=int(row.get("completed_history_version") or row.get("expected_history_version") or 0),
         result=row.get("compact_result") if isinstance(row.get("compact_result"), dict) else None,
         error=error,
+        cache=cache_summary,
         poll_after_seconds=5 if row.get("status") in {"queued", "leased", "running"} else None,
     )
 
@@ -882,7 +935,7 @@ async def create_session(
             "material_manifest": body.material_ids,
             "active_request_id": None,
             "execution_pool": route.execution_pool,
-            "protocol_version": "v2.1",
+            "protocol_version": "v3.0",
             "idempotency_key": idempotency_key,
             "session_hash": session_hash,
             "metadata": session_metadata,
@@ -953,6 +1006,7 @@ async def create_request(
     )
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
     settings = _settings(request)
     if str(session.get("execution_pool") or "") != settings.execution_pool:
         raise HTTPException(
@@ -969,6 +1023,50 @@ async def create_request(
     connection_id = str(session.get("connection_id") or "")
     model = str(session["model"])
     caller_version = request.headers.get("x-relay-client-version")
+    session_protocol = str(session.get("protocol_version") or "v2.1").lower()
+    cache_contract_session = session_protocol.startswith("v3")
+    cache_field_explicit = "requested_cache_mode" in body.model_fields_set
+    if not cache_contract_session and cache_field_explicit:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CACHE_CONTRACT_UPGRADE_REQUIRED",
+                "message": "Create a new Session before using requested_cache_mode",
+            },
+        )
+
+    protected_metadata = [
+        str(key) for key in body.metadata if str(key).startswith("_relay_cache")
+    ]
+    if protected_metadata:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "CACHE_CONTROL_OVERRIDE_FORBIDDEN",
+                "message": "Caller metadata cannot override Relay cache-control fields",
+                "fields": protected_metadata,
+            },
+        )
+    if cache_contract_session:
+        native_cache_keys = {
+            "prompt_cache_key",
+            "cache_control",
+            "cachedContent",
+            "cached_content",
+            "cache_ttl",
+            "ttl",
+        }
+        attempted = sorted(native_cache_keys.intersection(body.provider_payload))
+        if attempted:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "CACHE_CONTROL_OVERRIDE_FORBIDDEN",
+                    "message": "Provider-native cache controls are server-governed",
+                    "fields": attempted,
+                },
+            )
+
     legacy_mismatches: dict[str, Any] = {}
     if body.provider is not None and str(body.provider) != provider:
         legacy_mismatches["provider"] = {"client": body.provider, "session": provider}
@@ -997,10 +1095,53 @@ async def create_request(
                     "message": "Request route hints do not match the frozen Session route",
                 },
             )
+
+    requested_cache_mode = body.requested_cache_mode if cache_contract_session else None
+    public_intent = {
+        "input": body.input,
+        "instructions": body.instructions,
+        "material_ids": body.material_ids,
+        "provider": provider,
+        "model": model,
+        "think_level": body.think_level,
+        "execution": body.execution.model_dump(mode="json"),
+        "structured_output": body.structured_output,
+        "options": body.options,
+        # provider_payload remains a public migration input. Even though v3
+        # only accepts aliases that can be normalized into canonical options,
+        # changing it under the same Idempotency-Key must not silently reuse an
+        # earlier Request.
+        "provider_payload": body.provider_payload,
+        "requested_cache_mode": requested_cache_mode,
+        "metadata": body.metadata,
+    }
+    public_intent_hash = caller_intent_hash(public_intent)
+
+    # Cache-aware Requests must replay their original interpretation before any
+    # current cache inventory, token measurement or policy is consulted.
+    existing = await repo.find_request_by_idempotency(session_id, idempotency_key)
+    if existing and str(existing.get("request_identity_version") or "") == "relay-request/2.3":
+        if str(existing.get("caller_intent_hash") or "") != public_intent_hash:
+            raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT")
+        log_info(
+            logger,
+            "request_idempotent_reuse",
+            request_id=existing.get("id"),
+            session_id=existing.get("session_id"),
+            job_id=existing.get("job_id"),
+            execution_mode=existing.get("execution_mode"),
+            status=existing.get("status"),
+            connection_id=existing.get("connection_id"),
+            model=existing.get("model"),
+            identity_version="relay-request/2.3",
+        )
+        return await _request_envelope_hydrated(request, existing)
+
     effective_material_ids = list(body.material_ids)
     if session.get("context_policy") == "conversation" and isinstance(session.get("material_manifest"), list):
         effective_material_ids = [str(x) for x in session.get("material_manifest") or []] + effective_material_ids
     effective_material_ids = list(dict.fromkeys(effective_material_ids))
+
     session_metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
     frozen_route = session_metadata.get("_relay_route") if isinstance(session_metadata.get("_relay_route"), dict) else {}
     if frozen_route:
@@ -1022,6 +1163,14 @@ async def create_request(
             capability_contract_id=(str(frozen_route.get("capability_contract_id")) if frozen_route.get("capability_contract_id") else None),
             capability_contract_hash=(str(frozen_route.get("capability_contract_hash")) if frozen_route.get("capability_contract_hash") else None),
             capability_contract=(dict(frozen_route.get("capability_contract")) if isinstance(frozen_route.get("capability_contract"), dict) else None),
+            protocol_profile_id=(str(frozen_route.get("protocol_profile_id")) if frozen_route.get("protocol_profile_id") else None),
+            protocol_profile_hash=(str(frozen_route.get("protocol_profile_hash")) if frozen_route.get("protocol_profile_hash") else None),
+            protocol_profile=(dict(frozen_route.get("protocol_profile")) if isinstance(frozen_route.get("protocol_profile"), dict) else None),
+            cache_policy_id=(str(frozen_route.get("cache_policy_id")) if frozen_route.get("cache_policy_id") else None),
+            cache_policy_hash=(str(frozen_route.get("cache_policy_hash")) if frozen_route.get("cache_policy_hash") else None),
+            cache_policy=(dict(frozen_route.get("cache_policy")) if isinstance(frozen_route.get("cache_policy"), dict) else None),
+            cache_contract_hash=(str(frozen_route.get("cache_contract_hash")) if frozen_route.get("cache_contract_hash") else None),
+            cache_contract=(dict(frozen_route.get("cache_contract")) if isinstance(frozen_route.get("cache_contract"), dict) else None),
             control_plane_hash=(str(frozen_route.get("control_plane_hash")) if frozen_route.get("control_plane_hash") else None),
             capability_requirements=(dict(frozen_route.get("capability_requirements")) if isinstance(frozen_route.get("capability_requirements"), dict) else {}),
             observed_model_policy=str(frozen_route.get("observed_model_policy") or "audit"),
@@ -1034,7 +1183,9 @@ async def create_request(
             conversation_hash=conversation_hash,
             route=session_route,
         )
+
     material_hashes: dict[str, str] = {}
+    material_rows: list[dict[str, Any]] = []
     material_total_bytes = 0
     for material_id in effective_material_ids:
         material = await repo.get_material(
@@ -1042,6 +1193,7 @@ async def create_request(
         )
         if not material or material.get("status") in {"failed", "deleted", "reupload_required", "receiving", "binding"}:
             raise HTTPException(status_code=409, detail=f"Material is not usable: {material_id}")
+        material_rows.append(material)
         material_hashes[material_id] = str(material.get("sha256") or "")
         raw_size = material.get("actual_size")
         if raw_size is None:
@@ -1134,14 +1286,14 @@ async def create_request(
             capability_revision=resolved_options.capability_revision,
         )
 
-    snapshot = {
-        "schema_version": "relay-request/2.2",
+    base_snapshot = {
         "session_id": str(session_id),
         "tenant_id": tenant_id,
         "conversation_hash": conversation_hash,
         "input": body.input,
         "instructions": body.instructions,
         "material_ids": body.material_ids,
+        "effective_material_ids": effective_material_ids,
         "material_hashes": material_hashes,
         "material_total_bytes": material_total_bytes,
         "provider": provider,
@@ -1165,87 +1317,191 @@ async def create_request(
         "structured_output_guarantee": structured_output_guarantee,
         "options": resolved_options.requested_options,
         "effective_options": resolved_options.effective_options,
-        # Retained only for audit/migration diagnostics. v2.2 Adapters never
-        # merge this object into provider-native JSON.
         "provider_payload": body.provider_payload,
         "metadata": body.metadata,
     }
-    req_hash = request_identity(snapshot)
-    # Narrow upgrade compatibility: a v2.1 caller may replay a Request accepted
-    # before 0.5.5 using provider_payload. Compare its former identity too.
-    legacy_snapshot = dict(snapshot)
-    legacy_snapshot["schema_version"] = "relay-request/2.1"
-    legacy_snapshot.pop("options", None)
-    legacy_snapshot.pop("effective_options", None)
-    legacy_snapshot.pop("capability_revision", None)
-    legacy_req_hash = request_identity(legacy_snapshot)
 
-    existing = await repo.find_request_by_idempotency(session_id, idempotency_key)
-    if existing:
-        if existing.get("request_hash") not in {req_hash, legacy_req_hash}:
-            raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
-        log_info(
-            logger,
-            "request_idempotent_reuse",
-            request_id=existing.get("id"),
-            session_id=existing.get("session_id"),
-            job_id=existing.get("job_id"),
-            execution_mode=existing.get("execution_mode"),
-            status=existing.get("status"),
-            connection_id=existing.get("connection_id"),
-            model=existing.get("model"),
-            route_revision=frozen_route.get("route_revision") if frozen_route else None,
+    context_plan: dict[str, Any] | None = None
+    cache_plan: dict[str, Any] | None = None
+    history_identity: dict[str, Any] | None = None
+    if cache_contract_session:
+        if session.get("history_object_id"):
+            history_obj = await repo.get_object(
+                str(session["history_object_id"]),
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+            )
+            if history_obj:
+                history_identity = {
+                    "object_id": history_obj.get("id"),
+                    "sha256": history_obj.get("sha256"),
+                }
+        plan_seed = dict(base_snapshot)
+        plan_seed["schema_version"] = "relay-request/2.3"
+        context_plan = build_context_plan(
+            snapshot=plan_seed,
+            session=session,
+            material_rows=material_rows,
+            history_identity=history_identity,
         )
+        try:
+            cache_intent = CacheIntentResolver().resolve(
+                requested_mode=body.requested_cache_mode,
+                context_plan=context_plan,
+                cache_contract=(dict(frozen_route.get("cache_contract")) if isinstance(frozen_route.get("cache_contract"), dict) else None),
+                protocol_profile=(dict(frozen_route.get("protocol_profile")) if isinstance(frozen_route.get("protocol_profile"), dict) else None),
+                cache_policy=(dict(frozen_route.get("cache_policy")) if isinstance(frozen_route.get("cache_policy"), dict) else None),
+                cache_contract_hash=(str(frozen_route.get("cache_contract_hash")) if frozen_route.get("cache_contract_hash") else None),
+                profile_hash=(str(frozen_route.get("protocol_profile_hash")) if frozen_route.get("protocol_profile_hash") else None),
+                policy_hash=(str(frozen_route.get("cache_policy_hash")) if frozen_route.get("cache_policy_hash") else None),
+            )
+        except CacheDecisionError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_detail()) from exc
+        cache_plan = cache_intent.canonical()
+        cache_plan["plan_hash"] = cache_intent.plan_hash
+        snapshot = {
+            "schema_version": "relay-request/2.3",
+            **base_snapshot,
+            "protocol_profile_id": frozen_route.get("protocol_profile_id"),
+            "protocol_profile_hash": frozen_route.get("protocol_profile_hash"),
+            "protocol_profile": (dict(frozen_route.get("protocol_profile")) if isinstance(frozen_route.get("protocol_profile"), dict) else None),
+            "cache_policy_id": frozen_route.get("cache_policy_id"),
+            "cache_policy_hash": frozen_route.get("cache_policy_hash"),
+            "cache_policy": (dict(frozen_route.get("cache_policy")) if isinstance(frozen_route.get("cache_policy"), dict) else None),
+            "cache_contract_hash": frozen_route.get("cache_contract_hash"),
+            "cache_contract": (dict(frozen_route.get("cache_contract")) if isinstance(frozen_route.get("cache_contract"), dict) else None),
+            "context_policy": session.get("context_policy"),
+            "history_version": int(session.get("history_version") or 0),
+            "history_object_hash": (history_identity or {}).get("sha256"),
+            "requested_cache_mode": body.requested_cache_mode,
+            "caller_intent_hash": public_intent_hash,
+            "context_plan": context_plan,
+            "context_plan_hash": context_plan["context_plan_hash"],
+            "cache_plan": cache_plan,
+            "cache_plan_hash": cache_intent.plan_hash,
+        }
+    else:
+        snapshot = {"schema_version": "relay-request/2.2", **base_snapshot}
+
+    req_hash = request_identity(snapshot)
+    legacy_snapshot = dict(snapshot)
+    legacy_req_hash: str | None = None
+    if not cache_contract_session:
+        legacy_snapshot["schema_version"] = "relay-request/2.1"
+        legacy_snapshot.pop("options", None)
+        legacy_snapshot.pop("effective_options", None)
+        legacy_snapshot.pop("capability_revision", None)
+        legacy_req_hash = request_identity(legacy_snapshot)
+
+    if existing:
+        allowed_hashes = {req_hash}
+        if legacy_req_hash:
+            allowed_hashes.add(legacy_req_hash)
+        if existing.get("request_hash") not in allowed_hashes:
+            raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different Request")
         return await _request_envelope_hydrated(request, existing)
 
     request_id = uuid4()
-    object_id = f"obj_{uuid4().hex}"
-    raw = json_bytes(snapshot)
-    digest = hashlib.sha256(raw).hexdigest()
-    path = request_object_path_v2(
-        _settings(request), tenant_id, conversation_hash, str(session_id), str(request_id), "request.json"
-    )
-    backend = _storage(request).get(_settings(request).default_storage_id)
-    location = await backend.put_bytes(path, raw, content_type="application/json")
-    await repo.create_object(
-        {
-            "id": object_id,
-            "tenant_id": tenant_id,
-            "conversation_hash": conversation_hash,
-            "storage_id": location.storage_id,
-            "bucket": location.bucket,
-            "object_key": location.key,
-            "sha256": digest,
-            "size_bytes": len(raw),
-            "content_type": "application/json",
-            "created_at": utcnow().isoformat(),
-        }
+    context_plan_object_id: str | None = None
+    cache_plan_object_id: str | None = None
+    if cache_contract_session and context_plan is not None and cache_plan is not None:
+        context_plan_object_id = await _store_request_json_artifact(
+            request,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+            session_id=str(session_id),
+            request_id=str(request_id),
+            filename="context-plan.json",
+            value=context_plan,
+        )
+        cache_plan_object_id = await _store_request_json_artifact(
+            request,
+            tenant_id=tenant_id,
+            conversation_hash=conversation_hash,
+            session_id=str(session_id),
+            request_id=str(request_id),
+            filename="cache-plan.json",
+            value=cache_plan,
+        )
+    object_id = await _store_request_json_artifact(
+        request,
+        tenant_id=tenant_id,
+        conversation_hash=conversation_hash,
+        session_id=str(session_id),
+        request_id=str(request_id),
+        filename="request.json",
+        value=snapshot,
     )
 
     job_id = str(uuid4()) if body.execution.mode == "async" else None
+    accept_metadata = dict(body.metadata)
+    if cache_contract_session and cache_plan is not None:
+        accept_metadata["_relay_cache"] = {
+            "requested_cache_mode": body.requested_cache_mode,
+            "planned_mechanism": cache_plan.get("planned_mechanism"),
+            "effective_cache_mechanism": cache_plan.get("planned_mechanism") if cache_plan.get("resolution_status") == "finalized" else None,
+            "resolution_status": cache_plan.get("resolution_status"),
+            "decision_reason": cache_plan.get("decision_reason"),
+        }
     try:
-        row = await repo.accept_request(
-            session_id=str(session_id),
-            request_id=str(request_id),
-            tenant_id=tenant_id,
-            conversation_hash=conversation_hash,
-            idempotency_key=idempotency_key,
-            request_hash=req_hash,
-            execution_mode=body.execution.mode,
-            request_object_id=object_id,
-            provider=provider,
-            connection_id=str(connection_id),
-            model=model,
-            execution_pool=session.get("execution_pool") or _settings(request).execution_pool,
-            metadata=body.metadata,
-            job_id=job_id,
-        )
+        if cache_contract_session:
+            if not context_plan_object_id or not cache_plan_object_id or not context_plan or not cache_plan:
+                raise RuntimeError("cache-aware Request was accepted without frozen cache artifacts")
+            row = await repo.accept_request_v3(
+                session_id=str(session_id),
+                request_id=str(request_id),
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                idempotency_key=idempotency_key,
+                request_hash=req_hash,
+                caller_intent_hash=public_intent_hash,
+                request_identity_version="relay-request/2.3",
+                execution_mode=body.execution.mode,
+                request_object_id=object_id,
+                context_plan_object_id=context_plan_object_id,
+                context_plan_hash=str(context_plan["context_plan_hash"]),
+                cache_plan_object_id=cache_plan_object_id,
+                cache_plan_hash=str(cache_plan["plan_hash"]),
+                cache_resolution_status=str(cache_plan["resolution_status"]),
+                provider=provider,
+                connection_id=connection_id,
+                model=model,
+                execution_pool=session.get("execution_pool") or settings.execution_pool,
+                expected_history_version=int(session.get("history_version") or 0),
+                metadata=accept_metadata,
+                job_id=job_id,
+            )
+        else:
+            row = await repo.accept_request(
+                session_id=str(session_id),
+                request_id=str(request_id),
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+                idempotency_key=idempotency_key,
+                request_hash=req_hash,
+                execution_mode=body.execution.mode,
+                request_object_id=object_id,
+                provider=provider,
+                connection_id=connection_id,
+                model=model,
+                execution_pool=session.get("execution_pool") or settings.execution_pool,
+                metadata=body.metadata,
+                job_id=job_id,
+            )
     except SupabaseError as exc:
         text = exc.body
         if "SESSION_BUSY" in text:
             raise HTTPException(status_code=409, detail="SESSION_BUSY") from exc
         if "IDEMPOTENCY_CONFLICT" in text:
             raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
+        if "HISTORY_VERSION_CHANGED" in text:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "HISTORY_VERSION_CHANGED",
+                    "message": "Session history changed while the cache/context plan was being prepared; retry the same logical request",
+                },
+            ) from exc
         log_error(
             logger,
             "request_accept_failed",
@@ -1278,6 +1534,9 @@ async def create_request(
         route_revision=frozen_route.get("route_revision") if frozen_route else None,
         execution_pool=row.get("execution_pool"),
         material_count=len(effective_material_ids),
+        requested_cache_mode=requested_cache_mode,
+        cache_mechanism=(cache_plan or {}).get("planned_mechanism"),
+        cache_decision_reason=(cache_plan or {}).get("decision_reason"),
         business_stage=(body.metadata or {}).get("stage") or (body.metadata or {}).get("purpose") or (body.input.get("stage") if isinstance(body.input, dict) else None),
     )
 

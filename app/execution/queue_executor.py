@@ -36,6 +36,7 @@ class QueueExecutor:
             return
         started_ms = now_ms()
         lease_epoch = int(job.get("lease_epoch") or 0)
+        is_v3 = str(request_row.get("request_identity_version") or "") == "relay-request/2.3"
         log_info(
             logger,
             "request_executor_started",
@@ -49,18 +50,32 @@ class QueueExecutor:
         await self.repo.update_request(request_id, {"status": "running"})
         try:
             if request_row.get("provider_dispatch_state") == "result_stored":
-                ok = await self.repo.complete_request(
-                    request_id=request_row["id"],
-                    session_id=request_row["session_id"],
-                    history_object_id=request_row.get("provisional_history_object_id"),
-                    result_object_id=request_row["provisional_result_object_id"],
-                    output_object_id=request_row.get("provisional_output_object_id"),
-                    compact_result=request_row.get("provisional_compact_result") or {},
-                    provider_response_id=request_row.get("provider_response_id"),
-                    expected_history_version=int(request_row["expected_history_version"]),
-                    lease_owner=worker_id,
-                    lease_epoch=lease_epoch,
-                )
+                if is_v3:
+                    ok = await self.repo.complete_request_v3(
+                        request_id=request_row["id"],
+                        session_id=request_row["session_id"],
+                        history_object_id=request_row.get("provisional_history_object_id"),
+                        result_object_id=request_row["provisional_result_object_id"],
+                        output_object_id=request_row.get("provisional_output_object_id"),
+                        compact_result=request_row.get("provisional_compact_result") or {},
+                        provider_response_id=request_row.get("provider_response_id"),
+                        expected_history_version=int(request_row["expected_history_version"]),
+                        fence_owner=worker_id,
+                        fence_epoch=lease_epoch,
+                    )
+                else:
+                    ok = await self.repo.complete_request(
+                        request_id=request_row["id"],
+                        session_id=request_row["session_id"],
+                        history_object_id=request_row.get("provisional_history_object_id"),
+                        result_object_id=request_row["provisional_result_object_id"],
+                        output_object_id=request_row.get("provisional_output_object_id"),
+                        compact_result=request_row.get("provisional_compact_result") or {},
+                        provider_response_id=request_row.get("provider_response_id"),
+                        expected_history_version=int(request_row["expected_history_version"]),
+                        lease_owner=worker_id,
+                        lease_epoch=lease_epoch,
+                    )
                 if not ok:
                     raise RuntimeError("Stored provider result could not be atomically committed")
                 log_info(
@@ -111,15 +126,29 @@ class QueueExecutor:
                 session_id=request_row["session_id"],
                 request_id=request_row["id"],
             )
-            await self.repo.fail_request(
-                request_id=request_row["id"],
-                session_id=request_row["session_id"],
-                error=err,
-                status="indeterminate",
-                release_session=False,
-                lease_owner=worker_id,
-                lease_epoch=lease_epoch,
-            )
+            current = await self.repo.get_request(request_row["id"]) or request_row
+            dispatch_state = str(current.get("provider_dispatch_state") or "not_sent")
+            after_dispatch = dispatch_state != "not_sent"
+            if is_v3:
+                await self.repo.fail_request_v3(
+                    request_id=request_row["id"],
+                    session_id=request_row["session_id"],
+                    error=err,
+                    status="indeterminate" if after_dispatch else "failed",
+                    release_session=not after_dispatch,
+                    fence_owner=worker_id,
+                    fence_epoch=lease_epoch,
+                )
+            else:
+                await self.repo.fail_request(
+                    request_id=request_row["id"],
+                    session_id=request_row["session_id"],
+                    error=err,
+                    status="indeterminate",
+                    release_session=False,
+                    lease_owner=worker_id,
+                    lease_epoch=lease_epoch,
+                )
         except Exception as exc:
             log_error(
                 logger,
@@ -145,12 +174,23 @@ class QueueExecutor:
                 session_id=request_row["session_id"],
                 request_id=request_row["id"],
             )
-            await self.repo.fail_request(
-                request_id=request_row["id"],
-                session_id=request_row["session_id"],
-                error=err,
-                status="failed",
-                release_session=True,
-                lease_owner=worker_id,
-                lease_epoch=lease_epoch,
-            )
+            if is_v3:
+                await self.repo.fail_request_v3(
+                    request_id=request_row["id"],
+                    session_id=request_row["session_id"],
+                    error=err,
+                    status="failed",
+                    release_session=True,
+                    fence_owner=worker_id,
+                    fence_epoch=lease_epoch,
+                )
+            else:
+                await self.repo.fail_request(
+                    request_id=request_row["id"],
+                    session_id=request_row["session_id"],
+                    error=err,
+                    status="failed",
+                    release_session=True,
+                    lease_owner=worker_id,
+                    lease_epoch=lease_epoch,
+                )

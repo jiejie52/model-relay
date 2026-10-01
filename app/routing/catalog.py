@@ -23,6 +23,10 @@ class RouteEntry:
     protocol: str | None = None
     capability_contract_id: str | None = None
     capability_contract: dict[str, Any] | None = None
+    protocol_profile_id: str | None = None
+    protocol_profile: dict[str, Any] | None = None
+    cache_policy_id: str | None = None
+    cache_policy: dict[str, Any] | None = None
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
     source: str = "legacy"
@@ -46,6 +50,7 @@ class RouteEntry:
             input_modalities=tuple(str(x) for x in (self.capability_contract.get("input_modalities") or ["text"])),
             features=tuple(str(x) for x in (self.capability_contract.get("features") or [])),
             provider_defaults=dict(self.capability_contract.get("provider_defaults") or {}),
+            cache=dict(self.capability_contract.get("cache") or {}),
             metadata=dict(self.capability_contract.get("metadata") or {}),
         )
         return contract.supports_requirements(requirements)
@@ -83,6 +88,10 @@ class RouteCatalog:
                     "protocol": x.protocol,
                     "capability_contract_id": x.capability_contract_id,
                     "capability_contract": x.capability_contract,
+                    "protocol_profile_id": x.protocol_profile_id,
+                    "protocol_profile": x.protocol_profile,
+                    "cache_policy_id": x.cache_policy_id,
+                    "cache_policy": x.cache_policy,
                     "observed_model_policy": x.observed_model_policy,
                     "quota": x.quota,
                     "source": x.source,
@@ -123,6 +132,8 @@ class RouteCatalog:
         for offering in cp.offerings.values():
             connection = cp.connection(offering.connection_id)
             contract = cp.contract(offering.capability_contract_id)
+            profile = cp.protocol_profile(offering.protocol_profile_id)
+            cache_policy = cp.cache_policy(offering.cache_policy_id)
             if connection is None or contract is None:
                 # ControlPlane validation normally makes this unreachable.
                 continue
@@ -139,6 +150,10 @@ class RouteCatalog:
                     protocol=connection.protocol,
                     capability_contract_id=contract.contract_id,
                     capability_contract=contract.canonical(),
+                    protocol_profile_id=(profile.profile_id if profile else None),
+                    protocol_profile=(profile.canonical() if profile else None),
+                    cache_policy_id=(cache_policy.policy_id if cache_policy else None),
+                    cache_policy=(cache_policy.canonical() if cache_policy else None),
                     observed_model_policy=offering.observed_model_policy,
                     quota=dict(offering.quota),
                     source="control_plane",
@@ -173,6 +188,10 @@ class RouteCatalog:
                 str(value.get("capability_contract_id")) if value.get("capability_contract_id") else None
             ),
             capability_contract=(dict(value.get("capability_contract")) if isinstance(value.get("capability_contract"), dict) else None),
+            protocol_profile_id=(str(value.get("protocol_profile_id")) if value.get("protocol_profile_id") else None),
+            protocol_profile=(dict(value.get("protocol_profile")) if isinstance(value.get("protocol_profile"), dict) else None),
+            cache_policy_id=(str(value.get("cache_policy_id")) if value.get("cache_policy_id") else None),
+            cache_policy=(dict(value.get("cache_policy")) if isinstance(value.get("cache_policy"), dict) else None),
             observed_model_policy=str(value.get("observed_model_policy") or "audit").lower(),
             quota=dict(value.get("quota") or {}),
             source="legacy",

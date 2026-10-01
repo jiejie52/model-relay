@@ -1,3 +1,34 @@
+# Model Relay 3.0.0 - Cache Execution Control
+
+## 3.0.0 版本定位
+
+按项目版本规则，本次属于“新增模型缓存机制”的新修改需求，因此升级 **XX：2.0.0 -> 3.0.0**；YY/ZZ 同时清零。本版本在 2.0.0 的 Session / Request / Material / RouteBinding / Lease-Fencing 主链上增加缓存执行控制，不把缓存做成另一套模型执行系统。
+
+### 3.0.0 已实现
+
+- `/v2/sessions/{session_id}/requests` 新增 `requested_cache_mode=off|auto|on`；新 3.0 Session 省略时规范化为 `auto`。旧 Session 显式提交新缓存意图返回 `CACHE_CONTRACT_UPGRADE_REQUIRED`。
+- 新增 `ProtocolProfileSpec`、`CachePolicySpec` 与 `CapabilityContract.cache`；缓存能力冻结到具体 ModelOffering / RouteBinding，不按模型名在 Core 中硬编码。
+- 新增 `ContextPlan`、`CacheIntentResolver`、`CacheExecutionBinding`，统一抽象 `stateful_resource / breakpoint / implicit_prefix` 三类物理机制。
+- Request contract 升级为 `relay-request/2.3`。新增 `caller_intent_hash`，并扩展 2.3 `request_hash` 覆盖 route/contract/profile/policy/context/cache plan；2.1/2.2 identity 算法保持原样。
+- 新增 `sql/005_relay_cache_control.sql`：Cache Resource / Operation / Binding / Pin / Task，以及 sync Request execution fence、material binding fencing、cache binding install、atomic seal+dispatch、result-store/complete/fail v3 fencing。
+- `SharedExecutionRuntime` 在 Material Binding 冻结后、Provider dispatch 前执行 CacheOrchestrator；v3 必须成功 `seal_cache_and_dispatch_v3` 才取得第一次模型发送权。
+- Provider 返回后新增统一 cache usage 观察；`null` 与真实 `0` 分开，`off/None` 下 Provider 透明命中只记录 observed，不反写 Requested/Effective。
+- Grok 保留既有 `stable_prompt_cache_key`、reasoning、encrypted history、`store=false` 行为。3.0 只增加外层 Gate：新合同解析为 None/off 时抑制可控 `prompt_cache_key`；on/auto 的 legacy-compatible implicit-prefix 仍使用原 key。
+- Gemini / GPT / Claude 的缓存合同与协议 Profile 已进入控制面，但内置配置保持 `candidate`，不会因为“协议支持/已有 usage 字段”自动当成已认证缓存能力。真实 Stateful / Breakpoint / Prefix 启用必须逐 Supply 发布验证后的合同。
+- Worker 同时识别 v2/v3 Request Job；旧 Request 与旧 Job 按原协议恢复。
+
+### 3.0.0 明确边界
+
+- 这不是回答结果缓存，不替代 Request 幂等、Session history 或 Canonical Material。
+- `on` 遇到本次上下文/门槛不足时是 `effective=null` 后正常推理；只有供应无已认证机制、协议不可表达或政策禁止等合同问题才 Fail-Closed。
+- `dispatch_started` 之后绝不因为缓存无效、404/429、未命中或回包异常执行“去缓存再推理一次”。
+- 内置 Gemini / Claude / GPT 缓存 Profile 在真实渠道认证前保持 candidate；本版不会伪造已验证能力。
+- 3.0.0 的 `prepared_payload_hash` 当前覆盖“冻结 snapshot + history + Material Binding + Cache Binding”的 pre-dispatch execution projection。Provider-specific byte-level Native Wire builder 可在后续处理方式增强版本中继续收紧，不改变 atomic dispatch gate。
+
+部署、SQL 顺序、灰度和兼容说明见 `DEPLOYMENT_3.0.0.md`。
+
+---
+
 # Model Relay 2.0.0 - Governed Multi-Model Channels
 
 ## 2.0.0 关键变化

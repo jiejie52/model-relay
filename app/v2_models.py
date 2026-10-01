@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 ContextPolicy = Literal["conversation", "explicit"]
 ExecutionMode = Literal["sync", "async"]
 MaterialPurpose = Literal["inference_input", "archive"]
+CacheMode = Literal["off", "auto", "on"]
 
 
 class SessionCapabilityRequirements(BaseModel):
@@ -61,6 +62,9 @@ class SessionResponse(BaseModel):
     protocol: str | None = None
     capability_contract_id: str | None = None
     control_plane_hash: str | None = None
+    protocol_profile_id: str | None = None
+    cache_policy_id: str | None = None
+    cache_contract_hash: str | None = None
     created_at: datetime | None = None
     expires_at: datetime | None = None
 
@@ -88,7 +92,25 @@ class SessionRequestCreate(BaseModel):
     # v2.1 migration bridge only. New callers must use ``options``. Relay v2.2
     # converts only known canonical aliases and rejects arbitrary wire fields.
     provider_payload: dict[str, Any] = Field(default_factory=dict, deprecated=True)
+    # Cache contract 3.0. Callers express intent only; TTL, provider handles,
+    # native cache fields and breakpoint positions stay server-governed.
+    requested_cache_mode: CacheMode = "auto"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CacheSummary(BaseModel):
+    requested_cache_mode: str | None = None
+    planned_mechanism: str | None = None
+    effective_cache_mechanism: str | None = None
+    execution_mechanism: str | None = None
+    resolution_status: str | None = None
+    decision_reason: str | None = None
+    actual_cache_hit_status: str | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    evidence_level: str | None = None
+    transparent_observation: bool = False
 
 
 class RawErrorMeta(BaseModel):
@@ -122,6 +144,7 @@ class RequestEnvelope(BaseModel):
     history_version: int
     result: dict[str, Any] | None = None
     error: RawErrorMeta | None = None
+    cache: CacheSummary | None = None
     poll_after_seconds: int | None = None
 
 

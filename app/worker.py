@@ -16,6 +16,8 @@ from fastapi import FastAPI, Header, HTTPException, status
 from .config import get_settings
 from .control_plane import ModelControlPlane
 from .core.execution_runtime import SharedExecutionRuntime
+from .cache.orchestrator import CacheOrchestrator
+from .cache.registry import CacheResourceRegistry
 from .core.raw_error import RawErrorRecorder
 from .execution.queue_executor import QueueExecutor
 from .materials.resolver import MaterialResolver
@@ -35,7 +37,7 @@ from .utils import utcnow
 from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "2.0.0"
+WORKER_VERSION = "3.0.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -96,8 +98,13 @@ class RelayWorker:
             control_plane=self.control_plane,
         )
         self.route_resolver.validate_catalog()
+        self.cache_resources = CacheResourceRegistry()
+        self.cache_orchestrator = CacheOrchestrator(
+            self.repo, resource_registry=self.cache_resources
+        )
         self.runtime = SharedExecutionRuntime(
-            self.repo, self.storage, self.providers, self.materials, self.bindings, settings
+            self.repo, self.storage, self.providers, self.materials, self.bindings, settings,
+            cache_orchestrator=self.cache_orchestrator,
         )
         self.errors = RawErrorRecorder(self.repo, self.storage, settings)
         self.queue = QueueExecutor(self.runtime, self.errors, self.repo, settings)
@@ -288,7 +295,7 @@ class RelayWorker:
                 self._busy = True
                 self._quiescent = False
                 try:
-                    if str(job.get("protocol_version") or "v1") == "v2" and job.get("request_id"):
+                    if str(job.get("protocol_version") or "v1") in {"v2", "v3"} and job.get("request_id"):
                         await self._process_v2(job)
                     else:
                         await self._process_legacy(job)
@@ -399,7 +406,7 @@ class RelayWorker:
             request_id=job.get("request_id"),
             execution_pool=job.get("execution_pool"),
             lease_epoch=epoch,
-            protocol_version="v2",
+            protocol_version=str(job.get("protocol_version") or "v2"),
         )
         await self.repo.update_job(
             job_id,

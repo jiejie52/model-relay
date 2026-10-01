@@ -33,6 +33,12 @@ class V2ExecutionContext:
     conversation_hash: str
     request_id: str | None = None
     session_id: str | None = None
+    # Relay 3.0 cache execution facts. These are frozen by the runtime before
+    # the first Provider dispatch; adapters may project them but must not
+    # reinterpret cache policy or select another mechanism.
+    context_plan: dict[str, Any] | None = None
+    cache_execution_binding: dict[str, Any] | None = None
+    execution_fence: dict[str, Any] | None = None
 
 
 class V2ProviderAdapter(Protocol):

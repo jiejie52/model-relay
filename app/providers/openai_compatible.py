@@ -4,6 +4,7 @@ from typing import Any
 import httpx
 
 from ..config import Settings
+from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from .base import ProviderHTTPError, ProviderRequestError, ProviderResult
 from .http_wire import read_raw_response, decode_entity
 from ..structured_output import (
@@ -90,6 +91,12 @@ class OpenAICompatibleResponsesProvider:
             model=model,
             think_level=think_level,
             session=session,
+        )
+        self._apply_cache_projection(
+            payload,
+            request_snapshot,
+            provider=provider,
+            model=model,
         )
 
         self._apply_model_options(payload, request_snapshot)
@@ -223,9 +230,44 @@ class OpenAICompatibleResponsesProvider:
             if think_level in {"low", "medium", "high", "xhigh"}:
                 payload["reasoning"] = {"effort": think_level}
 
+
+    @classmethod
+    def _apply_cache_projection(
+        cls,
+        payload: dict[str, Any],
+        snapshot: dict[str, Any],
+        *,
+        provider: str,
+        model: str,
+    ) -> None:
+        """Project Relay 3.0 implicit-prefix control independently of reasoning.
+
+        The historical Grok path still computes/injects its key in
+        ``_apply_reasoning``. The cache execution binding acts as an outer gate:
+        effective None removes only the controllable key, while an approved
+        implicit-prefix binding may supply the frozen key. 2.1/2.2 behavior is
+        byte-for-byte unaffected by this hook.
+        """
+        if str(snapshot.get("schema_version") or "") != "relay-request/2.3":
+            return
+        binding = snapshot.get("_relay_cache_execution")
+        if not isinstance(binding, dict):
+            return
+        mechanism = binding.get("mechanism")
+        if mechanism is None:
+            if cls._is_grok(provider, model):
+                payload.pop("prompt_cache_key", None)
+            return
+        if mechanism != "implicit_prefix":
+            return
+        prefix = binding.get("prefix") if isinstance(binding.get("prefix"), dict) else {}
+        key = prefix.get("prompt_cache_key")
+        if key:
+            payload["prompt_cache_key"] = str(key)
+
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
-        if str(snapshot.get("schema_version") or "") == "relay-request/2.2":
+        if str(snapshot.get("schema_version") or "") in CANONICAL_REQUEST_VERSIONS:
             options = snapshot.get("effective_options") or {}
             if not isinstance(options, dict):
                 return

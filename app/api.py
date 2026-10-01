@@ -35,13 +35,15 @@ from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
 from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
+from .cache.orchestrator import CacheOrchestrator
+from .cache.registry import CacheResourceRegistry
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
 from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
 
 
-API_VERSION = "2.0.0"
+API_VERSION = "3.0.0"
 
 
 settings = get_settings()
@@ -191,8 +193,11 @@ async def lifespan(_: FastAPI):
         control_plane=control_plane,
     )
     route_resolver.validate_catalog()
+    cache_resources = CacheResourceRegistry()
+    cache_orchestrator = CacheOrchestrator(repo, resource_registry=cache_resources)
     runtime = SharedExecutionRuntime(
-        repo, storage_registry, providers, material_resolver, binding_resolver, settings
+        repo, storage_registry, providers, material_resolver, binding_resolver, settings,
+        cache_orchestrator=cache_orchestrator,
     )
     raw_errors = RawErrorRecorder(repo, storage_registry, settings)
     inline_executor = InlineExecutor(runtime, raw_errors, repo, settings)
@@ -210,6 +215,8 @@ async def lifespan(_: FastAPI):
     app.state.route_catalog = route_catalog
     app.state.route_resolver = route_resolver
     app.state.shared_runtime = runtime
+    app.state.cache_resource_registry = cache_resources
+    app.state.cache_orchestrator = cache_orchestrator
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
     app.state.worker_wake_notifier = WorkerWakeNotifier()

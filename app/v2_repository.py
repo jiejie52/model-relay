@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 from uuid import UUID
+from datetime import datetime, timezone
+import hashlib
+import json
 
 from .repository import RelayRepository
 
@@ -106,6 +109,409 @@ class RelayV2Repository(RelayRepository):
         if isinstance(result, dict):
             return result
         raise RuntimeError("accept_relay_request returned invalid data")
+
+
+    async def accept_request_v3(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+        tenant_id: str,
+        conversation_hash: str,
+        idempotency_key: str,
+        request_hash: str,
+        caller_intent_hash: str,
+        request_identity_version: str,
+        execution_mode: str,
+        request_object_id: str,
+        context_plan_object_id: str,
+        context_plan_hash: str,
+        cache_plan_object_id: str,
+        cache_plan_hash: str,
+        cache_resolution_status: str,
+        provider: str,
+        connection_id: str,
+        model: str,
+        execution_pool: str,
+        expected_history_version: int,
+        metadata: dict[str, Any],
+        job_id: str | None,
+    ) -> dict[str, Any]:
+        result = await self.backend.rpc(
+            "accept_relay_request_v3",
+            {
+                "p_session_id": session_id,
+                "p_request_id": request_id,
+                "p_tenant_id": tenant_id,
+                "p_conversation_hash": conversation_hash,
+                "p_idempotency_key": idempotency_key,
+                "p_request_hash": request_hash,
+                "p_caller_intent_hash": caller_intent_hash,
+                "p_request_identity_version": request_identity_version,
+                "p_execution_mode": execution_mode,
+                "p_request_object_id": request_object_id,
+                "p_context_plan_object_id": context_plan_object_id,
+                "p_context_plan_hash": context_plan_hash,
+                "p_cache_plan_object_id": cache_plan_object_id,
+                "p_cache_plan_hash": cache_plan_hash,
+                "p_cache_resolution_status": cache_resolution_status,
+                "p_provider": provider,
+                "p_connection_id": connection_id,
+                "p_model": model,
+                "p_execution_pool": execution_pool,
+                "p_expected_history_version": expected_history_version,
+                "p_metadata": metadata,
+                "p_job_id": job_id,
+                "p_job_expires_at": self.default_job_expiry().isoformat(),
+            },
+        )
+        if isinstance(result, list):
+            if not result:
+                raise RuntimeError("accept_relay_request_v3 returned no row")
+            return result[0]
+        if isinstance(result, dict):
+            return result
+        raise RuntimeError("accept_relay_request_v3 returned invalid data")
+
+    async def acquire_sync_request_fence(
+        self, request_id: str, executor_id: str, *, lease_seconds: int | None = None
+    ) -> int | None:
+        result = await self.backend.rpc(
+            "acquire_sync_request_fence",
+            {
+                "p_request_id": request_id,
+                "p_executor_id": executor_id,
+                "p_lease_seconds": int(lease_seconds or self.settings.sync_request_deadline_seconds),
+            },
+        )
+        try:
+            value = int(result)
+        except Exception:
+            return None
+        return value if value > 0 else None
+
+    async def renew_sync_request_fence(
+        self, request_id: str, executor_id: str, executor_epoch: int, *, lease_seconds: int | None = None
+    ) -> bool:
+        result = await self.backend.rpc(
+            "renew_sync_request_fence",
+            {
+                "p_request_id": request_id,
+                "p_executor_id": executor_id,
+                "p_executor_epoch": executor_epoch,
+                "p_lease_seconds": int(lease_seconds or self.settings.sync_request_deadline_seconds),
+            },
+        )
+        return bool(result)
+
+    async def install_request_material_binding_v3(
+        self, *, request_id: str, snapshot: list[dict[str, Any]], fence_owner: str, fence_epoch: int
+    ) -> bool:
+        return bool(
+            await self.backend.rpc(
+                "install_request_material_binding_v3",
+                {
+                    "p_request_id": request_id,
+                    "p_snapshot": snapshot,
+                    "p_fence_owner": fence_owner,
+                    "p_fence_epoch": fence_epoch,
+                },
+            )
+        )
+
+    async def install_cache_binding_v3(
+        self,
+        *,
+        request_id: str,
+        binding_version: int,
+        plan_hash: str,
+        binding_hash: str,
+        final_mechanism: str | None,
+        resource_id: str | None,
+        resource_generation: int | None,
+        metadata: dict[str, Any],
+        fence_owner: str,
+        fence_epoch: int,
+    ) -> bool:
+        return bool(
+            await self.backend.rpc(
+                "install_cache_binding_v3",
+                {
+                    "p_request_id": request_id,
+                    "p_binding_version": binding_version,
+                    "p_plan_hash": plan_hash,
+                    "p_binding_hash": binding_hash,
+                    "p_final_mechanism": final_mechanism,
+                    "p_resource_id": resource_id,
+                    "p_resource_generation": resource_generation,
+                    "p_metadata": metadata,
+                    "p_fence_owner": fence_owner,
+                    "p_fence_epoch": fence_epoch,
+                },
+            )
+        )
+
+    async def seal_cache_and_dispatch_v3(
+        self,
+        *,
+        request_id: str,
+        binding_version: int,
+        binding_hash: str,
+        payload_hash: str,
+        fence_owner: str,
+        fence_epoch: int,
+    ) -> bool:
+        return bool(
+            await self.backend.rpc(
+                "seal_cache_and_dispatch_v3",
+                {
+                    "p_request_id": request_id,
+                    "p_binding_version": binding_version,
+                    "p_binding_hash": binding_hash,
+                    "p_payload_hash": payload_hash,
+                    "p_fence_owner": fence_owner,
+                    "p_fence_epoch": fence_epoch,
+                },
+            )
+        )
+
+    async def release_cache_pins_v3(self, request_id: str, *, hold_until: str | None = None) -> int:
+        result = await self.backend.rpc(
+            "release_cache_pins_v3",
+            {"p_request_id": request_id, "p_hold_until": hold_until},
+        )
+        try:
+            return int(result or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def cache_scope_hash(
+        *,
+        tenant_id: str,
+        conversation_hash: str,
+        session_id: str,
+        offering_id: str,
+        account_scope_hash: str,
+        protocol_profile_hash: str,
+    ) -> str:
+        raw = json.dumps(
+            {
+                "tenant_id": tenant_id,
+                "conversation_hash": conversation_hash,
+                "session_id": session_id,
+                "offering_id": offering_id,
+                "account_scope_hash": account_scope_hash,
+                "protocol_profile_hash": protocol_profile_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    async def find_ready_cache_resource(
+        self, *, scope_hash: str, content_fingerprint: str
+    ) -> dict[str, Any] | None:
+        # Fetch a small generation window and apply the expiry predicate here so
+        # both expiring and non-expiring resources can be handled without relying
+        # on a PostgREST OR expression. Expired rows remain audit facts but are
+        # never reused for a new Request binding.
+        rows = await self.backend.select(
+            "relay_cache_resources",
+            filters={
+                "scope_hash": f"eq.{scope_hash}",
+                "content_fingerprint": f"eq.{content_fingerprint}",
+                "state": "eq.ready",
+            },
+            order="generation.desc",
+            limit=10,
+        )
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            expire_time = row.get("expire_time")
+            if not expire_time:
+                if row.get("provider_handle_ref"):
+                    return row
+                continue
+            try:
+                parsed = datetime.fromisoformat(str(expire_time).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            except Exception:
+                # An unparseable expiry is not evidence that the resource is safe
+                # to reuse. Keep searching older generations.
+                continue
+            if parsed > now and row.get("provider_handle_ref"):
+                return row
+        return None
+
+    async def create_cache_operation_intent(
+        self,
+        *,
+        request_id: str,
+        scope_hash: str,
+        content_fingerprint: str,
+        operation_type: str,
+        lease_owner: str,
+        lease_epoch: int,
+    ) -> dict[str, Any]:
+        # Resource creation is singleflight by scope + content + operation, not
+        # by Request. Different Requests targeting the same frozen CacheSpec must
+        # contend for one Provider-side create operation instead of each creating
+        # a duplicate resource.
+        idempotency_key = (
+            f"cache:{operation_type}:{scope_hash[:24]}:{content_fingerprint[:24]}"
+        )
+        result = await self.backend.rpc(
+            "claim_cache_operation_v3",
+            {
+                "p_request_id": request_id,
+                "p_scope_hash": scope_hash,
+                "p_content_fingerprint": content_fingerprint,
+                "p_operation_type": operation_type,
+                "p_idempotency_key": idempotency_key,
+                "p_lease_owner": lease_owner,
+                "p_lease_seconds": max(30, int(getattr(self.settings, "cache_prepare_timeout_seconds", 60))),
+            },
+        )
+        row = result[0] if isinstance(result, list) and result else result if isinstance(result, dict) else None
+        if not isinstance(row, dict):
+            raise RuntimeError("Cache operation could not be claimed")
+        # The database owns the cache operation epoch. The Request execution
+        # epoch is intentionally separate.
+        return row
+
+    async def publish_cache_resource(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        lease_epoch: int,
+        tenant_id: str,
+        conversation_hash: str,
+        session_id: str,
+        offering_id: str,
+        connection_id: str,
+        scope_hash: str,
+        content_fingerprint: str,
+        provider_handle_ref: str,
+        expire_time: str | None,
+        profile_hash: str,
+        raw_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        # Prefer the operation epoch returned by claim_cache_operation_v3 when
+        # callers pass it in raw_result; fall back to the explicit value for
+        # compatibility with simple test doubles.
+        op_epoch = int(raw_result.get("operation_epoch") or lease_epoch)
+        result = await self.backend.rpc(
+            "publish_cache_resource_v3",
+            {
+                "p_operation_id": operation_id,
+                "p_lease_owner": lease_owner,
+                "p_lease_epoch": op_epoch,
+                "p_tenant_id": tenant_id,
+                "p_conversation_hash": conversation_hash,
+                "p_session_id": session_id,
+                "p_offering_id": offering_id,
+                "p_connection_id": connection_id,
+                "p_scope_hash": scope_hash,
+                "p_profile_hash": profile_hash,
+                "p_content_fingerprint": content_fingerprint,
+                "p_provider_handle_ref": provider_handle_ref,
+                "p_expire_time": expire_time,
+                "p_raw_result": raw_result,
+            },
+        )
+        if isinstance(result, list):
+            return result[0] if result else None
+        return result if isinstance(result, dict) else None
+
+    async def store_result_v3(
+        self,
+        *,
+        request_id: str,
+        result_object_id: str,
+        output_object_id: str | None,
+        history_object_id: str | None,
+        compact_result: dict[str, Any],
+        provider_response_id: str | None,
+        cache_usage: dict[str, Any] | None,
+        fence_owner: str,
+        fence_epoch: int,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "store_relay_result_v3",
+            {
+                "p_request_id": request_id,
+                "p_result_object_id": result_object_id,
+                "p_output_object_id": output_object_id,
+                "p_history_object_id": history_object_id,
+                "p_compact_result": compact_result,
+                "p_provider_response_id": provider_response_id,
+                "p_cache_usage": cache_usage,
+                "p_fence_owner": fence_owner,
+                "p_fence_epoch": fence_epoch,
+            },
+        )
+        return bool(result)
+
+    async def complete_request_v3(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        history_object_id: str | None,
+        result_object_id: str,
+        output_object_id: str | None,
+        compact_result: dict[str, Any],
+        provider_response_id: str | None,
+        expected_history_version: int,
+        fence_owner: str,
+        fence_epoch: int,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "complete_relay_request_v3",
+            {
+                "p_request_id": request_id,
+                "p_session_id": session_id,
+                "p_expected_history_version": expected_history_version,
+                "p_history_object_id": history_object_id,
+                "p_result_object_id": result_object_id,
+                "p_output_object_id": output_object_id,
+                "p_compact_result": compact_result,
+                "p_provider_response_id": provider_response_id,
+                "p_fence_owner": fence_owner,
+                "p_fence_epoch": fence_epoch,
+            },
+        )
+        return bool(result)
+
+    async def fail_request_v3(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        error: dict[str, Any],
+        status: str,
+        release_session: bool,
+        fence_owner: str,
+        fence_epoch: int,
+        hold_pins_until: str | None = None,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "fail_relay_request_v3",
+            {
+                "p_request_id": request_id,
+                "p_session_id": session_id,
+                "p_status": status,
+                "p_error": error,
+                "p_release_session": release_session,
+                "p_fence_owner": fence_owner,
+                "p_fence_epoch": fence_epoch,
+                "p_hold_pins_until": hold_pins_until,
+            },
+        )
+        return bool(result)
 
     async def complete_request(
         self,
