@@ -18,6 +18,7 @@ from .control_plane import ModelControlPlane
 from .core.execution_runtime import SharedExecutionRuntime
 from .cache.orchestrator import CacheOrchestrator
 from .cache.registry import CacheResourceRegistry
+from .cache.providers import GeminiAIHubMixCacheResourceAdapter
 from .core.raw_error import RawErrorRecorder
 from .execution.queue_executor import QueueExecutor
 from .materials.resolver import MaterialResolver
@@ -37,7 +38,7 @@ from .utils import utcnow
 from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "3.0.0"
+WORKER_VERSION = "3.1.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -99,6 +100,11 @@ class RelayWorker:
         )
         self.route_resolver.validate_catalog()
         self.cache_resources = CacheResourceRegistry()
+        if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
+            self.cache_resources.register(
+                settings.aihubmix_gemini_connection_id,
+                GeminiAIHubMixCacheResourceAdapter(settings),
+            )
         self.cache_orchestrator = CacheOrchestrator(
             self.repo, resource_registry=self.cache_resources
         )

@@ -121,17 +121,18 @@ class CacheIntentResolver:
 
         if below:
             return self._none(mode, context_plan, policy_hash, profile_hash, cache_contract_hash, scope, "below_minimum")
-        if uncertain:
+        if uncertain and not bool(mechanism_cfg.get("final_threshold_guard", False)):
             return self._none(mode, context_plan, policy_hash, profile_hash, cache_contract_hash, scope, "context_assessment_uncertain")
 
         if mode == "auto" and bool(policy.get("auto_disabled", False)):
             return self._none(mode, context_plan, policy_hash, profile_hash, cache_contract_hash, scope, "auto_policy_skip")
 
+        pending_final_guard = bool(uncertain and mechanism_cfg.get("final_threshold_guard", False))
         return CacheIntentPlan(
             requested_mode=mode,  # type: ignore[arg-type]
             planned_mechanism=mechanism,  # type: ignore[arg-type]
-            resolution_status="finalized",
-            decision_reason="selected",
+            resolution_status=("pending" if pending_final_guard else "finalized"),
+            decision_reason=("final_threshold_pending" if pending_final_guard else "selected"),
             context_plan_hash=str(context_plan["context_plan_hash"]),
             policy_hash=policy_hash,
             profile_hash=profile_hash,

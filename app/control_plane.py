@@ -498,6 +498,19 @@ class ModelControlPlane:
                 quota={"requests_per_minute": 5, "requests_per_day": 100, "tokens_per_day": 1_000_000, "enforcement": "declarative"},
             ),
             ModelOffering(
+                offering_id="aihubmix-gemini-3-1-flash-lite",
+                provider="gemini",
+                model_pattern="gemini-3.1-flash-lite",
+                connection_id=settings.aihubmix_gemini_connection_id,
+                capability_contract_id="gemini-3-1-flash-lite-native",
+                protocol_profile_id="gemini-native-aihubmix-v1",
+                cache_policy_id="session-private-cache-policy-v1",
+                priority=220,
+                deployment_id=deployment,
+                observed_model_policy="strict",
+                requires_file_adapter=True,
+            ),
+            ModelOffering(
                 offering_id="aihubmix-gemini-3-8-flash",
                 provider="gemini",
                 model_pattern="gemini-3.8-flash",
@@ -796,11 +809,13 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
         ),
         ProtocolProfileSpec(
             profile_id="gemini-native-aihubmix-v1",
-            revision="relay-protocol-profile/gemini-aihubmix/2026-09-30.1",
+            revision="relay-protocol-profile/gemini-aihubmix/2026-10-01.1",
             protocol="gemini_native",
             cache={
                 "supported_mechanisms": ["stateful_resource"],
                 "resource_family": "cachedContents",
+                "operations": ["countTokens", "create", "get", "patch", "delete", "reference"],
+                "reference_field": "cachedContent",
                 "usage_mapping": "gemini_native",
             },
         ),
@@ -866,8 +881,8 @@ def _builtin_contracts() -> list[CapabilityContract]:
             modalities=("text", "image", "document"),
         ),
         _contract(
-            "gemini-3-8-native",
-            "relay-capability/gemini-3.8-flash/2026-09-27.1",
+            "gemini-3-1-flash-lite-native",
+            "relay-capability/gemini-3.1-flash-lite/2026-10-01.1",
             options=sampling,
             thinking={
                 "mode": "effort",
@@ -878,9 +893,44 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["stateful_resource"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
+                "verification_source": "gemini_native_explicit_cache",
                 "mechanism_profiles": {
-                    "stateful_resource": {"threshold_mode": "unknown"}
+                    "stateful_resource": {
+                        "threshold_mode": "provider_count",
+                        "minimum_cacheable_tokens": 1024,
+                        "final_threshold_guard": True,
+                        "token_counter": "countTokens",
+                        "ttl_seconds": 3600,
+                    }
+                },
+            },
+            structured_mode="native_json_schema",
+            modalities=("text", "image", "document"),
+        ),
+        _contract(
+            "gemini-3-8-native",
+            "relay-capability/gemini-3.8-flash/2026-10-01.1",
+            options=sampling,
+            thinking={
+                "mode": "effort",
+                "accepted_levels": ["auto", "low", "medium", "high"],
+                "level_map": {},
+                "wire_strategy": "gemini_thinking_level",
+            },
+            cache={
+                "version": "relay-cache-contract/1",
+                "supported_mechanisms": ["stateful_resource"],
+                "verification_status": "verified",
+                "verification_source": "gemini_native_explicit_cache",
+                "mechanism_profiles": {
+                    "stateful_resource": {
+                        "threshold_mode": "provider_count",
+                        "minimum_cacheable_tokens": 1024,
+                        "final_threshold_guard": True,
+                        "token_counter": "countTokens",
+                        "ttl_seconds": 3600,
+                    }
                 },
             },
             structured_mode="native_json_schema",

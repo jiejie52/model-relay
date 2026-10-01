@@ -37,13 +37,14 @@ from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
 from .cache.orchestrator import CacheOrchestrator
 from .cache.registry import CacheResourceRegistry
+from .cache.providers import GeminiAIHubMixCacheResourceAdapter
 from .core.raw_error import RawErrorRecorder
 from .execution.inline_executor import InlineExecutor
 from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
 
 
-API_VERSION = "3.0.0"
+API_VERSION = "3.1.0"
 
 
 settings = get_settings()
@@ -194,6 +195,11 @@ async def lifespan(_: FastAPI):
     )
     route_resolver.validate_catalog()
     cache_resources = CacheResourceRegistry()
+    if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
+        cache_resources.register(
+            settings.aihubmix_gemini_connection_id,
+            GeminiAIHubMixCacheResourceAdapter(settings),
+        )
     cache_orchestrator = CacheOrchestrator(repo, resource_registry=cache_resources)
     runtime = SharedExecutionRuntime(
         repo, storage_registry, providers, material_resolver, binding_resolver, settings,

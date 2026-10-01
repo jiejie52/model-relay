@@ -176,6 +176,7 @@ class SharedExecutionRuntime:
                     context_plan=context_plan,
                     material_bindings=material_bindings,
                     fence=fence,
+                    history=history,
                 )
             except CacheDecisionError as exc:
                 raise ProviderRequestError(exc.code, exc.message) from exc
@@ -405,7 +406,9 @@ class SharedExecutionRuntime:
                 "planned_mechanism": plan.get("planned_mechanism"),
                 "effective_cache_mechanism": (cache_binding or {}).get("mechanism"),
                 "execution_mechanism": (cache_binding or {}).get("mechanism"),
-                "resolution_status": plan.get("resolution_status") or "finalized",
+                # At this point the physical CacheExecutionBinding has been
+                # installed and sealed, so any final-threshold guard is resolved.
+                "resolution_status": "finalized",
                 "decision_reason": (cache_binding or {}).get("decision_reason") or plan.get("decision_reason"),
                 **cache_usage,
             }

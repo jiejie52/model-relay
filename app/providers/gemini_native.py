@@ -10,75 +10,32 @@ from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
-from ..materials.gemini_transport import project_gemini_input_content_type
 from ..structured_output import project_schema_for_provider, resolve_structured_output
+from .gemini_wire import (
+    project_current_user_content,
+    project_history_contents,
+    project_system_instruction,
+    validate_cached_content_handle,
+)
 
 
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/2"
-    _PROTECTED = {"contents", "systemInstruction", "model"}
+    adapter_version = "gemini-native-aihubmix/3"
+    _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         if not settings.aihubmix_gemini_base_url:
             raise RuntimeError("AIHUBMIX_GEMINI_BASE_URL is required for Gemini native")
         if settings.aihubmix_api_key is None:
             raise RuntimeError("AIHUBMIX_API_KEY is required for Gemini native")
         self.settings = settings
         self.base_url = settings.aihubmix_gemini_base_url.rstrip("/")
+        self._transport = transport
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
-        contents: list[dict[str, Any]] = []
-        if context.session.get("context_policy") == "conversation":
-            for turn in context.history:
-                transport = turn.get("transport_history") if isinstance(turn, dict) else None
-                if not isinstance(transport, dict) or transport.get("kind") != "gemini_native":
-                    continue
-                user_content = transport.get("user_content")
-                model_content = transport.get("model_content")
-                if isinstance(user_content, dict):
-                    contents.append(user_content)
-                if isinstance(model_content, dict):
-                    contents.append(model_content)
-
-        current_parts: list[dict[str, Any]] = []
-        by_id = {str(x.get("material_id")): x for x in context.material_bindings}
-        for material_id in context.material_ids:
-            binding = by_id.get(material_id)
-            if not binding:
-                raise ProviderRequestError(
-                    "MATERIAL_BINDING_MISSING",
-                    f"Frozen Gemini binding missing for {material_id}",
-                )
-            file_uri = binding.get("external_uri")
-            if not file_uri:
-                raise ProviderRequestError(
-                    "MATERIAL_BINDING_INVALID",
-                    f"Gemini binding has no file URI for {material_id}",
-                )
-            current_parts.append(
-                {
-                    "fileData": {
-                        "mimeType": project_gemini_input_content_type(binding.get("content_type")),
-                        "fileUri": str(file_uri),
-                    }
-                }
-            )
-
-        value = context.snapshot.get("input")
-        if isinstance(value, str):
-            query_text = value
-        else:
-            query_text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        current_parts.append({"text": query_text})
-        user_content = {"role": "user", "parts": current_parts}
-        contents.append(user_content)
-
-        payload: dict[str, Any] = {"contents": contents}
-        instructions = context.snapshot.get("instructions")
-        if instructions:
-            payload["systemInstruction"] = {"parts": [{"text": str(instructions)}]}
+        payload, user_content = self._build_context_payload(context)
 
         self._apply_model_options(payload, context.snapshot)
 
@@ -116,7 +73,7 @@ class GeminiNativeAdapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=self._transport) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 status = response.status_code
@@ -178,7 +135,7 @@ class GeminiNativeAdapter:
             text=text,
             response_id=response_id,
             usage=usage,
-            cached_tokens=None,
+            cached_tokens=usage_meta.get("cachedContentTokenCount"),
             response_output=model_content,
             history_entry={
                 "transport_history": {
@@ -196,6 +153,49 @@ class GeminiNativeAdapter:
                 channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
             ),
         )
+
+
+    @staticmethod
+    def _build_context_payload(context: V2ExecutionContext) -> tuple[dict[str, Any], dict[str, Any]]:
+        current_user = project_current_user_content(
+            context.snapshot,
+            material_ids=context.material_ids,
+            material_bindings=context.material_bindings,
+        )
+        binding = context.cache_execution_binding
+        if not isinstance(binding, dict):
+            raw = context.snapshot.get("_relay_cache_execution")
+            binding = raw if isinstance(raw, dict) else {}
+
+        if binding.get("mechanism") == "stateful_resource":
+            handle = validate_cached_content_handle(binding.get("provider_handle"))
+            metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+            cached_history_version = metadata.get("cached_history_version")
+            if isinstance(cached_history_version, bool) or not isinstance(cached_history_version, int):
+                raise ProviderRequestError(
+                    "CACHE_BINDING_INVALID",
+                    "Gemini stateful cache binding has no committed-history prefix boundary",
+                )
+            if cached_history_version < 0 or cached_history_version > len(context.history):
+                raise ProviderRequestError(
+                    "CACHE_BINDING_INVALID",
+                    "Gemini cached history boundary is outside the frozen history",
+                )
+            contents = project_history_contents(
+                context.history, start_entry=cached_history_version
+            )
+            contents.append(current_user)
+            # CachedContent already carries the system instruction and committed
+            # prefix.  Never repeat either in the generateContent request.
+            return {"contents": contents, "cachedContent": handle}, current_user
+
+        contents = project_history_contents(context.history)
+        contents.append(current_user)
+        payload: dict[str, Any] = {"contents": contents}
+        instruction = project_system_instruction(context.snapshot)
+        if instruction is not None:
+            payload["systemInstruction"] = instruction
+        return payload, current_user
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:

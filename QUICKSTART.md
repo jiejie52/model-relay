@@ -1,3 +1,19 @@
+# Model Relay 3.1.0 快速部署补充
+
+> 本次属于现有缓存处理方式增强，按 XX.YY.ZZ 规则从 3.0.0 升级到 **3.1.0**。完整迁移见 `DEPLOYMENT_3.1.0.md`。
+
+先执行：
+
+```text
+sql/006_gemini_stateful_cache.sql
+```
+
+然后部署同一 3.1.0 镜像到 API/Worker。确认两端 `/health` 都为 3.1.0，并使用新的 `MODEL_CONTROL_PLANE_REVISION=relay-model-control-plane/2026-10-01.1`。已有 Session 继续冻结旧 RouteBinding；要启用 Gemini Stateful Cache 必须新建 Session。
+
+调试建议先使用 `requested_cache_mode=on`。对于 `gemini-3.1-flash-lite` / `gemini-3.8-flash`：已提交 history/system instruction 达到显式缓存门槛时，执行应出现 `stateful_resource`；不足时仍会正常推理，但 effective mechanism 为 None。
+
+---
+
 # Model Relay 3.0.0 快速部署补充
 
 > 本次为新增缓存机制需求，按 XX.YY.ZZ 规则从 2.0.0 升级到 **3.0.0**。完整迁移见 `DEPLOYMENT_3.0.0.md`。

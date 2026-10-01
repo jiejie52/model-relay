@@ -345,6 +345,119 @@ class RelayV2Repository(RelayRepository):
                 return row
         return None
 
+    async def find_compatible_cache_resources(
+        self,
+        *,
+        scope_hash: str,
+        reuse_key: str,
+        max_prefix_version: int,
+    ) -> list[dict[str, Any]]:
+        rows = await self.backend.select(
+            "relay_cache_resources",
+            filters={
+                "scope_hash": f"eq.{scope_hash}",
+                "reuse_key": f"eq.{reuse_key}",
+                "state": "eq.ready",
+                "prefix_version": f"lte.{max(0, int(max_prefix_version))}",
+            },
+            order="prefix_version.desc,generation.desc",
+            limit=20,
+        )
+        now = datetime.now(timezone.utc)
+        safety = max(0, int(getattr(self.settings, "cache_expiry_safety_seconds", 30)))
+        usable: list[dict[str, Any]] = []
+        for row in rows:
+            if not row.get("provider_handle_ref"):
+                continue
+            expire_time = row.get("expire_time")
+            if expire_time:
+                try:
+                    parsed = datetime.fromisoformat(str(expire_time).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                if (parsed - now).total_seconds() <= safety:
+                    continue
+            usable.append(row)
+        return usable
+
+    async def start_cache_operation(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        lease_epoch: int,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "start_cache_operation_v31",
+            {
+                "p_operation_id": operation_id,
+                "p_lease_owner": lease_owner,
+                "p_lease_epoch": int(lease_epoch),
+            },
+        )
+        return bool(result)
+
+    async def record_cache_operation_observation(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        lease_epoch: int,
+        raw_result: dict[str, Any],
+        provider_request_id: str | None = None,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "record_cache_operation_observation_v31",
+            {
+                "p_operation_id": operation_id,
+                "p_lease_owner": lease_owner,
+                "p_lease_epoch": int(lease_epoch),
+                "p_raw_result": raw_result,
+                "p_provider_request_id": provider_request_id,
+            },
+        )
+        return bool(result)
+
+    async def finish_cache_operation(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        lease_epoch: int,
+        state: str,
+        raw_result: dict[str, Any],
+    ) -> bool:
+        result = await self.backend.rpc(
+            "finish_cache_operation_v31",
+            {
+                "p_operation_id": operation_id,
+                "p_lease_owner": lease_owner,
+                "p_lease_epoch": int(lease_epoch),
+                "p_state": state,
+                "p_raw_result": raw_result,
+            },
+        )
+        return bool(result)
+
+    async def invalidate_cache_resource(
+        self,
+        *,
+        resource_id: str,
+        provider_handle_ref: str,
+        state: str,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "invalidate_cache_resource_v31",
+            {
+                "p_resource_id": resource_id,
+                "p_provider_handle_ref": provider_handle_ref,
+                "p_state": state,
+            },
+        )
+        return bool(result)
+
     async def create_cache_operation_intent(
         self,
         *,
@@ -371,7 +484,7 @@ class RelayV2Repository(RelayRepository):
                 "p_operation_type": operation_type,
                 "p_idempotency_key": idempotency_key,
                 "p_lease_owner": lease_owner,
-                "p_lease_seconds": max(30, int(getattr(self.settings, "cache_prepare_timeout_seconds", 60))),
+                "p_lease_seconds": max(60, int(getattr(self.settings, "cache_prepare_timeout_seconds", 60)) + 30),
             },
         )
         row = result[0] if isinstance(result, list) and result else result if isinstance(result, dict) else None
@@ -394,17 +507,18 @@ class RelayV2Repository(RelayRepository):
         connection_id: str,
         scope_hash: str,
         content_fingerprint: str,
+        reuse_key: str,
+        prefix_version: int,
+        token_count: int | None,
+        spec_hash: str,
         provider_handle_ref: str,
         expire_time: str | None,
         profile_hash: str,
         raw_result: dict[str, Any],
     ) -> dict[str, Any] | None:
-        # Prefer the operation epoch returned by claim_cache_operation_v3 when
-        # callers pass it in raw_result; fall back to the explicit value for
-        # compatibility with simple test doubles.
         op_epoch = int(raw_result.get("operation_epoch") or lease_epoch)
         result = await self.backend.rpc(
-            "publish_cache_resource_v3",
+            "publish_cache_resource_v31",
             {
                 "p_operation_id": operation_id,
                 "p_lease_owner": lease_owner,
@@ -417,6 +531,10 @@ class RelayV2Repository(RelayRepository):
                 "p_scope_hash": scope_hash,
                 "p_profile_hash": profile_hash,
                 "p_content_fingerprint": content_fingerprint,
+                "p_reuse_key": reuse_key,
+                "p_prefix_version": int(prefix_version),
+                "p_token_count": token_count,
+                "p_spec_hash": spec_hash,
                 "p_provider_handle_ref": provider_handle_ref,
                 "p_expire_time": expire_time,
                 "p_raw_result": raw_result,

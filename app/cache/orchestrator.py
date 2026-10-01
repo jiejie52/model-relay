@@ -23,6 +23,7 @@ class CacheOrchestrator:
         context_plan: dict[str, Any],
         material_bindings: list[dict[str, Any]],
         fence: ExecutionFence,
+        history: list[dict[str, Any]],
     ) -> CacheExecutionBinding:
         plan = snapshot.get("cache_plan") if isinstance(snapshot.get("cache_plan"), dict) else {}
         plan_hash = str(snapshot.get("cache_plan_hash") or "")
@@ -78,6 +79,7 @@ class CacheOrchestrator:
                 fence=fence,
                 snapshot=snapshot,
                 session=session,
+                history=history,
             )
             return CacheExecutionBinding(
                 mechanism=prepared.get("mechanism"),
@@ -89,6 +91,7 @@ class CacheOrchestrator:
                 provider_handle=prepared.get("provider_handle"),
                 expires_at=prepared.get("expires_at"),
                 material_binding_hash=material_binding_hash,
+                metadata=dict(prepared.get("metadata") or {}),
             )
 
         raise RuntimeError(f"Unsupported cache mechanism in frozen plan: {mechanism!r}")

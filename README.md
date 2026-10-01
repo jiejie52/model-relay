@@ -1,4 +1,26 @@
-# Model Relay 3.0.0 - Cache Execution Control
+# Model Relay 3.1.0 - Gemini Stateful Cache Closure
+
+## 3.1.0 版本定位
+
+按项目版本规则，本次不是新增缓存需求，而是对 3.0.0 已定义的 Stateful Cache 处理方式做闭环增强，因此升级 **YY：3.0.0 -> 3.1.0**，ZZ 清零。
+
+### 3.1.0 Gemini Stateful Cache 闭环
+
+- 新增 `GeminiAIHubMixCacheResourceAdapter`，实现 Gemini Native `countTokens -> cachedContents.create -> get -> patch -> delete` Provider wire。
+- API 与 Worker 都按冻结 connection 注册相同 Resource Adapter；不再出现 Planner 选中但执行侧无 Adapter 的假启用。
+- `gemini-3.1-flash-lite` 与 `gemini-3.8-flash` 使用精确 ModelOffering + verified Cache Contract；泛 `gemini-*` 仍保持 candidate，禁止按协议名推断缓存能力。
+- Provider token 计数作为最终门槛 Guard。Request 受理时可以冻结 `stateful_resource` 计划，执行前以 `countTokens` 确认是否达到 1024-token 显式缓存门槛；低于门槛时确定性 `effective=None` 后正常推理。
+- Stateful Cache 只缓存 **system instruction + 已提交 conversation history 前缀**；当前轮 input/materials 永远留在 uncached suffix。
+- 资源复用从“当前 history 全量指纹相同”改为“兼容的已提交历史前缀”。历史从 N 增长到 N+1 时，旧 generation 仍可复用，并只发送新增 history suffix + 当前输入。
+- `GeminiNativeAdapter` 读取冻结的 CacheExecutionBinding；使用 Stateful Resource 时发送 `cachedContent=<handle>`，不重复发送已缓存 prefix/systemInstruction。
+- Provider `usageMetadata.cachedContentTokenCount` 进入统一 cache usage，作为真实命中证据。
+- 新增 `sql/006_gemini_stateful_cache.sql`：资源 `reuse_key/prefix_version/token_count/spec_hash`、cache-operation dispatch fence 与 v3.1 publish/failure/invalidate RPC；`running` 过期只会进入 `unknown`，不能授权重复 create。
+- CachedContent handle 仅接受 `cachedContents/<id>` 相对资源名；Provider create 返回 handle 后先立即写 operation ledger，再执行 get 验证，最后才允许写入 ready resource ledger。
+- `dispatch_started` 规则不变：模型请求一旦 sealed/dispatch 后，任何 cache 404/失效/usage 异常都不能触发“去缓存后再推理一次”。
+
+部署前必须执行 `sql/006_gemini_stateful_cache.sql`，并为采用新 verified Supply 创建新 Session。详见 `DEPLOYMENT_3.1.0.md`。
+
+---
 
 ## 3.0.0 版本定位
 

@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # 2.0 control-plane snapshot. This governs model offerings, protocol reuse,
     # capability contracts and per-model channel priority. Configuration may
     # reference credential *environment variable names* but never secret values.
-    model_control_plane_revision: str = "relay-model-control-plane/2026-09-27.1"
+    model_control_plane_revision: str = "relay-model-control-plane/2026-10-01.1"
     model_control_plane_json: str | None = None
     route_legacy_hint_mode: str = "warn"  # warn | strict
     route_gemini_model_pattern: str = "gemini-*"
@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     upstream_pool_timeout_seconds: float = 30.0
 
     supabase_timeout_seconds: float = 60.0
+
+    # Relay 3.1 Stateful Cache pre-dispatch budget. These calls are resource
+    # preparation only; model inference remains governed by the normal upstream
+    # execution timeout/fencing rules.
+    cache_prepare_timeout_seconds: float = 60.0
+    cache_expiry_safety_seconds: int = 30
 
     @property
     def supabase_root(self) -> str:
