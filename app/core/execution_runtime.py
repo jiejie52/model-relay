@@ -17,7 +17,7 @@ from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
 from ..providers.gemini_physical import (
     build_gemini_physical_cache_plan,
-    uses_physical_layout_v3,
+    uses_cache_material_projection_layout,
     uses_supported_physical_layout,
 )
 from ..providers.base import ProviderHTTPError, ProviderRequestError
@@ -178,7 +178,7 @@ class SharedExecutionRuntime:
                     "Gemini physical projection requires the frozen ContextPlan",
                 )
             cache_material_projection = None
-            if uses_physical_layout_v3(session):
+            if uses_cache_material_projection_layout(session):
                 cache_material_projection = await self.bindings.prepare_gemini_cache_projection(
                     material_ids=material_ids,
                     material_bindings=material_bindings,

@@ -26,6 +26,7 @@ from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
 from app.providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
     build_gemini_physical_cache_plan,
     frozen_session_projection_metadata,
@@ -1139,8 +1140,350 @@ def test_gemini_v2_cache_spec_consumes_exact_physical_cached_prefix():
     assert spec["content_fingerprint"] == plan["content_fingerprint"]
     assert spec["reuse_key"] == plan["reuse_key"]
     assert spec["physical_plan_hash"] == plan["physical_plan_hash"]
-    assert spec["measurement_order"] == "before_lookup"
+    assert spec["measurement_order"] == "provider_create"
     assert "dynamic-stage" not in json.dumps(spec["provider_payload"])
+
+
+
+def test_gemini_layout_v3_keeps_counttokens_preflight_for_frozen_sessions():
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    session["metadata"][GEMINI_SESSION_PROJECTION_METADATA_KEY] = {
+        "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
+        "projector_version": "gemini-physical-projector/3",
+    }
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic-stage",
+        "input": "question",
+    }
+    bindings = [_gemini_binding("m-session", "https://files.example/session", sha="sha-session")]
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    assert plan["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION_V3
+    assert plan["measurement_order"] == "before_lookup"
+    assert plan["projector_version"] == "gemini-physical-projector/3"
+
+
+def test_provider_create_threshold_is_finalized_without_counttokens_guard():
+    resolver = CacheIntentResolver()
+    result = resolver.resolve(
+        requested_mode="auto",
+        context_plan=_context_plan(with_stable_prefix=True),
+        cache_contract={
+            "supported_mechanisms": ["stateful_resource"],
+            "verification_status": "verified",
+            "mechanism_profiles": {
+                "stateful_resource": {
+                    "threshold_mode": "provider_create",
+                    "final_threshold_guard": False,
+                    "precreate_measurement": "none",
+                    "create_api": "caches.create",
+                    "ttl_seconds": 3600,
+                }
+            },
+        },
+        protocol_profile={"cache": {"supported_mechanisms": ["stateful_resource"]}},
+        cache_policy={
+            "scope": "session",
+            "mechanism_preference": ["stateful_resource"],
+            "auto_prepare_failure": "uncached_same_context",
+        },
+        cache_contract_hash="cache",
+        profile_hash="profile",
+        policy_hash="policy",
+    )
+    assert result.planned_mechanism == "stateful_resource"
+    assert result.resolution_status == "finalized"
+    assert result.decision_reason == "selected"
+    assert result.final_threshold_guard is False
+    assert result.mechanism_config["precreate_measurement"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_stateful_manager_provider_create_skips_counttokens_and_uses_create_usage():
+    events = []
+
+    class FakeAdapter:
+        adapter_version = "fake/4"
+
+        def build_spec(self, **kwargs):
+            return {
+                "cacheable": True,
+                "content_fingerprint": "fp-direct-create",
+                "reuse_key": "reuse-direct-create",
+                "prefix_version": 0,
+                "compatible_prefix_fingerprints": {"0": "fp-direct-create"},
+                "projection_version": "gemini-physical-projector/4",
+                "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION,
+                "measurement_order": "provider_create",
+            }
+
+        async def measure(self, *, spec):
+            events.append("measure")
+            raise AssertionError("layout/4 must not call countTokens")
+
+        async def create(self, *, spec, operation):
+            events.append("create")
+            return {
+                "handle": "cachedContents/direct-create",
+                "expire_time": "2099-01-01T00:00:00Z",
+                "usage_metadata": {"totalTokenCount": 4096},
+                "operation_epoch": operation["lease_epoch"],
+            }
+
+        async def get(self, *, handle, operation=None):
+            events.append("get")
+            return {"handle": handle, "expire_time": "2099-01-01T00:00:00Z"}
+
+    adapter = FakeAdapter()
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            return adapter
+
+    class Repo:
+        settings = settings()
+
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            return "scope"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            events.append("find")
+            return []
+
+        async def create_cache_operation_intent(self, **kwargs):
+            events.append("claim")
+            return {"op_id": "op-direct", "lease_owner": "worker", "lease_epoch": 11}
+
+        async def start_cache_operation(self, **kwargs):
+            events.append("start")
+            return True
+
+        async def record_cache_operation_observation(self, **kwargs):
+            events.append("record")
+            return True
+
+        async def publish_cache_resource(self, **kwargs):
+            events.append("publish")
+            assert kwargs["token_count"] == 4096
+            return {
+                "id": "resource-direct",
+                "generation": 1,
+                "provider_handle_ref": "cachedContents/direct-create",
+                "expire_time": "2099-01-01T00:00:00Z",
+                "token_count": 4096,
+                "content_fingerprint": "fp-direct-create",
+            }
+
+        async def finish_cache_operation(self, **kwargs):
+            raise AssertionError("successful direct create must publish")
+
+    result = await StatefulResourceManager(Repo(), Registry()).prepare(
+        request_row={"id": "r", "tenant_id": "t", "conversation_hash": "c", "session_id": "s"},
+        plan={
+            "requested_mode": "on",
+            "profile_hash": "profile",
+            "mechanism_config": {
+                "threshold_mode": "provider_create",
+                "precreate_measurement": "none",
+                "ttl_seconds": 3600,
+            },
+        },
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        fence=ExecutionFence(owner="worker", epoch=11),
+        snapshot={"connection_id": "conn", "offering_id": "o", "model": "gemini-3.1-flash-lite"},
+        session={"metadata": {"_relay_route": {"account_scope_hash": "a"}}},
+        history=[],
+    )
+    assert result["mechanism"] == "stateful_resource"
+    assert result["provider_handle"] == "cachedContents/direct-create"
+    assert result["metadata"]["prefix_token_count"] == 4096
+    assert result["metadata"]["provider_measurement"] == "cachedContents.create.usageMetadata"
+    assert events == ["find", "claim", "start", "create", "record", "get", "publish"]
+
+
+@pytest.mark.asyncio
+async def test_layout4_native_wire_is_cachedcontent_create_then_generate_without_counttokens():
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else None
+        calls.append((request.method, request.url.path, body))
+        assert not request.url.path.endswith(":countTokens")
+        if request.method == "POST" and request.url.path.endswith("/v1beta/cachedContents"):
+            wire = json.dumps(body, ensure_ascii=False)
+            assert "https://files.example/session" in wire
+            assert "current question" not in wire
+            return httpx.Response(
+                200,
+                headers={"x-goog-request-id": "cache-create-41"},
+                json={
+                    "name": "cachedContents/cache-41",
+                    "expireTime": "2099-01-01T00:00:00Z",
+                    "usageMetadata": {"totalTokenCount": 4096},
+                },
+            )
+        if request.method == "GET" and request.url.path.endswith("/v1beta/cachedContents/cache-41"):
+            return httpx.Response(
+                200,
+                json={
+                    "name": "cachedContents/cache-41",
+                    "expireTime": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith(
+            "/v1beta/models/gemini-3.1-flash-lite:generateContent"
+        ):
+            wire = json.dumps(body, ensure_ascii=False)
+            assert body["cachedContent"] == "cachedContents/cache-41"
+            assert "current question" in wire
+            assert "https://files.example/session" not in wire
+            raw = json.dumps({
+                "responseId": "response-41",
+                "candidates": [
+                    {"content": {"role": "model", "parts": [{"text": "ok"}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 4200,
+                    "cachedContentTokenCount": 4096,
+                    "candidatesTokenCount": 10,
+                    "totalTokenCount": 4210,
+                },
+            }).encode()
+
+            class _Stream(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    yield raw
+
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=_Stream(),
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    transport = httpx.MockTransport(handler)
+    cache_adapter = GeminiAIHubMixCacheResourceAdapter(settings(), transport=transport)
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            assert connection_id == "aihubmix_gemini_native"
+            return cache_adapter
+
+    class Repo:
+        settings = settings()
+
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            return "scope-layout4-wire"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            return []
+
+        async def create_cache_operation_intent(self, **kwargs):
+            return {"op_id": "op-layout4-wire", "lease_owner": "worker", "lease_epoch": 13}
+
+        async def start_cache_operation(self, **kwargs):
+            return True
+
+        async def record_cache_operation_observation(self, **kwargs):
+            return True
+
+        async def publish_cache_resource(self, **kwargs):
+            return {
+                "id": "resource-layout4-wire",
+                "generation": 1,
+                "provider_handle_ref": kwargs["provider_handle_ref"],
+                "expire_time": kwargs["expire_time"],
+                "token_count": kwargs["token_count"],
+                "content_fingerprint": kwargs["content_fingerprint"],
+                "prefix_version": kwargs["prefix_version"],
+            }
+
+        async def finish_cache_operation(self, **kwargs):
+            raise AssertionError("successful create should not finish as a failed/unknown operation")
+
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "connection_id": "aihubmix_gemini_native",
+        "channel_id": "aihubmix",
+        "offering_id": "gemini-3-1-flash-lite-aihubmix",
+        "instructions": "dynamic stage instruction",
+        "input": "current question",
+        "effective_options": {},
+        "think_level": "auto",
+        "metadata": {},
+        "protocol_profile_hash": "profile",
+        "capability_contract_hash": "cap",
+        "cache_contract_hash": "cache",
+    }
+    bindings = [_gemini_binding("m-session", "https://files.example/session", sha="sha-session")]
+    physical = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=bindings,
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    binding = await StatefulResourceManager(Repo(), Registry()).prepare(
+        request_row={
+            "id": "request-layout4-wire",
+            "tenant_id": "tenant",
+            "conversation_hash": "conversation",
+            "session_id": session["id"],
+        },
+        plan={
+            "requested_mode": "on",
+            "profile_hash": "profile",
+            "mechanism_config": {
+                "threshold_mode": "provider_create",
+                "precreate_measurement": "none",
+                "ttl_seconds": 600,
+            },
+        },
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=bindings,
+        fence=ExecutionFence(owner="worker", epoch=13),
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        provider_physical_plan=physical,
+    )
+    assert binding["provider_handle"] == "cachedContents/cache-41"
+
+    inference = GeminiNativeAdapter(settings(), transport=transport)
+    result = await inference.execute(
+        V2ExecutionContext(
+            snapshot=snapshot,
+            session=session,
+            history=[],
+            material_ids=["m-session"],
+            material_bindings=bindings,
+            tenant_id="tenant",
+            conversation_hash="conversation",
+            cache_execution_binding=binding,
+            provider_physical_plan=physical,
+        )
+    )
+    assert result.text == "ok"
+    assert result.cached_tokens == 4096
+    assert [path for _, path, _ in calls] == [
+        "/gemini/v1beta/cachedContents",
+        "/gemini/v1beta/cachedContents/cache-41",
+        "/gemini/v1beta/models/gemini-3.1-flash-lite:generateContent",
+    ]
 
 
 def test_gemini_v2_generate_payload_uses_exact_uncached_suffix_with_cache_handle():

@@ -20,11 +20,13 @@ from ...providers.gemini_wire import (
 class GeminiAIHubMixCacheResourceAdapter:
     """Gemini explicit CachedContent lifecycle over the AIHubMix native proxy.
 
-    The adapter owns Provider wire only.  Policy, idempotency and Request
-    dispatch rights remain in Relay core.
+    The adapter owns Provider wire only. Policy, idempotency and Request
+    dispatch rights remain in Relay core. Layout/4 follows AIHubMix's native SDK
+    sequence directly: Files API -> caches.create() -> generateContent(cachedContent).
+    ``measure`` remains only for frozen legacy layouts that explicitly require it.
     """
 
-    adapter_version = "gemini-cache-aihubmix/3"
+    adapter_version = "gemini-cache-aihubmix/4"
 
     def __init__(
         self,

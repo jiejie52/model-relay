@@ -39,7 +39,7 @@ class CacheIntentPlan:
     final_threshold_guard: bool = False
     candidate_rejections: tuple[dict[str, Any], ...] = ()
     mechanism_config: dict[str, Any] = field(default_factory=dict)
-    resolver_version: str = "relay-cache-resolver/1"
+    resolver_version: str = "relay-cache-resolver/2"
 
     def canonical(self) -> dict[str, Any]:
         return {

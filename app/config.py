@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # 2.0 control-plane snapshot. This governs model offerings, protocol reuse,
     # capability contracts and per-model channel priority. Configuration may
     # reference credential *environment variable names* but never secret values.
-    model_control_plane_revision: str = "relay-model-control-plane/2026-10-01.1"
+    model_control_plane_revision: str = "relay-model-control-plane/2026-10-02.1"
     model_control_plane_json: str | None = None
     route_legacy_hint_mode: str = "warn"  # warn | strict
     route_gemini_model_pattern: str = "gemini-*"

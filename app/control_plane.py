@@ -809,7 +809,7 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
         ),
         ProtocolProfileSpec(
             profile_id="gemini-native-aihubmix-v1",
-            revision="relay-protocol-profile/gemini-aihubmix/2026-10-01.1",
+            revision="relay-protocol-profile/gemini-aihubmix/2026-10-02.1",
             protocol="gemini_native",
             cache={
                 "supported_mechanisms": ["stateful_resource"],
@@ -817,6 +817,8 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
                 "operations": ["countTokens", "create", "get", "patch", "delete", "reference"],
                 "reference_field": "cachedContent",
                 "usage_mapping": "gemini_native",
+                "explicit_cache_flow": "files_api_create_generate",
+                "precreate_measurement": "none",
             },
         ),
         ProtocolProfileSpec(
@@ -882,7 +884,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
         ),
         _contract(
             "gemini-3-1-flash-lite-native",
-            "relay-capability/gemini-3.1-flash-lite/2026-10-01.1",
+            "relay-capability/gemini-3.1-flash-lite/2026-10-02.1",
             options=sampling,
             thinking={
                 "mode": "effort",
@@ -897,10 +899,10 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "verification_source": "gemini_native_explicit_cache",
                 "mechanism_profiles": {
                     "stateful_resource": {
-                        "threshold_mode": "provider_count",
-                        "minimum_cacheable_tokens": 1024,
-                        "final_threshold_guard": True,
-                        "token_counter": "countTokens",
+                        "threshold_mode": "provider_create",
+                        "final_threshold_guard": False,
+                        "precreate_measurement": "none",
+                        "create_api": "caches.create",
                         "ttl_seconds": 3600,
                     }
                 },
@@ -910,7 +912,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
         ),
         _contract(
             "gemini-3-8-native",
-            "relay-capability/gemini-3.8-flash/2026-10-01.1",
+            "relay-capability/gemini-3.8-flash/2026-10-02.1",
             options=sampling,
             thinking={
                 "mode": "effort",
@@ -925,10 +927,10 @@ def _builtin_contracts() -> list[CapabilityContract]:
                 "verification_source": "gemini_native_explicit_cache",
                 "mechanism_profiles": {
                     "stateful_resource": {
-                        "threshold_mode": "provider_count",
-                        "minimum_cacheable_tokens": 1024,
-                        "final_threshold_guard": True,
-                        "token_counter": "countTokens",
+                        "threshold_mode": "provider_create",
+                        "final_threshold_guard": False,
+                        "precreate_measurement": "none",
+                        "create_api": "caches.create",
                         "ttl_seconds": 3600,
                     }
                 },

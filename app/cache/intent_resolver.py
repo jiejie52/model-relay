@@ -12,7 +12,7 @@ class CacheIntentResolver:
     performs network I/O and never creates provider resources.
     """
 
-    resolver_version = "relay-cache-resolver/1"
+    resolver_version = "relay-cache-resolver/2"
 
     def resolve(
         self,
@@ -99,7 +99,11 @@ class CacheIntentResolver:
         minimum = mechanism_cfg.get("minimum_cacheable_tokens")
         below = False
         uncertain = False
-        if threshold_mode == "not_applicable":
+        if threshold_mode in {"not_applicable", "provider_create", "provider_enforced"}:
+            # For explicit provider-managed caches, Relay may intentionally avoid
+            # speculative/preflight token counting. CachedContent.create is the
+            # authoritative gate for model-specific minimums and returns a
+            # deterministic 4xx when the provider rejects the cache request.
             pass
         elif isinstance(minimum, int) and minimum >= 0:
             lower = assessment.get("lower")

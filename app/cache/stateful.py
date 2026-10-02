@@ -107,12 +107,14 @@ class StatefulResourceManager:
             if isinstance(spec.get("compatible_prefix_fingerprints"), dict)
             else {}
         )
-        measure_before_lookup = str(spec.get("measurement_order") or "") == "before_lookup"
+        measurement_order = str(spec.get("measurement_order") or "")
+        measure_before_lookup = measurement_order == "before_lookup"
+        provider_create_threshold = measurement_order == "provider_create"
         token_count: int | None = None
 
-        # New Gemini physical-layout Sessions deliberately measure the exact
-        # frozen cached_prefix before any resource lookup. This makes the final
-        # threshold decision consume exactly the bytes that identity/create use.
+        # Legacy layouts may pre-measure the exact frozen cached prefix. Layout/4
+        # deliberately follows the AIHubMix/Google Gen AI SDK flow and skips this
+        # step: CachedContent.create is the provider-authoritative threshold gate.
         if measure_before_lookup:
             measured = await self._measure(
                 adapter=adapter,
@@ -200,7 +202,7 @@ class StatefulResourceManager:
                 provider_observation=observation,
             )
 
-        if token_count is None:
+        if token_count is None and not provider_create_threshold:
             measured = await self._measure(
                 adapter=adapter,
                 spec=spec,
@@ -342,6 +344,8 @@ class StatefulResourceManager:
 
         if not isinstance(observation, dict):
             observation = {}
+        if token_count is None:
+            token_count = self._token_count_from_create_observation(observation)
         handle = str(observation.get("handle") or "").strip()
         if not handle:
             provider_request_id = pseudonymize_provider_request_id(
@@ -574,6 +578,20 @@ class StatefulResourceManager:
             }
         return token_count
 
+    @staticmethod
+    def _token_count_from_create_observation(observation: dict[str, Any]) -> int | None:
+        usage = observation.get("usage_metadata")
+        if not isinstance(usage, dict):
+            return None
+        value = usage.get("totalTokenCount")
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            parsed = int(value)
+        except Exception:
+            return None
+        return parsed if parsed >= 0 else None
+
     async def _record_error_observation(
         self,
         *,
@@ -656,6 +674,11 @@ class StatefulResourceManager:
         metadata = {
             "cached_history_version": int(cached_history_version),
             "prefix_token_count": (int(token_count) if token_count is not None else None),
+            "provider_measurement": (
+                "cachedContents.create.usageMetadata"
+                if str(spec.get("measurement_order") or "") == "provider_create"
+                else "countTokens"
+            ),
             "reuse_key_hash": stable_hash(reuse_key),
             "projection_version": projection_version,
             "provider_expire_time": (provider_observation or {}).get("expire_time"),

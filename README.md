@@ -1,3 +1,23 @@
+# Model Relay 4.1.0 - AIHubMix Native Cache Create Flow
+
+## 4.1.0 版本定位
+
+本版按项目 `XX.YY.ZZ` 规则属于对 4.0.0 **缓存处理方式的纠正/增强**，因此升级 YY：**4.0.0 -> 4.1.0**，ZZ 清零。4.0.0 的 Files API first、Cache/Inference Material 分离和 70 MiB fallback 全部保留；本版只收紧 Gemini Stateful Cache 的创建主链。
+
+### 4.1.0 核心规则
+
+- **新 Session 不再前置 `countTokens`**：layout/4 直接执行 `Gemini Files API -> cachedContents.create -> generateContent(cachedContent=...)`。
+- **Provider create 决定门槛**：不再由 Relay 用硬编码 `1024` token 做当前 Gemini 缓存资格判断。`caches.create()` 成功即表示 Provider 接受该精确缓存前缀；确定性 create 4xx 再按 `auto/on` 的既有策略处理。
+- **副作用控制不交给 SDK**：调用语义和 Native wire 对齐 AIHubMix/Google GenAI SDK 示例，但 Relay 仍由自己的 HTTP Adapter 发请求，以保留 cache-operation ledger、lease/fencing、Provider request-id、错误脱敏与 ambiguous-create 防重放语义。
+- **Files-first 不变**：文件优先上传 Gemini Files API；上传失败后仍按 `<70 MiB / >=70 MiB` 规则选择 `inlineData` 缓存子集，其余 Supabase External URL 只进入 inference。
+- **两级冻结不变**：Cache logical plan、Gemini physical plan、CacheExecutionBinding 仍在模型 dispatch 前冻结/seal；模型进入 `dispatch_started` 后不允许通过去缓存或换 transport 重发。
+- **旧 Session 不迁移**：4.0.0 `gemini-physical-cache-layout/3` 继续执行被冻结的 `countTokens` preflight；要使用新链路必须创建新 Gemini Session。
+- 新 Session 冻结 `gemini-physical-cache-layout/4` / `gemini-physical-projector/4`；无新增 SQL migration。
+
+部署见 `DEPLOYMENT_4.1.0.md`，验证见 `VALIDATION_4.1.0.md`，改动明细见 `CHANGELOG_4.1.0.md`。
+
+---
+
 # Model Relay 4.0.0 - Gemini Files-First Cache Material Projection
 
 ## 4.0.0 版本定位

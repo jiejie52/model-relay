@@ -1,3 +1,37 @@
+# Model Relay 4.1.0 快速部署补充
+
+> 4.1.0 纠正 4.0.0 的 Gemini Stateful Cache 创建方式：新 layout/4 按 **Files API -> `cachedContents.create` -> `generateContent(cachedContent=...)`** 执行，取消 Relay 的 `countTokens` 前置测量。
+
+部署同一 4.1.0 镜像到 API/Worker，确认两端版本都是 `4.1.0`，并设置：
+
+```text
+MODEL_CONTROL_PLANE_REVISION=relay-model-control-plane/2026-10-02.1
+GEMINI_CACHE_INLINE_FALLBACK_LIMIT_BYTES=73400320
+```
+
+要使用新链路必须**新建 Gemini Session**。4.0.0 layout/3 Session 保留原先冻结的 `countTokens` preflight，不会静默升级。
+
+新 Session 的缓存主链：
+
+```text
+Material
+  -> Gemini Files API first
+  -> physical layout/4
+  -> compatible CachedContent lookup
+     -> miss: fenced cachedContents.create (no countTokens)
+     -> hit/create success: CacheExecutionBinding(handle)
+  -> seal model dispatch
+  -> generateContent(cachedContent=<handle> + dynamic suffix)
+```
+
+4.0.0 的 Files 上传失败处理保持不变：总量 `<70 MiB` 时可把失败的 Session-stable 静态材料作为 `inlineData` 注入 Cache；总量 `>=70 MiB` 时确定性选择小文件子集（累计严格 `<70 MiB`）注入 Cache，其余较大文件通过 Supabase External URL 只进入 inference。
+
+详细见 `DEPLOYMENT_4.1.0.md`。
+
+> 下方 4.0.0 / 3.x 内容保留为历史迁移记录。
+
+---
+
 # Model Relay 4.0.0 快速部署补充
 
 > 4.0.0 是新的 Gemini Material/Cache 处理需求：**Gemini Files API 永远优先**；Supabase 只在 Files 上传失败后作为 inference fallback；Cache 使用 Files URI 或按 70 MiB 规则选择的 `inlineData`，绝不把 Supabase External URL 放入 CachedContent。
