@@ -301,7 +301,7 @@ class MaterialIngress:
                     actual_size=len(data),
                     request_file_total_bytes=request_file_total_bytes,
                     request_file_count=request_file_count,
-                    threshold_bytes=int(getattr(self.settings, "gemini_files_threshold_bytes", 99 * 1024 * 1024)),
+                    threshold_bytes=int(getattr(self.settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)),
                 )
             except GeminiTransportPolicyError as exc:
                 log_warning(
@@ -343,7 +343,7 @@ class MaterialIngress:
                 caller_total_hint=gemini_transport.caller_total_hint,
                 request_file_count_hint=request_file_count,
                 material_batch_id=material_batch_id,
-                threshold_bytes=gemini_transport.threshold_bytes,
+                cache_inline_fallback_limit_bytes=gemini_transport.threshold_bytes,
                 material_size_bytes=len(data),
             )
             if (
@@ -382,7 +382,7 @@ class MaterialIngress:
                 "caller_total_hint": gemini_transport.caller_total_hint,
                 "request_file_count_hint": request_file_count,
                 "material_batch_id": material_batch_id,
-                "threshold_bytes": gemini_transport.threshold_bytes,
+                "cache_inline_fallback_limit_bytes": gemini_transport.threshold_bytes,
             }
         try:
             row = await self.repo.create_material(
@@ -482,147 +482,9 @@ class MaterialIngress:
             )
             return updated
 
-        # Gemini <= threshold: persist the original bytes to Supabase and bind a
-        # short-lived Signed URL directly to Gemini fileData.fileUri. The Gemini
-        # Files API is deliberately not called on this path.
-        if gemini_transport is not None and gemini_transport.mode == "supabase_external_url":
-            if adapter.provider != "gemini":
-                raise MaterialIngressError(
-                    {
-                        "source": "relay",
-                        "code": "ROUTE_CONFIG_INVALID",
-                        "message": "Gemini External URL policy resolved to a non-Gemini file adapter",
-                    },
-                    status_code=500,
-                    ingress_id=ingress_id,
-                    material_id=material_id,
-                )
-            try:
-                projected_content_type = project_gemini_input_content_type(row.get("content_type"))
-                projected_filename = project_gemini_external_url_filename(
-                    row.get("filename"), row.get("content_type")
-                )
-                fallback_row = await self._store_fallback_logged(
-                    ingress_id=ingress_id,
-                    row=row,
-                    data=data,
-                    retention_policy="gemini-external-url-bridge",
-                    provider=provider,
-                    connection_id=resolved_connection_id,
-                    filename_override=projected_filename,
-                    content_type_override=projected_content_type,
-                )
-                sign_started_ms = now_ms()
-                ttl_seconds = max(300, min(
-                    int(self.settings.supabase_signed_url_ttl),
-                    604800,
-                ))
-                log_info(
-                    logger,
-                    "gemini_external_url_sign_started",
-                    ingress_id=ingress_id,
-                    material_id=material_id,
-                    provider=provider,
-                    connection_id=resolved_connection_id,
-                    ttl_seconds=ttl_seconds,
-                    storage_id=fallback_row.get("storage_id"),
-                )
-                signed_url = await self.fallback.sign_read_url(
-                    fallback_row, expires_in=ttl_seconds
-                )
-                binding = external_url_binding(
-                    material_id=material_id,
-                    connection_id=str(resolved_connection_id),
-                    account_scope_hash=adapter.account_scope_hash,
-                    external_url=signed_url,
-                    object_id=str(fallback_row["object_id"]),
-                    generation=1,
-                    ttl_seconds=ttl_seconds,
-                    metadata={
-                        "transport": "supabase_external_url",
-                        "storage_id": fallback_row.get("storage_id"),
-                        "object_id": fallback_row.get("object_id"),
-                        "relay_actual_bytes": gemini_transport.total_bytes,
-                        "threshold_bytes": gemini_transport.threshold_bytes,
-                        "material_batch_id": material_batch_id,
-                        "source_filename": row.get("filename"),
-                        "source_content_type": row.get("content_type"),
-                        "projected_filename": projected_filename,
-                        "projected_content_type": projected_content_type,
-                        "projection_revision": "gemini-external-url-projection/1",
-                    },
-                )
-                binding.setdefault("created_at", utcnow().isoformat())
-                binding["updated_at"] = utcnow().isoformat()
-                await self.repo.upsert_provider_binding(binding)
-                log_info(
-                    logger,
-                    "gemini_external_url_sign_completed",
-                    ingress_id=ingress_id,
-                    material_id=material_id,
-                    provider=provider,
-                    connection_id=resolved_connection_id,
-                    representation="gemini_external_url",
-                    duration_ms=elapsed_ms(sign_started_ms),
-                    ttl_seconds=ttl_seconds,
-                )
-            except Exception as exc:
-                detail = self._storage_error_detail(exc, phase="gemini_external_url_bridge")
-                await self.repo.update_material(
-                    material_id,
-                    {
-                        "status": "failed",
-                        "object_id": fallback_row.get("object_id") if fallback_row else None,
-                        "durability": "relay_backed" if fallback_row else "reupload_required",
-                        "metadata": {**material_metadata, "last_binding_error": detail},
-                    },
-                )
-                log_error(
-                    logger,
-                    "gemini_external_url_binding_failed",
-                    exc_info=True,
-                    ingress_id=ingress_id,
-                    material_id=material_id,
-                    provider=provider,
-                    connection_id=resolved_connection_id,
-                    phase="gemini_external_url_bridge",
-                    failure_class="dependency",
-                    exception_type=type(exc).__name__,
-                    upstream_http_status=detail.get("upstream_http_status"),
-                    duration_ms=elapsed_ms(ingress_started_ms),
-                )
-                raise MaterialIngressError(
-                    detail,
-                    status_code=502,
-                    ingress_id=ingress_id,
-                    material_id=material_id,
-                ) from exc
-
-            updated = await self.repo.update_material(
-                material_id,
-                {
-                    "status": "ready_provider",
-                    "object_id": fallback_row["object_id"],
-                    "durability": "relay_backed",
-                    "binding_generation": 1,
-                },
-            ) or row
-            log_info(
-                logger,
-                "material_ingress_completed",
-                ingress_id=ingress_id,
-                material_id=material_id,
-                provider=provider,
-                model=model,
-                connection_id=resolved_connection_id,
-                route_revision=route_revision,
-                status="ready_provider",
-                durability="relay_backed",
-                fallback_stored=True,
-                binding_kind="gemini_external_url",
-                duration_ms=elapsed_ms(ingress_started_ms),
-            )
-            return updated
+        # Relay 4.0 has no pre-emptive Supabase branch for Gemini. Files API
+        # is always attempted first; Supabase is activated only from the Files
+        # failure handler below.
 
         force_no_supabase = bool(
             gemini_transport is not None and gemini_transport.mode == "gemini_files"
@@ -637,7 +499,7 @@ class MaterialIngress:
                 model=model,
                 connection_id=resolved_connection_id,
                 relay_actual_bytes=gemini_transport.total_bytes,
-                threshold_bytes=gemini_transport.threshold_bytes,
+                cache_inline_fallback_limit_bytes=gemini_transport.threshold_bytes,
                 durability_policy=durability_policy,
                 fallback_policy=fallback_policy,
                 reason="Gemini Files API path selected; input bytes must not be written to Supabase",
@@ -776,6 +638,23 @@ class MaterialIngress:
                 ingress_id=ingress_id,
                 material_id=material_id,
             )
+            if gemini_transport is not None and str(adapter.provider or "").lower() == "gemini":
+                return await self._activate_gemini_files_failure_fallback(
+                    ingress_id=ingress_id,
+                    row=row,
+                    data=data,
+                    adapter=adapter,
+                    connection_id=str(resolved_connection_id),
+                    material_metadata=material_metadata,
+                    material_batch_id=material_batch_id,
+                    files_error=raw_error,
+                    generation=generation,
+                    provider=provider,
+                    model=model,
+                    route_revision=route_revision,
+                    started_ms=ingress_started_ms,
+                )
+
             if (
                 not force_no_supabase
                 and fallback_policy in {"on_provider_unavailable", "always"}
@@ -870,6 +749,119 @@ class MaterialIngress:
                 "binding_generation": generation,
             },
         ) or row
+
+    async def _activate_gemini_files_failure_fallback(
+        self,
+        *,
+        ingress_id: str,
+        row: dict[str, Any],
+        data: bytes,
+        adapter: Any,
+        connection_id: str,
+        material_metadata: dict[str, Any],
+        material_batch_id: str | None,
+        files_error: dict[str, Any],
+        generation: int,
+        provider: str | None,
+        model: str | None,
+        route_revision: str | None,
+        started_ms: float,
+    ) -> dict[str, Any]:
+        """Fallback after a Gemini Files API failure.
+
+        Supabase is deliberately second choice. The signed External URL remains
+        an inference representation; Relay 4.0 may separately project the same
+        fallback bytes as inlineData into CachedContent for Session-stable cache
+        material without changing the canonical Material or this binding.
+        """
+
+        material_id = str(row["id"])
+        projected_content_type = project_gemini_input_content_type(row.get("content_type"))
+        projected_filename = project_gemini_external_url_filename(
+            row.get("filename"), row.get("content_type")
+        )
+        fallback_row = await self._store_fallback_logged(
+            ingress_id=ingress_id,
+            row=row,
+            data=data,
+            retention_policy="gemini-files-failure-bridge",
+            provider=provider,
+            connection_id=connection_id,
+            filename_override=projected_filename,
+            content_type_override=projected_content_type,
+        )
+        ttl_seconds = max(300, min(int(self.settings.supabase_signed_url_ttl), 604800))
+        signed_url = await self.fallback.sign_read_url(fallback_row, expires_in=ttl_seconds)
+        binding = external_url_binding(
+            material_id=material_id,
+            connection_id=connection_id,
+            account_scope_hash=adapter.account_scope_hash,
+            external_url=signed_url,
+            object_id=str(fallback_row["object_id"]),
+            generation=generation,
+            ttl_seconds=ttl_seconds,
+            metadata={
+                "transport": "supabase_external_url",
+                "files_api_fallback": True,
+                "cache_projection": "inline_candidate",
+                "storage_id": fallback_row.get("storage_id"),
+                "object_id": fallback_row.get("object_id"),
+                "material_batch_id": material_batch_id,
+                "source_filename": row.get("filename"),
+                "source_content_type": row.get("content_type"),
+                "projected_filename": projected_filename,
+                "projected_content_type": projected_content_type,
+                "projection_revision": "gemini-external-url-projection/2",
+                "files_api_failure": {
+                    "source": files_error.get("source"),
+                    "code": files_error.get("code"),
+                    "upstream_http_status": files_error.get("upstream_http_status"),
+                    "phase": files_error.get("phase"),
+                    "exception_type": files_error.get("exception_type"),
+                },
+            },
+        )
+        binding.setdefault("created_at", utcnow().isoformat())
+        binding["updated_at"] = utcnow().isoformat()
+        await self.repo.upsert_provider_binding(binding)
+
+        metadata = dict(material_metadata)
+        policy = dict(metadata.get("_relay_gemini_transport") or {})
+        policy.update(
+            {
+                "mode": "gemini_files_primary_external_url_fallback",
+                "decision_source": "gemini_files_failure",
+                "files_api_failed": True,
+                "cache_inline_candidate": True,
+            }
+        )
+        metadata["_relay_gemini_transport"] = policy
+        metadata["last_binding_error"] = files_error
+        updated = await self.repo.update_material(
+            material_id,
+            {
+                "status": "ready_provider",
+                "object_id": fallback_row["object_id"],
+                "durability": "relay_backed",
+                "binding_generation": generation,
+                "metadata": metadata,
+            },
+        ) or row
+        log_warning(
+            logger,
+            "gemini_files_fallback_external_url_activated",
+            ingress_id=ingress_id,
+            material_id=material_id,
+            provider=provider,
+            model=model,
+            connection_id=connection_id,
+            route_revision=route_revision,
+            representation="gemini_external_url",
+            cache_projection="inline_candidate",
+            size_bytes=len(data),
+            duration_ms=elapsed_ms(started_ms),
+        )
+        return updated
 
     async def _store_fallback_logged(
         self,

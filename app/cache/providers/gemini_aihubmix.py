@@ -24,7 +24,7 @@ class GeminiAIHubMixCacheResourceAdapter:
     dispatch rights remain in Relay core.
     """
 
-    adapter_version = "gemini-cache-aihubmix/2"
+    adapter_version = "gemini-cache-aihubmix/3"
 
     def __init__(
         self,

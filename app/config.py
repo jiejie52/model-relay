@@ -103,8 +103,13 @@ class Settings(BaseSettings):
     material_allow_http: bool = False
     material_default_durability_policy: str = "native_first"
     material_default_fallback_policy: str = "on_provider_unavailable"
-    # Gemini dual material transport. The threshold is the sum of files in the
-    # current request. <= 99 MiB uses Supabase Signed URL; > 99 MiB uses Files API.
+    # Relay 4.0: Gemini Files API is always the primary provider transport.
+    # If Files upload fails, Session-stable fallback bytes may be injected once
+    # into CachedContent. The inline fallback budget is strictly below 70 MiB;
+    # larger fallback materials remain External-URL inference inputs.
+    gemini_cache_inline_fallback_limit_bytes: int = 70 * 1024 * 1024
+    # Deprecated compatibility knob retained so older deployments do not fail
+    # settings validation. It no longer selects Gemini ingress transport.
     gemini_files_threshold_bytes: int = 99 * 1024 * 1024
     gemini_file_soft_ttl_seconds: int = 172800
     gemini_file_poll_seconds: float = 2.0

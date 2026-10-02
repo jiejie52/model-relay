@@ -59,6 +59,22 @@ def project_history_contents(
 
 
 def project_material_part(binding: dict[str, Any], *, material_id: str | None = None) -> dict[str, Any]:
+    representation = str(binding.get("representation") or binding.get("binding_kind") or "")
+    if representation == "gemini_inline_data":
+        encoded = binding.get("inline_data")
+        if not isinstance(encoded, str) or not encoded:
+            label = material_id or str(binding.get("material_id") or "material")
+            raise ProviderRequestError(
+                "MATERIAL_BINDING_INVALID",
+                f"Gemini inline binding has no payload for {label}",
+            )
+        return {
+            "inlineData": {
+                "mimeType": project_gemini_input_content_type(binding.get("content_type")),
+                "data": encoded,
+            }
+        }
+
     file_uri = binding.get("external_uri")
     if not file_uri:
         label = material_id or str(binding.get("material_id") or "material")

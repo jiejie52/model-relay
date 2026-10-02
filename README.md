@@ -1,3 +1,23 @@
+# Model Relay 4.0.0 - Gemini Files-First Cache Material Projection
+
+## 4.0.0 版本定位
+
+本版按项目 `XX.YY.ZZ` 规则属于**新修改需求**，因此从 3.2.0 升级到 **4.0.0**。核心变化不是改变 Canonical Material / Session / Request，而是把 Gemini 的 **Inference Material Binding** 与 **Cache Material Projection** 真正拆开：文件上传先尝试 Gemini Files API；只有 Files API 失败后才使用 Supabase 作为 inference fallback，并按 70 MiB 规则决定哪些静态材料可以单点注入 CachedContent。
+
+### 4.0.0 核心规则
+
+- **Files API first**：Gemini `inference_input` 不再按 99 MiB 在 Supabase/Files 之间先选；每个文件都先尝试 Gemini Files API。成功得到的 `gemini_file_uri` 可直接进入 CachedContent。
+- **Files 失败才用 Supabase**：失败后原始 bytes 写入 Relay fallback storage，Signed External URL 只作为 inference binding，不允许进入 CachedContent。
+- **总量 <70 MiB**：Files 失败的 Session-stable 静态材料全部以 `inlineData` 单点注入 CachedContent；后续命中时只发送 `cachedContent` 引用 + 动态增量。
+- **总量 >=70 MiB**：对 Files 失败的 Session-stable 材料按 `(size_bytes, material_id)` 确定性小文件优先，选择累计原始字节严格 `<70 MiB` 的子集注入 CachedContent；其余大文件保留 Supabase External URL，只进入 inference uncached suffix，不参与缓存。
+- **两套执行投影**：`material_binding_snapshot` 继续冻结 inference 表示；layout/3 额外形成 cache-only material projection。`full_uncached_payload` 仍完整保留，因此缓存关闭、门槛不足或 pre-dispatch 降级不会丢材料。
+- **恢复边界不变**：缓存资源副作用仍发生在模型 `dispatch_started` 之前；进入模型 dispatch 后不允许因为缓存问题换 transport 或重新推理。
+- 新 Gemini Session 冻结 `gemini-physical-cache-layout/3`；layout/2 Session 不静默升级。无新增 SQL migration。
+
+部署见 `DEPLOYMENT_4.0.0.md`，验证见 `VALIDATION_4.0.0.md`，改动明细见 `CHANGELOG_4.0.0.md`。
+
+---
+
 # Model Relay 3.2.0 - Gemini Physical Cache Projection
 
 ## 3.2.0 版本定位

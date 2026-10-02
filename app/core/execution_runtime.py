@@ -15,7 +15,11 @@ from ..materials.resolver import MaterialResolver
 from ..materials.binding_resolver import BindingResolver
 from ..persistence.object_storage import ObjectLocation, StorageRegistry
 from ..providers.registry import ProviderRegistry
-from ..providers.gemini_physical import build_gemini_physical_cache_plan, uses_physical_layout_v2
+from ..providers.gemini_physical import (
+    build_gemini_physical_cache_plan,
+    uses_physical_layout_v3,
+    uses_supported_physical_layout,
+)
 from ..providers.base import ProviderHTTPError, ProviderRequestError
 from ..providers.v2_base import V2ExecutionContext
 from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
@@ -166,12 +170,23 @@ class SharedExecutionRuntime:
         if (
             is_v3
             and str(snapshot.get("provider") or "") == "gemini"
-            and uses_physical_layout_v2(session)
+            and uses_supported_physical_layout(session)
         ):
             if context_plan is None:
                 raise ProviderRequestError(
                     "CACHE_CONTEXT_MISMATCH",
                     "Gemini physical projection requires the frozen ContextPlan",
+                )
+            cache_material_projection = None
+            if uses_physical_layout_v3(session):
+                cache_material_projection = await self.bindings.prepare_gemini_cache_projection(
+                    material_ids=material_ids,
+                    material_bindings=material_bindings,
+                    session=session,
+                    tenant_id=request_row["tenant_id"],
+                    conversation_hash=request_row["conversation_hash"],
+                    request_id=request_id,
+                    session_id=session_id,
                 )
             provider_physical_plan = build_gemini_physical_cache_plan(
                 snapshot=snapshot,
@@ -180,6 +195,7 @@ class SharedExecutionRuntime:
                 material_ids=material_ids,
                 material_bindings=material_bindings,
                 context_plan=context_plan,
+                cache_material_projection=cache_material_projection,
             )
             log_info(
                 logger,
@@ -194,6 +210,8 @@ class SharedExecutionRuntime:
                 cached_prefix_wire_hash=provider_physical_plan.get("cached_prefix_wire_hash"),
                 uncached_suffix_wire_hash=provider_physical_plan.get("uncached_suffix_wire_hash"),
                 occurrence_mapping_hash=provider_physical_plan.get("occurrence_mapping_hash"),
+                cache_material_ids=(provider_physical_plan.get("dependencies") or {}).get("cache_material_ids"),
+                inference_only_session_material_ids=(provider_physical_plan.get("dependencies") or {}).get("inference_only_session_material_ids"),
                 cacheable=provider_physical_plan.get("cacheable"),
             )
 

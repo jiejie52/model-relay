@@ -1,3 +1,41 @@
+# Model Relay 4.0.0 快速部署补充
+
+> 4.0.0 是新的 Gemini Material/Cache 处理需求：**Gemini Files API 永远优先**；Supabase 只在 Files 上传失败后作为 inference fallback；Cache 使用 Files URI 或按 70 MiB 规则选择的 `inlineData`，绝不把 Supabase External URL 放入 CachedContent。
+
+部署同一 4.0.0 镜像到 API/Worker，确认两端 `/health` 都为 `4.0.0`。无新增 SQL migration，但 Gemini Stateful Cache 仍要求已有 `sql/005_relay_cache_control.sql` 与 `sql/006_gemini_stateful_cache.sql`。
+
+新增环境变量：
+
+```text
+GEMINI_CACHE_INLINE_FALLBACK_LIMIT_BYTES=73400320
+```
+
+`GEMINI_FILES_THRESHOLD_BYTES` 仅为旧部署配置兼容，不再选择上传 transport。
+
+Gemini 当前材料路径：
+
+```text
+Material ingress
+  -> Gemini Files API first
+     -> success: gemini_file_uri
+        -> Session-stable: CachedContent(fileUri)
+        -> request-only: Inference(fileUri)
+     -> failure: Supabase fallback + Signed External URL (Inference only)
+        -> exact Request total <70 MiB:
+             all failed Session-stable files -> CachedContent(inlineData)
+        -> exact Request total >=70 MiB:
+             smallest failed Session-stable subset, cumulative raw bytes <70 MiB
+                 -> CachedContent(inlineData)
+             remaining larger failed files
+                 -> Inference(fileData.fileUri=<Supabase Signed URL>)
+```
+
+使用缓存 handle 后，`generateContent` 只发送 `cachedContent` + 动态 history/input + inference-only 大文件；不会重复发送已经注入 CachedContent 的静态材料。详细见 `DEPLOYMENT_4.0.0.md`。
+
+> 下方 3.x / 0.x 内容保留为历史迁移记录；涉及旧 `<=99 MiB -> Supabase / >99 MiB -> Files API` 的段落已被 4.0.0 顶部规则取代。
+
+---
+
 # Model Relay 3.2.0 快速部署补充
 
 > 3.2.0 以 3.1.0 为基线，新增 Gemini Session Material 的版本化物理缓存投影。无新 SQL migration；数据库仍需已有 005 + 006。

@@ -13,10 +13,15 @@ from .gemini_wire import (
 )
 
 GEMINI_SESSION_PROJECTION_METADATA_KEY = "_relay_gemini_projection"
-GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/2"
-GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/2"
-PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/1"
-CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/2"
+GEMINI_PHYSICAL_LAYOUT_VERSION_V2 = "gemini-physical-cache-layout/2"
+GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/3"
+SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS = {
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V2,
+    GEMINI_PHYSICAL_LAYOUT_VERSION,
+}
+GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/3"
+PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/2"
+CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/3"
 
 
 def frozen_session_projection_metadata() -> dict[str, str]:
@@ -36,7 +41,15 @@ def session_projection_version(session: dict[str, Any]) -> str | None:
 
 
 def uses_physical_layout_v2(session: dict[str, Any]) -> bool:
+    return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION_V2
+
+
+def uses_physical_layout_v3(session: dict[str, Any]) -> bool:
     return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION
+
+
+def uses_supported_physical_layout(session: dict[str, Any]) -> bool:
+    return session_projection_version(session) in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
 
 
 def build_gemini_physical_cache_plan(
@@ -47,6 +60,7 @@ def build_gemini_physical_cache_plan(
     material_ids: list[str],
     material_bindings: list[dict[str, Any]],
     context_plan: dict[str, Any],
+    cache_material_projection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Freeze Gemini's provider-facing cache layout from canonical inputs.
 
@@ -57,10 +71,10 @@ def build_gemini_physical_cache_plan(
     """
 
     layout_version = session_projection_version(session)
-    if layout_version != GEMINI_PHYSICAL_LAYOUT_VERSION:
+    if layout_version not in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS:
         raise ProviderRequestError(
             "GEMINI_PHYSICAL_LAYOUT_UNAVAILABLE",
-            "The Session is not frozen to the Gemini physical cache layout required by this projector",
+            "The Session is not frozen to a supported Gemini physical cache layout",
         )
 
     model = str(snapshot.get("model") or "").strip()
@@ -76,11 +90,41 @@ def build_gemini_physical_cache_plan(
     session_material_set = set(session_material_ids)
     binding_by_id = {str(x.get("material_id") or ""): x for x in material_bindings}
 
+    projection = cache_material_projection if isinstance(cache_material_projection, dict) else {}
+    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
+        if projection:
+            cache_material_ids = [
+                str(x) for x in (projection.get("cache_material_ids") or []) if str(x)
+            ]
+            cache_bindings_raw = projection.get("cache_material_bindings")
+            cache_binding_by_id = {
+                str(x.get("material_id") or ""): x
+                for x in (cache_bindings_raw if isinstance(cache_bindings_raw, list) else [])
+                if isinstance(x, dict) and str(x.get("material_id") or "")
+            }
+        else:
+            # Safe fallback for direct/unit callers: only Provider-owned Files URI
+            # bindings may enter CachedContent without an explicit cache projection.
+            cache_material_ids = [
+                material_id
+                for material_id in session_material_ids
+                if str((binding_by_id.get(material_id) or {}).get("representation") or "") == "gemini_file_uri"
+            ]
+            cache_binding_by_id = {
+                material_id: binding_by_id[material_id]
+                for material_id in cache_material_ids
+            }
+    else:
+        # Frozen layout/2 keeps its original one-binding-for-both semantics.
+        cache_material_ids = list(session_material_ids)
+        cache_binding_by_id = dict(binding_by_id)
+    cache_material_set = set(cache_material_ids)
+
     cached_parts: list[dict[str, Any]] = []
     cached_material_descriptors: list[dict[str, Any]] = []
     occurrence_mapping: list[dict[str, Any]] = []
-    for part_index, material_id in enumerate(session_material_ids):
-        binding = binding_by_id.get(material_id)
+    for part_index, material_id in enumerate(cache_material_ids):
+        binding = cache_binding_by_id.get(material_id)
         if not binding:
             raise ProviderRequestError(
                 "MATERIAL_BINDING_MISSING",
@@ -116,6 +160,7 @@ def build_gemini_physical_cache_plan(
     dynamic_history, history_occurrences, projection_safe = _project_dynamic_history(
         history,
         session_material_ids=session_material_set,
+        cached_material_ids=cache_material_set,
     )
     occurrence_mapping.extend(history_occurrences)
 
@@ -124,7 +169,7 @@ def build_gemini_physical_cache_plan(
         material_ids=material_ids,
         material_bindings=material_bindings,
     )
-    request_material_ids = [mid for mid in material_ids if str(mid) not in session_material_set]
+    request_material_ids = [mid for mid in material_ids if str(mid) not in cache_material_set]
     current_uncached_user = project_current_user_content(
         snapshot,
         material_ids=request_material_ids,
@@ -132,7 +177,7 @@ def build_gemini_physical_cache_plan(
     )
     current_occurrences = _current_material_occurrences(
         material_ids=material_ids,
-        session_material_ids=session_material_set,
+        cached_material_ids=cache_material_set,
         material_bindings=binding_by_id,
     )
     occurrence_mapping.extend(current_occurrences)
@@ -175,11 +220,21 @@ def build_gemini_physical_cache_plan(
     )
 
     cacheable = bool(cached_prefix.get("contents") or cached_prefix.get("systemInstruction")) and projection_safe
+    projection_summary = {
+        key: value
+        for key, value in projection.items()
+        if key != "cache_material_bindings"
+    }
     dependencies = {
         "context_plan_hash": context_plan.get("context_plan_hash"),
         "material_binding_hash": stable_hash(material_bindings),
+        "cache_material_projection_hash": stable_hash(projection_summary) if projection_summary else None,
         "session_material_representation_digests": [
             x["representation_digest"] for x in cached_material_descriptors
+        ],
+        "cache_material_ids": list(cache_material_ids),
+        "inference_only_session_material_ids": [
+            material_id for material_id in session_material_ids if material_id not in cache_material_set
         ],
         "history_entries": len(history),
         "projection_safe": projection_safe,
@@ -197,6 +252,7 @@ def build_gemini_physical_cache_plan(
         "occurrence_mapping": occurrence_mapping,
         "dependencies": dependencies,
         "cache_spec": cache_spec,
+        "cache_material_projection": projection_summary,
         "cacheable": cacheable,
         "content_fingerprint": content_fingerprint if cacheable else "",
         "reuse_key": reuse_key if cacheable else "",
@@ -241,7 +297,7 @@ def _material_descriptor(material_id: str, binding: dict[str, Any], *, part_kind
 def _current_material_occurrences(
     *,
     material_ids: list[str],
-    session_material_ids: set[str],
+    cached_material_ids: set[str],
     material_bindings: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     occurrences: list[dict[str, Any]] = []
@@ -253,7 +309,7 @@ def _current_material_occurrences(
             continue
         part = project_material_part(binding, material_id=material_id)
         descriptor = _material_descriptor(material_id, binding, part_kind=next(iter(part.keys())))
-        cached = material_id in session_material_ids
+        cached = material_id in cached_material_ids
         occurrence = {
             "source": "current_input",
             "material_id": material_id,
@@ -273,6 +329,7 @@ def _project_dynamic_history(
     history: list[dict[str, Any]],
     *,
     session_material_ids: set[str],
+    cached_material_ids: set[str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     result: list[dict[str, Any]] = []
     mapping: list[dict[str, Any]] = []
@@ -310,7 +367,7 @@ def _project_dynamic_history(
                         safe = False
                     if material_id in session_material_ids:
                         remove_indexes.add(part_index)
-                        placement = "cached_prefix"
+                        placement = "cached_prefix" if material_id in cached_material_ids else "uncached_suffix"
                     else:
                         placement = "uncached_suffix"
                     mapping.append(

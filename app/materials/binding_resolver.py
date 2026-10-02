@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+import hashlib
 import logging
 from typing import Any
 
@@ -9,6 +11,11 @@ from ..observability import error as log_error, info as log_info, warning as log
 from ..utils import safe_segment, utcnow
 from ..v2_repository import RelayV2Repository
 from .fallback_storage import FallbackObjectStorage
+from .gemini_cache_projection import (
+    GEMINI_CACHE_PROJECTION_VERSION,
+    GEMINI_INLINE_CACHE_REPRESENTATION,
+    plan_gemini_cache_materials,
+)
 from .gemini_transport import (
     GEMINI_EXTERNAL_URL_REPRESENTATION,
     GEMINI_FILES_REPRESENTATION,
@@ -120,7 +127,7 @@ class BindingResolver:
                 sizes.append(int(raw_size))
             gemini_decision = decide_gemini_request_transport(
                 material_sizes=sizes,
-                threshold_bytes=int(getattr(self.fallback.settings, "gemini_files_threshold_bytes", 99 * 1024 * 1024)),
+                threshold_bytes=int(getattr(self.fallback.settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)),
             )
             log_info(
                 logger,
@@ -130,8 +137,13 @@ class BindingResolver:
                 connection_id=connection_id,
                 material_count=len(materials),
                 material_total_bytes=gemini_decision.total_bytes,
-                threshold_bytes=gemini_decision.threshold_bytes,
+                cache_inline_fallback_limit_bytes=gemini_decision.threshold_bytes,
                 selected_transport=gemini_decision.mode,
+                fallback_branch=(
+                    "inline_all_failed_session_materials"
+                    if gemini_decision.total_bytes < gemini_decision.threshold_bytes
+                    else "inline_small_failed_session_subset"
+                ),
                 decision_source=gemini_decision.source,
             )
 
@@ -192,6 +204,142 @@ class BindingResolver:
             snapshots.append(self._snapshot(material, binding))
         return snapshots
 
+    async def prepare_gemini_cache_projection(
+        self,
+        *,
+        material_ids: list[str],
+        material_bindings: list[dict[str, Any]],
+        session: dict[str, Any],
+        tenant_id: str,
+        conversation_hash: str,
+        request_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the cache-only Gemini material projection for layout/3.
+
+        Inference bindings remain frozen exactly as selected above. A Files URI
+        can be reused by CachedContent. An External-URL fallback is never copied
+        into CachedContent; eligible Session-stable fallback bytes are read from
+        Relay storage and materialized as inlineData only in the in-memory
+        physical execution plan.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for material_id in material_ids:
+            row = await self.repo.get_material(
+                str(material_id),
+                tenant_id=tenant_id,
+                conversation_hash=conversation_hash,
+            )
+            if not row:
+                raise ProviderRequestError("MATERIAL_NOT_FOUND", f"Material not found: {material_id}")
+            rows.append(row)
+
+        session_material_ids = [
+            str(x)
+            for x in (session.get("material_manifest") or [])
+            if str(x)
+        ] if session.get("context_policy") == "conversation" else []
+        inline_limit = int(
+            getattr(
+                self.fallback.settings,
+                "gemini_cache_inline_fallback_limit_bytes",
+                70 * 1024 * 1024,
+            )
+        )
+        try:
+            planned = plan_gemini_cache_materials(
+                material_rows=rows,
+                material_bindings=material_bindings,
+                session_material_ids=session_material_ids,
+                inline_limit_bytes=inline_limit,
+            )
+        except ValueError as exc:
+            raise ProviderRequestError("GEMINI_CACHE_MATERIAL_PLAN_INVALID", str(exc)) from exc
+
+        row_by_id = {str(row["id"]): row for row in rows}
+        binding_by_id = {str(binding.get("material_id") or ""): binding for binding in material_bindings}
+        inline_set = set(planned.inline_material_ids)
+        cache_bindings: list[dict[str, Any]] = []
+        actual_cache_ids: list[str] = []
+        missing_inline_ids: list[str] = []
+
+        for material_id in planned.cache_material_ids:
+            binding = binding_by_id.get(material_id)
+            row = row_by_id.get(material_id)
+            if binding is None or row is None:
+                continue
+            if material_id not in inline_set:
+                cache_bindings.append(dict(binding))
+                actual_cache_ids.append(material_id)
+                continue
+
+            fallback = await self.repo.get_material_fallback(material_id)
+            if not fallback:
+                missing_inline_ids.append(material_id)
+                continue
+            data = await self.fallback.read(fallback)
+            expected_sha = str(row.get("sha256") or "")
+            actual_sha = hashlib.sha256(data).hexdigest()
+            if expected_sha and actual_sha != expected_sha:
+                raise ProviderRequestError(
+                    "MATERIAL_INTEGRITY_MISMATCH",
+                    f"Relay fallback bytes do not match canonical Material {material_id}",
+                )
+            cache_bindings.append(
+                {
+                    "material_id": material_id,
+                    "binding_generation": int(binding.get("binding_generation") or binding.get("generation") or 1),
+                    "binding_kind": GEMINI_INLINE_CACHE_REPRESENTATION,
+                    "representation": GEMINI_INLINE_CACHE_REPRESENTATION,
+                    "connection_id": binding.get("connection_id"),
+                    "account_scope_hash": binding.get("account_scope_hash"),
+                    "provider": "gemini",
+                    "purpose": "cache_inline_fallback",
+                    "content_sha256": expected_sha or actual_sha,
+                    "content_type": project_gemini_input_content_type(row.get("content_type")),
+                    "filename": row.get("filename"),
+                    "inline_data": base64.b64encode(data).decode("ascii"),
+                    "metadata": {
+                        "projection_version": GEMINI_CACHE_PROJECTION_VERSION,
+                        "source_representation": binding.get("representation"),
+                        "source_object_id": fallback.get("object_id"),
+                        "size_bytes": len(data),
+                    },
+                }
+            )
+            actual_cache_ids.append(material_id)
+
+        actual_cache_set = set(actual_cache_ids)
+        inference_only = [
+            material_id
+            for material_id in session_material_ids
+            if material_id not in actual_cache_set
+        ]
+        canonical = planned.canonical()
+        canonical.update(
+            {
+                "cache_material_ids": actual_cache_ids,
+                "inference_only_session_material_ids": inference_only,
+                "missing_inline_material_ids": missing_inline_ids,
+                "cache_material_bindings": cache_bindings,
+            }
+        )
+        log_info(
+            logger,
+            "gemini_cache_material_projection_prepared",
+            request_id=request_id,
+            session_id=session_id,
+            material_total_bytes=planned.total_material_bytes,
+            inline_limit_bytes=planned.inline_limit_bytes,
+            mode=planned.mode,
+            files_api_cache_count=len(planned.files_api_material_ids),
+            inline_cache_count=len([x for x in actual_cache_ids if x in inline_set]),
+            inference_only_session_count=len(inference_only),
+            missing_inline_count=len(missing_inline_ids),
+        )
+        return canonical
+
     async def _ensure_gemini_request_binding(
         self,
         *,
@@ -205,54 +353,100 @@ class BindingResolver:
         request_id: str | None,
         session_id: str | None,
     ) -> dict[str, Any]:
-        material_id = str(material["id"])
-        desired_representation = (
-            GEMINI_EXTERNAL_URL_REPRESENTATION
-            if decision.mode == "supabase_external_url"
-            else GEMINI_FILES_REPRESENTATION
-        )
-        if self._binding_usable(binding) and str(binding.get("representation") or "") == desired_representation:
-            # If a Files binding already exists, remove any stale external-URL
-            # input copy left by an earlier per-material decision.
-            if desired_representation == GEMINI_FILES_REPRESENTATION:
-                await self._cleanup_gemini_supabase_copy(
-                    material=material,
-                    request_id=request_id,
-                    session_id=session_id,
-                    decision=decision,
-                )
-                return binding
+        """Resolve the inference binding with Gemini Files as the only primary.
 
-            # 0.5.10 projected only fileData.mimeType.  Existing External URL
-            # bindings may therefore still point to a Supabase object stored as
-            # application/json/.json.  Reuse only bindings whose backing bridge
-            # object already matches the provider-facing projection.
-            existing_fallback = await self.repo.get_material_fallback(material_id)
-            if existing_fallback and await self._gemini_external_projection_matches(
+        A previously frozen ``files_api_fallback`` External URL is reused instead
+        of retrying the provider-file side effect on every request.  Legacy
+        External URL bindings are promoted once when Relay still has canonical
+        bytes; if that Files upload fails, the failure is frozen as an External
+        URL inference fallback and the same bytes remain available for the
+        layout/3 cache-only inline projection.
+        """
+
+        material_id = str(material["id"])
+        representation = str((binding or {}).get("representation") or "")
+        binding_metadata = (
+            binding.get("metadata")
+            if isinstance((binding or {}).get("metadata"), dict)
+            else {}
+        )
+
+        if (
+            self._binding_usable(binding)
+            and representation == GEMINI_EXTERNAL_URL_REPRESENTATION
+            and bool(binding_metadata.get("files_api_fallback"))
+        ):
+            # Files API has already been attempted for this binding generation.
+            # Reusing the frozen fallback prevents a new provider-file side
+            # effect on every inference turn.
+            return binding
+
+        if self._binding_usable(binding) and representation == GEMINI_FILES_REPRESENTATION:
+            # Files is authoritative. Remove an obsolete Supabase bridge left by
+            # an older transport decision; cleanup failure does not invalidate
+            # the usable Provider binding.
+            await self._cleanup_gemini_supabase_copy(
                 material=material,
-                fallback=existing_fallback,
-                tenant_id=tenant_id,
-                conversation_hash=conversation_hash,
-            ):
-                return binding
+                request_id=request_id,
+                session_id=session_id,
+                decision=decision,
+            )
+            return binding
 
         fallback = await self.repo.get_material_fallback(material_id)
         generation = int((binding or {}).get("generation") or material.get("binding_generation") or 0) + 1
+        if not fallback:
+            await self.repo.update_material(
+                material_id,
+                {"status": "reupload_required", "durability": "reupload_required"},
+            )
+            raise ProviderRequestError(
+                "MATERIAL_REUPLOAD_REQUIRED",
+                f"Material {material_id} has no Relay bytes available for Gemini Files API upload",
+            )
 
-        if desired_representation == GEMINI_EXTERNAL_URL_REPRESENTATION:
-            if not fallback:
-                # 0.5.2 could create a small material through Files API when the
-                # caller omitted an aggregate. Relay cannot reconstruct the
-                # original bytes from Gemini fileUri, so force a clean reupload
-                # rather than silently keep the wrong transport.
-                await self.repo.update_material(
-                    material_id,
-                    {"status": "reupload_required", "durability": "reupload_required"},
-                )
-                raise ProviderRequestError(
-                    "MATERIAL_REUPLOAD_REQUIRED",
-                    f"Material {material_id} must be reuploaded so Relay can create the <=99 MiB Supabase External URL binding",
-                )
+        log_info(
+            logger,
+            "gemini_request_transport_promotion_started",
+            request_id=request_id,
+            session_id=session_id,
+            material_id=material_id,
+            from_representation=representation or None,
+            to_representation=GEMINI_FILES_REPRESENTATION,
+            material_total_bytes=decision.total_bytes,
+            cache_inline_fallback_limit_bytes=decision.threshold_bytes,
+        )
+        data = await self.fallback.read(fallback)
+        try:
+            result = await adapter.prepare(
+                MaterialFile(
+                    material_id=material_id,
+                    tenant_id=tenant_id,
+                    conversation_hash=conversation_hash,
+                    filename=str(material.get("filename") or material_id),
+                    content_type=project_gemini_input_content_type(material.get("content_type")),
+                    size_bytes=len(data),
+                    sha256=str(material.get("sha256") or ""),
+                    data=data,
+                ),
+                generation=generation,
+            )
+        except Exception as exc:
+            # 4.0: Files remains the primary. Supabase is only the frozen
+            # inference fallback after Files upload failure; CachedContent never
+            # receives this External URL. The cache projection may instead use
+            # the same canonical bytes as inlineData according to the 70 MiB
+            # aggregate rule.
+            log_warning(
+                logger,
+                "gemini_files_preferred_binding_failed",
+                request_id=request_id,
+                session_id=session_id,
+                material_id=material_id,
+                connection_id=connection_id,
+                exception_type=type(exc).__name__,
+                failure_class="dependency",
+            )
             fallback = await self._ensure_gemini_external_projection(
                 material=material,
                 fallback=fallback,
@@ -263,7 +457,7 @@ class BindingResolver:
             )
             ttl_seconds = max(300, min(int(self.fallback.settings.supabase_signed_url_ttl), 604800))
             signed_url = await self.fallback.sign_read_url(fallback, expires_in=ttl_seconds)
-            binding = external_url_binding(
+            external = external_url_binding(
                 material_id=material_id,
                 connection_id=connection_id,
                 account_scope_hash=adapter.account_scope_hash,
@@ -273,10 +467,12 @@ class BindingResolver:
                 ttl_seconds=ttl_seconds,
                 metadata={
                     "transport": "supabase_external_url",
+                    "files_api_fallback": True,
+                    "cache_projection": "inline_candidate",
                     "storage_id": fallback.get("storage_id"),
                     "object_id": fallback.get("object_id"),
                     "authoritative_request_total_bytes": decision.total_bytes,
-                    "threshold_bytes": decision.threshold_bytes,
+                    "cache_inline_fallback_limit_bytes": decision.threshold_bytes,
                     "request_reconciled": True,
                     "source_filename": material.get("filename"),
                     "source_content_type": material.get("content_type"),
@@ -286,67 +482,49 @@ class BindingResolver:
                     "projected_content_type": project_gemini_input_content_type(
                         material.get("content_type")
                     ),
-                    "projection_revision": "gemini-external-url-projection/1",
+                    "projection_revision": "gemini-external-url-projection/2",
                 },
             )
-            binding.setdefault("created_at", utcnow().isoformat())
-            binding["updated_at"] = utcnow().isoformat()
-            await self.repo.upsert_provider_binding(binding)
-            await self._update_gemini_material_transport(
-                material,
-                decision=decision,
-                generation=generation,
-                durability="relay_backed",
+            external.setdefault("created_at", utcnow().isoformat())
+            external["updated_at"] = utcnow().isoformat()
+            await self.repo.upsert_provider_binding(external)
+
+            metadata = dict(material.get("metadata") or {})
+            policy = dict(metadata.get("_relay_gemini_transport") or {})
+            policy.update(
+                {
+                    "mode": "gemini_files_primary_external_url_fallback",
+                    "decision_source": "gemini_files_failure",
+                    "files_api_failed": True,
+                    "cache_inline_candidate": True,
+                    "authoritative_request_total_bytes": decision.total_bytes,
+                    "cache_inline_fallback_limit_bytes": decision.threshold_bytes,
+                }
             )
-            log_info(
+            metadata["_relay_gemini_transport"] = policy
+            await self.repo.update_material(
+                material_id,
+                {
+                    "status": "ready_provider",
+                    "object_id": fallback.get("object_id"),
+                    "durability": "relay_backed",
+                    "binding_generation": generation,
+                    "metadata": metadata,
+                },
+            )
+            log_warning(
                 logger,
-                "gemini_request_transport_reconciled",
+                "gemini_files_fallback_external_url_activated",
                 request_id=request_id,
                 session_id=session_id,
                 material_id=material_id,
-                selected_transport=decision.mode,
-                binding_generation=generation,
+                connection_id=connection_id,
+                representation=GEMINI_EXTERNAL_URL_REPRESENTATION,
+                cache_projection="inline_candidate",
                 material_total_bytes=decision.total_bytes,
             )
-            return binding
+            return external
 
-        if not fallback:
-            if self._binding_usable(binding) and str(binding.get("representation") or "") == GEMINI_FILES_REPRESENTATION:
-                return binding
-            await self.repo.update_material(
-                material_id,
-                {"status": "reupload_required", "durability": "reupload_required"},
-            )
-            raise ProviderRequestError(
-                "MATERIAL_REUPLOAD_REQUIRED",
-                f"Material {material_id} has no Relay bytes available for Gemini Files API promotion",
-            )
-
-        log_info(
-            logger,
-            "gemini_request_transport_promotion_started",
-            request_id=request_id,
-            session_id=session_id,
-            material_id=material_id,
-            from_representation=(binding or {}).get("representation"),
-            to_representation=GEMINI_FILES_REPRESENTATION,
-            material_total_bytes=decision.total_bytes,
-            threshold_bytes=decision.threshold_bytes,
-        )
-        data = await self.fallback.read(fallback)
-        result = await adapter.prepare(
-            MaterialFile(
-                material_id=material_id,
-                tenant_id=tenant_id,
-                conversation_hash=conversation_hash,
-                filename=str(material.get("filename") or material_id),
-                content_type=project_gemini_input_content_type(material.get("content_type")),
-                size_bytes=len(data),
-                sha256=str(material.get("sha256") or ""),
-                data=data,
-            ),
-            generation=generation,
-        )
         binding = dict(result.binding)
         binding["material_id"] = material_id
         binding.setdefault("created_at", utcnow().isoformat())
@@ -356,7 +534,7 @@ class BindingResolver:
             {
                 "transport": "gemini_files",
                 "authoritative_request_total_bytes": decision.total_bytes,
-                "threshold_bytes": decision.threshold_bytes,
+                "cache_inline_fallback_limit_bytes": decision.threshold_bytes,
                 "request_reconciled": True,
             }
         )
@@ -380,7 +558,7 @@ class BindingResolver:
             request_id=request_id,
             session_id=session_id,
             material_id=material_id,
-            selected_transport=decision.mode,
+            selected_transport=GEMINI_FILES_REPRESENTATION,
             binding_generation=generation,
             material_total_bytes=decision.total_bytes,
         )
@@ -506,7 +684,7 @@ class BindingResolver:
                 material_id=material_id,
                 object_id=fallback.get("object_id"),
                 material_total_bytes=decision.total_bytes,
-                reason="authoritative request total exceeds Gemini External URL threshold",
+                reason="Gemini Files binding is authoritative; obsolete Supabase inference bridge removed",
             )
         except Exception as exc:
             # The provider binding is already ready. Cleanup failure must be
@@ -538,7 +716,7 @@ class BindingResolver:
                 "mode": decision.mode,
                 "decision_source": decision.source,
                 "authoritative_request_total_bytes": decision.total_bytes,
-                "threshold_bytes": decision.threshold_bytes,
+                "cache_inline_fallback_limit_bytes": decision.threshold_bytes,
             }
         )
         metadata["_relay_gemini_transport"] = policy

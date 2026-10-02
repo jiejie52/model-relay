@@ -1498,3 +1498,176 @@ async def test_missing_cache_handle_is_logged_unknown_and_never_verified_or_recr
     assert "raw-missing-handle-request-id" not in json.dumps(recorded[-1])
     assert "cache_handle_unavailable_no_recreate" in caplog.text
     assert "raw-missing-handle-request-id" not in caplog.text
+
+
+def test_gemini_4_primary_transport_is_files_api_even_for_small_materials():
+    from app.materials.gemini_transport import decide_gemini_transport
+
+    decision = decide_gemini_transport(
+        actual_size=1024,
+        request_file_total_bytes=1024,
+        request_file_count=1,
+        threshold_bytes=99 * 1024 * 1024,
+    )
+    assert decision.mode == "gemini_files"
+    assert decision.source == "gemini_files_preferred"
+
+
+def test_gemini_4_inline_fallback_planner_under_70mb_caches_all_failed_session_materials():
+    from app.materials.gemini_cache_projection import plan_gemini_cache_materials
+
+    mib = 1024 * 1024
+    rows = [
+        {"id": "m-a", "actual_size": 20 * mib},
+        {"id": "m-b", "actual_size": 30 * mib},
+    ]
+    bindings = [
+        {"material_id": "m-a", "representation": "gemini_external_url"},
+        {"material_id": "m-b", "representation": "gemini_external_url"},
+    ]
+    plan = plan_gemini_cache_materials(
+        material_rows=rows,
+        material_bindings=bindings,
+        session_material_ids=["m-a", "m-b"],
+        inline_limit_bytes=70 * mib,
+    )
+    assert plan.total_material_bytes == 50 * mib
+    assert plan.inline_material_ids == ("m-a", "m-b")
+    assert plan.cache_material_ids == ("m-a", "m-b")
+    assert plan.inference_only_session_material_ids == ()
+
+
+def test_gemini_4_inline_fallback_planner_over_70mb_chooses_small_files_deterministically():
+    from app.materials.gemini_cache_projection import plan_gemini_cache_materials
+
+    mib = 1024 * 1024
+    rows = [
+        {"id": "m-large", "actual_size": 60 * mib},
+        {"id": "m-small-b", "actual_size": 20 * mib},
+        {"id": "m-small-a", "actual_size": 10 * mib},
+    ]
+    bindings = [
+        {"material_id": "m-large", "representation": "gemini_external_url"},
+        {"material_id": "m-small-b", "representation": "gemini_external_url"},
+        {"material_id": "m-small-a", "representation": "gemini_external_url"},
+    ]
+    plan = plan_gemini_cache_materials(
+        material_rows=rows,
+        material_bindings=bindings,
+        session_material_ids=["m-large", "m-small-b", "m-small-a"],
+        inline_limit_bytes=70 * mib,
+    )
+    # Sorted by (size, id): 10 MiB + 20 MiB fit; adding 60 MiB would exceed the strict budget.
+    assert plan.inline_material_ids == ("m-small-a", "m-small-b")
+    assert plan.cache_material_ids == ("m-small-b", "m-small-a")
+    assert plan.inference_only_session_material_ids == ("m-large",)
+
+
+def test_gemini_4_hybrid_physical_plan_keeps_large_external_url_out_of_cache_and_in_inference():
+    import base64
+
+    session = _gemini_v2_session(material_manifest=["m-small", "m-large"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic-stage",
+        "input": "incremental instruction",
+    }
+    inference_bindings = [
+        {
+            "material_id": "m-small",
+            "binding_generation": 1,
+            "binding_kind": "gemini_external_url",
+            "representation": "gemini_external_url",
+            "connection_id": "aihubmix_gemini_native",
+            "account_scope_hash": "acct",
+            "provider": "gemini",
+            "external_uri": "https://supabase.example/small",
+            "content_sha256": "sha-small",
+            "content_type": "application/pdf",
+            "filename": "small.pdf",
+        },
+        {
+            "material_id": "m-large",
+            "binding_generation": 1,
+            "binding_kind": "gemini_external_url",
+            "representation": "gemini_external_url",
+            "connection_id": "aihubmix_gemini_native",
+            "account_scope_hash": "acct",
+            "provider": "gemini",
+            "external_uri": "https://supabase.example/large",
+            "content_sha256": "sha-large",
+            "content_type": "application/pdf",
+            "filename": "large.pdf",
+        },
+    ]
+    cache_projection = {
+        "schema_version": "relay-gemini-cache-material-plan/1",
+        "mode": "files_preferred_inline_small_subset",
+        "total_material_bytes": 80 * 1024 * 1024,
+        "inline_limit_bytes": 70 * 1024 * 1024,
+        "cache_material_ids": ["m-small"],
+        "inline_material_ids": ["m-small"],
+        "inference_only_session_material_ids": ["m-large"],
+        "cache_material_bindings": [
+            {
+                "material_id": "m-small",
+                "binding_generation": 1,
+                "binding_kind": "gemini_inline_data",
+                "representation": "gemini_inline_data",
+                "connection_id": "aihubmix_gemini_native",
+                "account_scope_hash": "acct",
+                "provider": "gemini",
+                "content_sha256": "sha-small",
+                "content_type": "application/pdf",
+                "filename": "small.pdf",
+                "inline_data": base64.b64encode(b"small-static-data").decode("ascii"),
+            }
+        ],
+    }
+    plan = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-small", "m-large"],
+        material_bindings=inference_bindings,
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection=cache_projection,
+    )
+
+    cached_wire = json.dumps(plan["cached_prefix"], ensure_ascii=False)
+    suffix_wire = json.dumps(plan["uncached_suffix"], ensure_ascii=False)
+    full_wire = json.dumps(plan["full_uncached_payload"], ensure_ascii=False)
+    assert "inlineData" in cached_wire
+    assert "https://supabase.example/small" not in cached_wire
+    assert "https://supabase.example/large" not in cached_wire
+    assert "https://supabase.example/large" in suffix_wire
+    assert "https://supabase.example/small" not in suffix_wire
+    assert "incremental instruction" in suffix_wire
+    assert "https://supabase.example/small" in full_wire
+    assert "https://supabase.example/large" in full_wire
+    assert plan["dependencies"]["inference_only_session_material_ids"] == ["m-large"]
+
+
+def test_gemini_4_exact_70mb_uses_large_aggregate_branch():
+    from app.materials.gemini_cache_projection import plan_gemini_cache_materials
+
+    mib = 1024 * 1024
+    rows = [
+        {"id": "m-small", "actual_size": 10 * mib},
+        {"id": "m-large", "actual_size": 60 * mib},
+    ]
+    bindings = [
+        {"material_id": "m-small", "representation": "gemini_external_url"},
+        {"material_id": "m-large", "representation": "gemini_external_url"},
+    ]
+    plan = plan_gemini_cache_materials(
+        material_rows=rows,
+        material_bindings=bindings,
+        session_material_ids=["m-small", "m-large"],
+        inline_limit_bytes=70 * mib,
+    )
+    assert plan.total_material_bytes == 70 * mib
+    assert plan.mode == "files_preferred_inline_small_subset"
+    assert plan.inline_material_ids == ("m-small",)
+    assert plan.inference_only_session_material_ids == ("m-large",)

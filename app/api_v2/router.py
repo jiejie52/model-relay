@@ -1219,7 +1219,9 @@ async def create_request(
         material_total_bytes += int(raw_size)
 
     if provider == "gemini":
-        threshold = int(getattr(settings, "gemini_files_threshold_bytes", 99 * 1024 * 1024))
+        inline_limit = int(
+            getattr(settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)
+        )
         log_info(
             logger,
             "gemini_request_size_calculated",
@@ -1229,9 +1231,14 @@ async def create_request(
             connection_id=connection_id,
             material_count=len(effective_material_ids),
             material_total_bytes=material_total_bytes,
-            threshold_bytes=threshold,
-            selected_transport=("supabase_external_url" if material_total_bytes <= threshold else "gemini_files"),
-            decision_source="relay_request_material_sum",
+            cache_inline_fallback_limit_bytes=inline_limit,
+            selected_transport="gemini_files",
+            fallback_branch=(
+                "inline_all_failed_session_materials"
+                if material_total_bytes < inline_limit
+                else "inline_small_failed_session_subset"
+            ),
+            decision_source="gemini_files_preferred_relay_request_material_sum",
         )
 
     try:

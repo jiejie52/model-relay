@@ -55,9 +55,9 @@ def project_gemini_external_url_filename(
 
 @dataclass(frozen=True)
 class GeminiTransportDecision:
-    mode: str  # supabase_external_url | gemini_files
+    mode: str  # gemini_files primary; supabase_external_url is fallback-only
     total_bytes: int
-    threshold_bytes: int
+    threshold_bytes: int  # Relay 4.0 inline-cache fallback budget
     source: str
     caller_total_hint: int | None = None
 
@@ -67,7 +67,8 @@ class GeminiTransportPolicyError(ValueError):
 
 
 def _mode(total_bytes: int, threshold_bytes: int) -> str:
-    return "supabase_external_url" if total_bytes <= threshold_bytes else "gemini_files"
+    # Relay 4.0 no longer chooses Supabase by size. Files API is always primary.
+    return "gemini_files"
 
 
 def decide_gemini_transport(
@@ -77,15 +78,12 @@ def decide_gemini_transport(
     request_file_count: int | None,
     threshold_bytes: int,
 ) -> GeminiTransportDecision:
-    """Choose ingress transport from bytes Relay actually received.
+    """Choose the primary Gemini ingress transport.
 
-    0.5.3 makes Relay authoritative for size. ``request_file_total_bytes`` and
-    ``request_file_count`` are retained only as legacy diagnostics; they never
-    select a transport. At single-material ingress time Relay can prove the
-    current material size, so it uses that size immediately. The final
-    multi-material request aggregate is recalculated by ``BindingResolver``
-    before provider dispatch and can promote External-URL materials to Files API
-    if the complete Request exceeds the threshold.
+    Relay 4.0 always attempts Gemini Files API first. Aggregate hints remain
+    diagnostic-only; ``threshold_bytes`` is the cache-inline fallback budget.
+    Supabase External URL is created only after a Files API failure, and the 70 MiB cache fallback rule
+    is applied later against the exact frozen Request material set.
     """
     actual = int(actual_size)
     threshold = int(threshold_bytes)
@@ -102,7 +100,7 @@ def decide_gemini_transport(
         mode=_mode(actual, threshold),
         total_bytes=actual,
         threshold_bytes=threshold,
-        source="relay_actual_bytes",
+        source="gemini_files_preferred",
         caller_total_hint=caller_hint,
     )
 
@@ -112,10 +110,10 @@ def decide_gemini_request_transport(
     material_sizes: Iterable[int],
     threshold_bytes: int,
 ) -> GeminiTransportDecision:
-    """Authoritatively select Gemini transport for the complete Request.
+    """Return the Request aggregate for observability/legacy callers.
 
-    The caller does not provide aggregate bytes. Relay sums ``actual_size`` from
-    the material registry for the exact frozen Request material set.
+    The aggregate no longer changes the primary Gemini transport in Relay 4.0;
+    Files API remains first choice for every material.
     """
     threshold = int(threshold_bytes)
     if threshold <= 0:
@@ -128,7 +126,7 @@ def decide_gemini_request_transport(
         mode=_mode(total, threshold),
         total_bytes=total,
         threshold_bytes=threshold,
-        source="relay_request_material_sum",
+        source="relay_request_material_sum_files_preferred",
     )
 
 

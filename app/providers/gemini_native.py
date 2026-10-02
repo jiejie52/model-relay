@@ -12,7 +12,7 @@ from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
-from .gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION
+from .gemini_physical import SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
 from .gemini_wire import (
     project_current_user_content,
     project_history_contents,
@@ -24,7 +24,7 @@ from .gemini_wire import (
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/4"
+    adapter_version = "gemini-native-aihubmix/5"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
 
     def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -137,7 +137,7 @@ class GeminiNativeAdapter:
             "model_content": model_content,
         }
         physical = context.provider_physical_plan
-        if isinstance(physical, dict) and physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION:
+        if isinstance(physical, dict) and physical.get("layout_version") in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS:
             transport_history.update(
                 {
                     "physical_layout_version": physical.get("layout_version"),
@@ -175,7 +175,7 @@ class GeminiNativeAdapter:
             binding = raw if isinstance(raw, dict) else {}
 
         physical = context.provider_physical_plan
-        if isinstance(physical, dict) and physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION:
+        if isinstance(physical, dict) and physical.get("layout_version") in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS:
             current_user = copy.deepcopy(physical.get("history_entry_user_content") or {})
             if not isinstance(current_user, dict) or current_user.get("role") != "user":
                 raise ProviderRequestError(

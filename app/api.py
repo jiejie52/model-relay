@@ -44,7 +44,7 @@ from .observability import configure_logging, elapsed_ms, error as log_error, in
 
 
 
-API_VERSION = "3.2.0"
+API_VERSION = "4.0.0"
 
 
 settings = get_settings()
