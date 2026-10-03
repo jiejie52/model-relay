@@ -1,3 +1,36 @@
+# Model Relay 4.3.2 快速部署补充
+
+> 4.3.2 修复 layout/7 在执行层没有进入 split inline-cache binding 的问题，并用新 layout/8 隔离旧 `cache_create_unknown` identity。
+
+部署 API / Worker 4.3.2 后，**必须创建新 Gemini Session**，确认：
+
+```text
+gemini-physical-cache-layout/8
+gemini-physical-projector/8
+gemini-native-aihubmix/7
+```
+
+`<70 MiB` 且存在 Session-stable material 时，关键日志应是：
+
+```text
+gemini_request_size_authoritative
+  selected_transport=inline_cache_no_files
+  cache_inline_material_count>=1
+
+gemini_cache_material_projection_prepared
+  inline_cache_count>=1
+
+gemini_physical_cache_plan_frozen
+  cacheable=true
+  cache_material_ids=[...]
+```
+
+随后才允许进入 `caches.create(contents=<inline static material>, system_instruction=...)`。如果没有实际 cached `contents`，layout/8 必须 `cacheable=false -> no_cacheable_prefix`，不能创建空 CachedContent。
+
+旧 layout/7 Session 不自动升级；详细见 `DEPLOYMENT_4.3.2.md`。
+
+---
+
 # Model Relay 4.3.1 快速部署补充
 
 > 4.3.1 修复 AIHubMix 在 cached inference 上拒绝 `cachedContent + systemInstruction/tools/toolConfig` 的 400。新 layout/7 把 Request `instructions` 固化进 CachedContent，命中后只发送动态增量。

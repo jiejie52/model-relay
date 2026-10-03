@@ -12,6 +12,7 @@ from ...providers.base import ProviderHTTPError, ProviderRequestError
 from ...providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from ...providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
 )
@@ -30,11 +31,13 @@ class GeminiAIHubMixCacheResourceAdapter:
     dispatch rights remain in Relay core. Layout/5 preserves the historical
     google-genai File -> caches.create() path for already-frozen Sessions.
     Layout/6+ also uses google-genai, but CachedContent receives inline bytes only;
-    Gemini Files API is reserved for inference-only material. Layout/4 and older
-    Sessions preserve their frozen native-REST cache-create semantics.
+    Gemini Files API is reserved for inference-only material. Layout/8 additionally
+    requires non-empty CachedContent.contents before the stateful operation may be
+    claimed. Layout/4 and older Sessions preserve their frozen native-REST
+    cache-create semantics.
     """
 
-    adapter_version = "gemini-cache-aihubmix/7"
+    adapter_version = "gemini-cache-aihubmix/8"
 
     def __init__(
         self,
@@ -67,11 +70,25 @@ class GeminiAIHubMixCacheResourceAdapter:
             physical = provider_physical_plan
             payload = dict(physical.get("cached_prefix") or {})
             layout_version = str(physical.get("layout_version") or "")
-            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V6, GEMINI_PHYSICAL_LAYOUT_VERSION} and self._payload_has_file_data(payload):
+            if layout_version in {
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
+                GEMINI_PHYSICAL_LAYOUT_VERSION,
+            } and self._payload_has_file_data(payload):
                 raise ProviderRequestError(
                     "GEMINI_CACHE_FILE_REF_FORBIDDEN",
                     "Layout/6+ CachedContent must contain inline static data only; Gemini File references are inference-only",
                 )
+            physical_cacheable = bool(physical.get("cacheable"))
+            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
+                # Layout/8 must never claim a stateful cache operation for a
+                # systemInstruction-only prefix.  The resource adapter is the
+                # final protocol boundary before StatefulResourceManager may
+                # look up or create a Provider resource, so repeat the
+                # non-empty-contents invariant here even though the projector
+                # already enforces it.
+                physical_cacheable = physical_cacheable and bool(payload.get("contents"))
+
             return {
                 "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
                 "projection_version": str(physical.get("projector_version") or ""),
@@ -87,7 +104,7 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "content_fingerprint": str(physical.get("content_fingerprint") or ""),
                 "compatible_prefix_fingerprints": dict(physical.get("compatible_prefix_fingerprints") or {}),
                 "provider_payload": payload,
-                "cacheable": bool(physical.get("cacheable")),
+                "cacheable": physical_cacheable,
                 "ttl_seconds": int(ttl_seconds) if isinstance(ttl_seconds, int) and ttl_seconds > 0 else 3600,
                 "context_plan_hash": context_plan.get("context_plan_hash"),
                 "material_binding_hash": stable_hash(material_bindings),
@@ -97,6 +114,7 @@ class GeminiAIHubMixCacheResourceAdapter:
                     if layout_version in {
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
                         GEMINI_PHYSICAL_LAYOUT_VERSION,
                     }
                     else "native_rest"
@@ -184,6 +202,17 @@ class GeminiAIHubMixCacheResourceAdapter:
 
     async def create(self, *, spec: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
         model = self._model(spec)
+        if (
+            str(spec.get("layout_version") or "") == GEMINI_PHYSICAL_LAYOUT_VERSION
+            and not (spec.get("provider_payload") or {}).get("contents")
+        ):
+            # Defense in depth: build_spec() should make this spec non-cacheable
+            # so StatefulResourceManager never claims a create operation.  If a
+            # caller bypasses that gate, still forbid any Provider side effect.
+            raise ProviderRequestError(
+                "GEMINI_CACHE_EMPTY_CONTENTS_FORBIDDEN",
+                "Layout/8 CachedContent.create requires non-empty contents",
+            )
         if str(spec.get("cache_create_transport") or "") == "google_genai_sdk":
             cache = await self.sdk.create_cache(
                 model=model,

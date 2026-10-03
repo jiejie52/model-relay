@@ -115,8 +115,9 @@ class StatefulResourceManager:
         # Legacy layouts may pre-measure the exact frozen cached prefix. Layout/4+
         # use Provider create as the authoritative threshold gate. Layout/5
         # introduced SDK cache creation; layout/6 removed Gemini File references
-        # from CachedContent; layout/7 also freezes systemInstruction into the
-        # CachedContent resource.
+        # from CachedContent; layout/7+ freezes systemInstruction into the
+        # CachedContent resource; layout/8 also requires non-empty contents before
+        # StatefulResourceManager may proceed to lookup/create.
         if measure_before_lookup:
             measured = await self._measure(
                 adapter=adapter,

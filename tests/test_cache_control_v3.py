@@ -21,11 +21,12 @@ from app.config import Settings
 from app.control_plane import ModelControlPlane
 from app.core.idempotency import caller_intent_hash, request_identity
 from app.core.provider_error_observation import provider_http_error_observation
-from app.providers.base import ProviderHTTPError
+from app.providers.base import ProviderHTTPError, ProviderRequestError
 from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
 from app.providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
@@ -33,6 +34,7 @@ from app.providers.gemini_physical import (
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
     build_gemini_physical_cache_plan,
     frozen_session_projection_metadata,
+    uses_inline_cache_transport_layout,
 )
 from app.providers.v2_base import V2ExecutionContext
 from app.v2_models import ExecutionSpec, SessionRequestCreate
@@ -1094,6 +1096,8 @@ def _gemini_v2_session(*, material_manifest=None, layout_version=None):
             projection["projector_version"] = "gemini-physical-projector/5"
         elif layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V6:
             projection["projector_version"] = "gemini-physical-projector/6"
+        elif layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V7:
+            projection["projector_version"] = "gemini-physical-projector/7"
     return {
         "id": "s-v2",
         "context_policy": "conversation",
@@ -1103,6 +1107,12 @@ def _gemini_v2_session(*, material_manifest=None, layout_version=None):
             "_relay_route": {"account_scope_hash": "acct"},
         },
     }
+
+
+def test_new_gemini_sessions_freeze_layout8_projector8():
+    projection = frozen_session_projection_metadata()
+    assert projection["layout_version"] == "gemini-physical-cache-layout/8"
+    assert projection["projector_version"] == "gemini-physical-projector/8"
 
 
 def _gemini_binding(material_id: str, uri: str, *, sha: str) -> dict:
@@ -1268,8 +1278,23 @@ def test_gemini_v2_cache_spec_consumes_exact_physical_cached_prefix():
     assert "dynamic-stage" not in json.dumps(spec["provider_payload"])
 
 
-def test_layout7_cache_identity_changes_when_request_instruction_changes():
-    session = _gemini_v2_session()
+def test_layout8_cache_identity_changes_when_request_instruction_changes():
+    import base64
+
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    binding = {
+        "material_id": "m-session",
+        "binding_generation": 1,
+        "binding_kind": "gemini_inline_data",
+        "representation": "gemini_inline_data",
+        "connection_id": "aihubmix_gemini_native",
+        "account_scope_hash": "acct",
+        "provider": "gemini",
+        "content_sha256": "sha-session",
+        "content_type": "application/pdf",
+        "filename": "session.pdf",
+        "inline_data": base64.b64encode(b"stable-static").decode("ascii"),
+    }
 
     def build(instructions: str):
         return build_gemini_physical_cache_plan(
@@ -1284,31 +1309,257 @@ def test_layout7_cache_identity_changes_when_request_instruction_changes():
             },
             session=session,
             history=[],
-            material_ids=[],
-            material_bindings=[],
+            material_ids=["m-session"],
+            material_bindings=[binding],
             context_plan={"context_plan_hash": "ctx"},
             cache_material_projection={
                 "schema_version": "relay-gemini-cache-material-plan/2",
                 "projection_version": "gemini-cache-material-projection/2",
                 "mode": "inline_cache_all_no_files",
-                "total_material_bytes": 0,
+                "total_material_bytes": len(b"stable-static"),
                 "inline_limit_bytes": 70 * 1024 * 1024,
-                "cache_material_ids": [],
-                "inline_material_ids": [],
+                "cache_material_ids": ["m-session"],
+                "inline_material_ids": ["m-session"],
                 "inference_only_session_material_ids": [],
                 "files_api_inference_material_ids": [],
                 "external_url_inference_material_ids": [],
                 "files_api_cache_material_ids": [],
-                "cache_material_bindings": [],
+                "cache_material_bindings": [binding],
             },
         )
 
     first = build("instruction-a")
     second = build("instruction-b")
+    assert first["cacheable"] is True
     assert first["cached_prefix"]["systemInstruction"]["parts"][0]["text"] == "instruction-a"
     assert "systemInstruction" not in first["uncached_suffix"]
     assert first["content_fingerprint"] != second["content_fingerprint"]
     assert first["reuse_key"] != second["reuse_key"]
+
+
+def test_layout8_instruction_only_prefix_is_not_cacheable():
+    session = _gemini_v2_session()
+    plan = build_gemini_physical_cache_plan(
+        snapshot={
+            "schema_version": "relay-request/2.3",
+            "model": "gemini-3.1-flash-lite",
+            "instructions": "instruction-only",
+            "input": "question",
+        },
+        session=session,
+        history=[],
+        material_ids=[],
+        material_bindings=[],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection={
+            "schema_version": "relay-gemini-cache-material-plan/2",
+            "projection_version": "gemini-cache-material-projection/2",
+            "mode": "inline_cache_all_no_files",
+            "total_material_bytes": 0,
+            "inline_limit_bytes": 70 * 1024 * 1024,
+            "cache_material_ids": [],
+            "inline_material_ids": [],
+            "cache_material_bindings": [],
+        },
+    )
+    assert plan["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
+    assert plan["cached_prefix"]["systemInstruction"]["parts"][0]["text"] == "instruction-only"
+    assert plan["cacheable"] is False
+    assert plan["content_fingerprint"] == ""
+    assert plan["reuse_key"] == ""
+
+
+def test_layout8_split_transport_gate_is_version_isolated():
+    assert uses_inline_cache_transport_layout(_gemini_v2_session()) is True
+    assert uses_inline_cache_transport_layout(
+        _gemini_v2_session(layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V6)
+    ) is True
+    # Layout/7 remains frozen to the 4.3.1 behavior. New Sessions receive
+    # layout/8 instead of silently changing existing Session execution.
+    assert uses_inline_cache_transport_layout(
+        _gemini_v2_session(layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V7)
+    ) is False
+
+
+def test_layout8_cache_identity_isolated_from_frozen_layout7():
+    import base64
+
+    binding = {
+        "material_id": "m-session",
+        "binding_generation": 1,
+        "binding_kind": "gemini_inline_data",
+        "representation": "gemini_inline_data",
+        "connection_id": "aihubmix_gemini_native",
+        "account_scope_hash": "acct",
+        "provider": "gemini",
+        "content_sha256": "sha-session",
+        "content_type": "application/pdf",
+        "filename": "session.pdf",
+        "inline_data": base64.b64encode(b"same-static").decode("ascii"),
+    }
+    projection = {
+        "schema_version": "relay-gemini-cache-material-plan/2",
+        "projection_version": "gemini-cache-material-projection/2",
+        "mode": "inline_cache_all_no_files",
+        "total_material_bytes": len(b"same-static"),
+        "inline_limit_bytes": 70 * 1024 * 1024,
+        "cache_material_ids": ["m-session"],
+        "inline_material_ids": ["m-session"],
+        "cache_material_bindings": [binding],
+    }
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "same-instruction",
+        "input": "question",
+    }
+    current = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=_gemini_v2_session(material_manifest=["m-session"]),
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=[binding],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection=projection,
+    )
+    frozen_v7 = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=_gemini_v2_session(
+            material_manifest=["m-session"],
+            layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
+        ),
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=[binding],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection=projection,
+    )
+    assert current["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
+    assert frozen_v7["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION_V7
+    assert current["cacheable"] is True and frozen_v7["cacheable"] is True
+    assert current["content_fingerprint"] != frozen_v7["content_fingerprint"]
+    assert current["reuse_key"] != frozen_v7["reuse_key"]
+
+
+def test_layout8_cache_adapter_rejects_instruction_only_spec_before_resource_claim():
+    session = _gemini_v2_session()
+    adapter = GeminiAIHubMixCacheResourceAdapter(settings())
+    physical = {
+        "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION,
+        "projector_version": "gemini-physical-projector/8",
+        "model": "gemini-3.1-flash-lite",
+        "cached_prefix": {
+            "systemInstruction": {"parts": [{"text": "instruction-only"}]},
+        },
+        # Simulate an inconsistent upstream projector. The resource adapter must
+        # still make the spec non-cacheable before StatefulResourceManager can
+        # look up or claim a create operation.
+        "cacheable": True,
+        "content_fingerprint": "should-not-be-used",
+        "reuse_key": "should-not-be-used",
+        "prefix_version": 0,
+        "compatible_prefix_fingerprints": {"0": "should-not-be-used"},
+        "measurement_order": "provider_create",
+        "cache_spec": {"schema_version": "relay-gemini-cache-spec/8"},
+    }
+    spec = adapter.build_spec(
+        snapshot={"model": "gemini-3.1-flash-lite"},
+        history=[],
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        session=session,
+        ttl_seconds=300,
+        provider_physical_plan=physical,
+    )
+    assert spec["cacheable"] is False
+    assert spec["provider_payload"].get("contents") in (None, [])
+
+
+
+@pytest.mark.asyncio
+async def test_layout8_empty_contents_stops_before_resource_lookup_or_create():
+    events = []
+
+    class Adapter:
+        adapter_version = "gemini-cache-aihubmix/8-test"
+
+        def build_spec(self, **kwargs):
+            events.append("build_spec")
+            return {
+                "cacheable": False,
+                "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION,
+                "projection_version": "gemini-physical-projector/8",
+                "physical_plan_hash": "plan",
+            }
+
+        async def measure(self, **kwargs):
+            raise AssertionError("measure must not run")
+
+        async def create(self, **kwargs):
+            raise AssertionError("create must not run")
+
+        async def get(self, **kwargs):
+            raise AssertionError("lookup must not run")
+
+    class Registry:
+        def maybe_get(self, connection_id):
+            assert connection_id == "aihubmix_gemini_native"
+            return Adapter()
+
+    class Repo:
+        @staticmethod
+        def cache_scope_hash(**kwargs):
+            events.append("scope")
+            return "scope"
+
+        async def find_compatible_cache_resources(self, **kwargs):
+            raise AssertionError("resource lookup must not run")
+
+    manager = StatefulResourceManager(Repo(), Registry())
+    result = await manager.prepare(
+        request_row={
+            "id": "r-empty",
+            "tenant_id": "t",
+            "conversation_hash": "c",
+            "session_id": "s",
+        },
+        plan={"profile_hash": "profile", "mechanism_config": {}},
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[],
+        fence=ExecutionFence(owner="worker", epoch=1, kind="async_job"),
+        snapshot={
+            "connection_id": "aihubmix_gemini_native",
+            "offering_id": "offering",
+        },
+        session={"metadata": {"_relay_route": {"account_scope_hash": "acct"}}},
+        history=[],
+        provider_physical_plan={"layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION},
+    )
+    assert result["mechanism"] is None
+    assert result["decision_reason"] == "no_cacheable_prefix"
+    assert events == ["scope", "build_spec"]
+
+@pytest.mark.asyncio
+async def test_layout8_cache_create_hard_guard_never_calls_provider_with_empty_contents():
+    class NeverCalledSDK:
+        async def create_cache(self, **kwargs):
+            raise AssertionError("Provider cache create must not be called for empty contents")
+
+    adapter = GeminiAIHubMixCacheResourceAdapter(settings(), sdk=NeverCalledSDK())
+    with pytest.raises(ProviderRequestError) as exc_info:
+        await adapter.create(
+            spec={
+                "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION,
+                "model": "gemini-3.1-flash-lite",
+                "provider_payload": {
+                    "systemInstruction": {"parts": [{"text": "instruction-only"}]},
+                },
+                "cache_create_transport": "google_genai_sdk",
+                "ttl_seconds": 300,
+            },
+            operation={"lease_epoch": 1},
+        )
+    assert exc_info.value.code == "GEMINI_CACHE_EMPTY_CONTENTS_FORBIDDEN"
 
 
 def test_frozen_layout6_keeps_pre_431_instruction_placement():
@@ -1337,7 +1588,7 @@ def test_frozen_layout6_keeps_pre_431_instruction_placement():
 
 
 @pytest.mark.asyncio
-async def test_layout7_cached_generate_wire_never_contains_system_instruction_tools_or_tool_config():
+async def test_layout8_cached_generate_wire_never_contains_system_instruction_tools_or_tool_config():
     session = _gemini_v2_session()
     snapshot = {
         "schema_version": "relay-request/2.1",
@@ -2591,7 +2842,7 @@ async def test_layout5_google_genai_rehydrates_file_object_after_process_boundar
     assert config.contents[0][0] is rehydrated
 
 @pytest.mark.asyncio
-async def test_layout7_google_genai_cache_create_uses_inline_bytes_and_frozen_instruction_without_files_api():
+async def test_layout8_google_genai_cache_create_uses_inline_bytes_and_frozen_instruction_without_files_api():
     import base64
 
     from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient

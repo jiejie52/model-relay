@@ -14,6 +14,7 @@ from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
 from .gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
     SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS,
 )
 from .gemini_wire import (
@@ -27,7 +28,7 @@ from .gemini_wire import (
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/6"
+    adapter_version = "gemini-native-aihubmix/7"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
     _CACHED_INFERENCE_FORBIDDEN = {"systemInstruction", "tools", "toolConfig"}
 
@@ -186,7 +187,10 @@ class GeminiNativeAdapter:
         physical = context.provider_physical_plan
         if not isinstance(physical, dict):
             return
-        if physical.get("layout_version") != GEMINI_PHYSICAL_LAYOUT_VERSION:
+        if physical.get("layout_version") not in {
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
+            GEMINI_PHYSICAL_LAYOUT_VERSION,
+        }:
             return
         if not payload.get("cachedContent"):
             return

@@ -143,8 +143,10 @@ class BindingResolver:
                     )
                 )
             else:
-                # Layout/2-5 Sessions are frozen to the historical Files-first
-                # request behavior even after 4.3 changes the new-session policy.
+                # Layout/2-5 Sessions keep the historical Files-first request
+                # behavior. Layout/7 is also intentionally routed through this
+                # compatibility branch in 4.3.2 so already-frozen 4.3.1 Sessions
+                # are not silently upgraded; new Sessions receive layout/8.
                 gemini_decision = GeminiTransportDecision(
                     mode="gemini_files",
                     total_bytes=gemini_decision.total_bytes,
@@ -257,6 +259,8 @@ class BindingResolver:
         Layout/6+ never puts Gemini File references into CachedContent. Stable
         cache-selected material is read from Relay storage and injected as
         inlineData. Layout/3-5 keep their frozen historical projection semantics.
+        Layout/8 is the corrected successor for new Sessions; layout/7 remains
+        readable as a frozen historical layout.
         """
 
         rows: list[dict[str, Any]] = []
@@ -288,6 +292,7 @@ class BindingResolver:
         is_inline_cache_layout = layout_version in {
             "gemini-physical-cache-layout/6",
             "gemini-physical-cache-layout/7",
+            "gemini-physical-cache-layout/8",
         }
 
         try:

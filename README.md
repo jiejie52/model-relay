@@ -1,3 +1,29 @@
+# Model Relay 4.3.2 - Gemini Layout/8 Cache Execution Fix
+
+## 4.3.2 版本定位
+
+4.3.2 修复 4.3.1 的 layout/7 执行层回归：API 已选择 `<70 MiB -> inline_cache_no_files`，但 `SharedExecutionRuntime` 仍只对 layout/6 启用 split inline-cache binding，导致 layout/7 可能回落到历史 Files-first 路径，并在 `contents` 为空时错误尝试创建 CachedContent。
+
+本版按改造方案的职责边界处理，不在 Provider Adapter 内临时改策略：**Session 冻结新 layout/8，Runtime 按冻结 layout 选择 Material Binding，Projector 只生成合法 CacheSpec，StatefulResourceManager 只对 `cacheable=true` 的规格执行资源副作用。**
+
+### 三层修复
+
+- **修正 layout 判定**：Runtime 改用 `uses_inline_cache_transport_layout()`，新 layout/8 正确进入 `<70 MiB / >=70 MiB` split material 策略；layout/6 保持历史支持。
+- **阻止空 Contents 创建**：layout/8 只有 `cached_prefix.contents` 非空才允许 `cacheable=true`。`systemInstruction` 继续进入 CachedContent identity，但不能单独触发 `caches.create()`；Cache Adapter 再做一次边界校验，并在 `create()` 加硬保护。
+- **新 layout 隔离**：新 Session 冻结 `gemini-physical-cache-layout/8` / `gemini-physical-projector/8`，CacheSpec 升为 `/8`。旧 layout/7 Session 不静默升级，历史 `cache_create_unknown` 不会污染新 layout/8 identity。
+
+### 版本
+
+- API / Worker：`4.3.2`
+- Gemini inference adapter：`gemini-native-aihubmix/7`
+- Gemini cache adapter：`gemini-cache-aihubmix/8`
+- Gemini physical layout/projector：`8` / `8`
+- 无 SQL migration
+
+部署见 `DEPLOYMENT_4.3.2.md`，验证见 `VALIDATION_4.3.2.md`，改动见 `CHANGELOG_4.3.2.md`。
+
+---
+
 # Model Relay 4.3.1 - Gemini Cached Instruction Freeze
 
 ## 4.3.1 版本定位
