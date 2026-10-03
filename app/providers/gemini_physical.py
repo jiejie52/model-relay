@@ -17,26 +17,31 @@ GEMINI_PHYSICAL_LAYOUT_VERSION_V2 = "gemini-physical-cache-layout/2"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V3 = "gemini-physical-cache-layout/3"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V4 = "gemini-physical-cache-layout/4"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V5 = "gemini-physical-cache-layout/5"
-GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/6"
+GEMINI_PHYSICAL_LAYOUT_VERSION_V6 = "gemini-physical-cache-layout/6"
+GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/7"
 SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS = {
     GEMINI_PHYSICAL_LAYOUT_VERSION_V2,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION,
 }
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V3 = "gemini-physical-projector/3"
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V4 = "gemini-physical-projector/4"
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V5 = "gemini-physical-projector/5"
-GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/6"
+GEMINI_PHYSICAL_PROJECTOR_VERSION_V6 = "gemini-physical-projector/6"
+GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/7"
 PHYSICAL_PLAN_SCHEMA_VERSION_V3 = "relay-gemini-physical-cache-plan/2"
 PHYSICAL_PLAN_SCHEMA_VERSION_V4 = "relay-gemini-physical-cache-plan/3"
 PHYSICAL_PLAN_SCHEMA_VERSION_V5 = "relay-gemini-physical-cache-plan/4"
-PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/5"
+PHYSICAL_PLAN_SCHEMA_VERSION_V6 = "relay-gemini-physical-cache-plan/5"
+PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/6"
 CACHE_SPEC_SCHEMA_VERSION_V3 = "relay-gemini-cache-spec/3"
 CACHE_SPEC_SCHEMA_VERSION_V4 = "relay-gemini-cache-spec/4"
 CACHE_SPEC_SCHEMA_VERSION_V5 = "relay-gemini-cache-spec/5"
-CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/6"
+CACHE_SPEC_SCHEMA_VERSION_V6 = "relay-gemini-cache-spec/6"
+CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/7"
 
 
 def frozen_session_projection_metadata() -> dict[str, str]:
@@ -72,6 +77,10 @@ def uses_physical_layout_v5(session: dict[str, Any]) -> bool:
 
 
 def uses_physical_layout_v6(session: dict[str, Any]) -> bool:
+    return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION_V6
+
+
+def uses_physical_layout_v7(session: dict[str, Any]) -> bool:
     return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION
 
 
@@ -80,6 +89,7 @@ def uses_cache_material_projection_layout(session: dict[str, Any]) -> bool:
         GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
     }
 
@@ -103,10 +113,13 @@ def build_gemini_physical_cache_plan(
     The canonical Session/Material/History objects stay unchanged. This plan is
     an execution-only projection and is deliberately built after Material
     bindings are frozen so cache identity, CachedContent.create and generateContent
-    all consume one deterministic physical layout. Layout/6 keeps the stable
+    all consume one deterministic physical layout. Layout/6+ keeps the stable
     prefix/dynamic suffix contract, but CachedContent is built only from Relay
     inline bytes. Gemini Files API is reserved for inference-only material in
     the >=70 MiB hybrid branch and is never referenced by caches.create().
+    Layout/7 additionally freezes the Request system instruction into
+    CachedContent so cached generateContent sends only dynamic contents plus
+    generationConfig and the cachedContent reference.
     """
 
     layout_version = session_projection_version(session)
@@ -134,6 +147,7 @@ def build_gemini_physical_cache_plan(
         GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
     }
     if uses_split_cache_projection:
@@ -148,8 +162,8 @@ def build_gemini_physical_cache_plan(
                 if isinstance(x, dict) and str(x.get("material_id") or "")
             }
         else:
-            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
-                # Layout/6 requires an explicit Relay inline-data cache
+            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V6, GEMINI_PHYSICAL_LAYOUT_VERSION}:
+                # Layout/6+ requires an explicit Relay inline-data cache
                 # projection. Never fall back to putting Gemini File references
                 # into CachedContent.
                 cache_material_ids = []
@@ -196,17 +210,22 @@ def build_gemini_physical_cache_plan(
             }
         )
 
+    request_instruction = project_system_instruction(snapshot)
+    session_instruction = _session_stable_instruction(session)
+    cache_instruction = session_instruction
+    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
+        # AIHubMix/Google reject systemInstruction on generateContent when a
+        # cachedContent reference is present. Layout/7 therefore makes the
+        # Request instruction part of the immutable CachedContent identity.
+        # Request instructions are canonical and take precedence over the
+        # reserved Session-level instruction slot if both ever exist.
+        cache_instruction = request_instruction or session_instruction
+
     cached_prefix: dict[str, Any] = {}
     if cached_parts:
         cached_prefix["contents"] = [{"role": "user", "parts": cached_parts}]
-
-    # There is currently no public canonical Session-level instruction field.
-    # Request/stage instructions therefore remain in the uncached suffix. The
-    # schema leaves this slot explicit so a future canonical Session instruction
-    # can be added without changing the physical-plan contract.
-    session_instruction = _session_stable_instruction(session)
-    if session_instruction is not None:
-        cached_prefix["systemInstruction"] = session_instruction
+    if cache_instruction is not None:
+        cached_prefix["systemInstruction"] = copy.deepcopy(cache_instruction)
 
     dynamic_history, history_occurrences, projection_safe = _project_dynamic_history(
         history,
@@ -236,22 +255,27 @@ def build_gemini_physical_cache_plan(
     uncached_suffix: dict[str, Any] = {
         "contents": [*dynamic_history, current_uncached_user],
     }
-    request_instruction = project_system_instruction(snapshot)
-    if request_instruction is not None:
+    if request_instruction is not None and layout_version != GEMINI_PHYSICAL_LAYOUT_VERSION:
         uncached_suffix["systemInstruction"] = request_instruction
 
     full_uncached_payload: dict[str, Any] = {
         "contents": [*project_history_contents(history), current_full_user],
     }
-    if request_instruction is not None:
-        full_uncached_payload["systemInstruction"] = copy.deepcopy(request_instruction)
+    fallback_instruction = request_instruction
+    if fallback_instruction is None and layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
+        fallback_instruction = session_instruction
+    if fallback_instruction is not None:
+        full_uncached_payload["systemInstruction"] = copy.deepcopy(fallback_instruction)
 
     is_current_layout = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+    is_layout_v6 = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V6
     is_layout_v5 = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V5
     is_layout_v4 = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V4
     projector_version = (
         GEMINI_PHYSICAL_PROJECTOR_VERSION
         if is_current_layout
+        else GEMINI_PHYSICAL_PROJECTOR_VERSION_V6
+        if is_layout_v6
         else GEMINI_PHYSICAL_PROJECTOR_VERSION_V5
         if is_layout_v5
         else GEMINI_PHYSICAL_PROJECTOR_VERSION_V4
@@ -261,6 +285,8 @@ def build_gemini_physical_cache_plan(
     physical_plan_schema_version = (
         PHYSICAL_PLAN_SCHEMA_VERSION
         if is_current_layout
+        else PHYSICAL_PLAN_SCHEMA_VERSION_V6
+        if is_layout_v6
         else PHYSICAL_PLAN_SCHEMA_VERSION_V5
         if is_layout_v5
         else PHYSICAL_PLAN_SCHEMA_VERSION_V4
@@ -270,6 +296,8 @@ def build_gemini_physical_cache_plan(
     cache_spec_schema_version = (
         CACHE_SPEC_SCHEMA_VERSION
         if is_current_layout
+        else CACHE_SPEC_SCHEMA_VERSION_V6
+        if is_layout_v6
         else CACHE_SPEC_SCHEMA_VERSION_V5
         if is_layout_v5
         else CACHE_SPEC_SCHEMA_VERSION_V4
@@ -277,15 +305,22 @@ def build_gemini_physical_cache_plan(
         else CACHE_SPEC_SCHEMA_VERSION_V3
     )
 
+    cached_prefix_descriptor = {
+        "session_instruction": session_instruction,
+        "session_materials": cached_material_descriptors,
+    }
+    if is_current_layout:
+        cached_prefix_descriptor = {
+            "system_instruction": cache_instruction,
+            "session_materials": cached_material_descriptors,
+        }
+
     cache_spec = {
         "schema_version": cache_spec_schema_version,
         "layout_version": layout_version,
         "projector_version": projector_version,
         "model": model,
-        "cached_prefix_descriptor": {
-            "session_instruction": session_instruction,
-            "session_materials": cached_material_descriptors,
-        },
+        "cached_prefix_descriptor": cached_prefix_descriptor,
         "semantic_dependencies": {
             "protocol_profile_hash": snapshot.get("protocol_profile_hash"),
             "capability_contract_hash": snapshot.get("capability_contract_hash"),
@@ -345,13 +380,14 @@ def build_gemini_physical_cache_plan(
         "compatible_prefix_fingerprints": ({"0": content_fingerprint} if cacheable else {}),
         # Layout/4 introduced Provider-create threshold measurement. Layout/5
         # keeps SDK cache creation with File references for frozen Sessions.
-        # Layout/6 keeps SDK cache creation but CachedContent contains only
-        # Relay inline bytes; Gemini Files API is inference-only.
+        # Layout/6+ keeps SDK cache creation but CachedContent contains only
+        # Relay inline bytes; Gemini Files API is inference-only. Layout/7 also
+        # freezes systemInstruction into CachedContent.
         "measurement_order": (
-            "provider_create" if (is_current_layout or is_layout_v5 or is_layout_v4) else "before_lookup"
+            "provider_create" if (is_current_layout or is_layout_v6 or is_layout_v5 or is_layout_v4) else "before_lookup"
         ),
         "cache_create_transport": (
-            "google_genai_sdk" if (is_current_layout or is_layout_v5) else "native_rest"
+            "google_genai_sdk" if (is_current_layout or is_layout_v6 or is_layout_v5) else "native_rest"
         ),
     }
     plan["cached_prefix_wire_hash"] = stable_hash(cached_prefix)

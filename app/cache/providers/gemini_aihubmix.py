@@ -12,6 +12,7 @@ from ...providers.base import ProviderHTTPError, ProviderRequestError
 from ...providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from ...providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
 )
 from ...providers.gemini_wire import (
@@ -28,12 +29,12 @@ class GeminiAIHubMixCacheResourceAdapter:
     The adapter owns Provider wire only. Policy, idempotency and Request
     dispatch rights remain in Relay core. Layout/5 preserves the historical
     google-genai File -> caches.create() path for already-frozen Sessions.
-    Layout/6 also uses google-genai, but CachedContent receives inline bytes only;
+    Layout/6+ also uses google-genai, but CachedContent receives inline bytes only;
     Gemini Files API is reserved for inference-only material. Layout/4 and older
     Sessions preserve their frozen native-REST cache-create semantics.
     """
 
-    adapter_version = "gemini-cache-aihubmix/6"
+    adapter_version = "gemini-cache-aihubmix/7"
 
     def __init__(
         self,
@@ -66,10 +67,10 @@ class GeminiAIHubMixCacheResourceAdapter:
             physical = provider_physical_plan
             payload = dict(physical.get("cached_prefix") or {})
             layout_version = str(physical.get("layout_version") or "")
-            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION and self._payload_has_file_data(payload):
+            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V6, GEMINI_PHYSICAL_LAYOUT_VERSION} and self._payload_has_file_data(payload):
                 raise ProviderRequestError(
                     "GEMINI_CACHE_FILE_REF_FORBIDDEN",
-                    "Layout/6 CachedContent must contain inline static data only; Gemini File references are inference-only",
+                    "Layout/6+ CachedContent must contain inline static data only; Gemini File references are inference-only",
                 )
             return {
                 "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
@@ -93,7 +94,11 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "measurement_order": str(physical.get("measurement_order") or "before_lookup"),
                 "cache_create_transport": (
                     "google_genai_sdk"
-                    if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V5, GEMINI_PHYSICAL_LAYOUT_VERSION}
+                    if layout_version in {
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION,
+                    }
                     else "native_rest"
                 ),
                 "sdk_file_refs": (

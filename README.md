@@ -1,3 +1,26 @@
+# Model Relay 4.3.1 - Gemini Cached Instruction Freeze
+
+## 4.3.1 版本定位
+
+4.3.1 修复 4.3.0 中 **CachedContent 已创建成功，但 `generateContent` 同时发送 `cachedContent + systemInstruction` 被 AIHubMix 400 拒绝**的问题。
+
+新 `layout/7` 把 Request `instructions` 固化进 CachedContent，并把它纳入 cache fingerprint / reuse key。命中缓存后，动态推理只发送 `cachedContent`、增量 `contents` 和允许的 `generationConfig`；最终 wire 会在所有 option / structured-output 投影之后再次剔除 `systemInstruction`、`tools`、`toolConfig`。
+
+### 核心规则
+
+- 新 Session：`gemini-physical-cache-layout/7` / `gemini-physical-projector/7`。
+- `instructions` 进入 `caches.create(... system_instruction=...)`，不再进入 cached inference suffix。
+- 不同 `instructions` 产生不同 `content_fingerprint` / `reuse_key`，禁止错误复用 Cache。
+- cached inference 最终 JSON 中绝不保留顶层 `systemInstruction` / `tools` / `toolConfig`。
+- cache 在 dispatch 前降级时，`full_uncached_payload` 仍恢复完整 `systemInstruction`，不会丢逻辑上下文。
+- 4.3.0 的 `<70 MiB / >=70 MiB` 文件分流策略保持不变。
+- 旧 layout/6 Session 不静默升级；要使用修复后的语义必须创建新 Session。
+- API / Worker：`4.3.1`；Gemini inference adapter：`gemini-native-aihubmix/6`；cache adapter：`gemini-cache-aihubmix/7`；无 SQL migration。
+
+部署见 `DEPLOYMENT_4.3.1.md`，验证见 `VALIDATION_4.3.1.md`，改动见 `CHANGELOG_4.3.1.md`。
+
+---
+
 # Model Relay 4.3.0 - Gemini Inline Cache / Files Inference Split
 
 ## 4.3.0 版本定位

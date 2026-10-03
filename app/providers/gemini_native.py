@@ -12,7 +12,10 @@ from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
-from .gemini_physical import SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
+from .gemini_physical import (
+    GEMINI_PHYSICAL_LAYOUT_VERSION,
+    SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS,
+)
 from .gemini_wire import (
     project_current_user_content,
     project_history_contents,
@@ -24,8 +27,9 @@ from .gemini_wire import (
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/5"
+    adapter_version = "gemini-native-aihubmix/6"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
+    _CACHED_INFERENCE_FORBIDDEN = {"systemInstruction", "tools", "toolConfig"}
 
     def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         if not settings.aihubmix_gemini_base_url:
@@ -60,6 +64,13 @@ class GeminiNativeAdapter:
                 )
                 generation["responseMimeType"] = "application/json"
                 generation["responseSchema"] = projection.schema
+
+        # AIHubMix follows the Gemini CachedContent contract here: once a
+        # cachedContent reference is present, systemInstruction/tools/toolConfig
+        # must come from the CachedContent resource, not generateContent. Run
+        # this after all option/structured-output projection so no legacy
+        # provider_payload field can re-introduce a forbidden top-level key.
+        self._enforce_cached_inference_wire(payload, context)
 
         model = str(context.snapshot["model"])
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
@@ -165,6 +176,30 @@ class GeminiNativeAdapter:
                 channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
             ),
         )
+
+    @classmethod
+    def _enforce_cached_inference_wire(
+        cls,
+        payload: dict[str, Any],
+        context: V2ExecutionContext,
+    ) -> None:
+        physical = context.provider_physical_plan
+        if not isinstance(physical, dict):
+            return
+        if physical.get("layout_version") != GEMINI_PHYSICAL_LAYOUT_VERSION:
+            return
+        if not payload.get("cachedContent"):
+            return
+
+        for key in cls._CACHED_INFERENCE_FORBIDDEN:
+            payload.pop(key, None)
+
+        leaked = sorted(key for key in cls._CACHED_INFERENCE_FORBIDDEN if key in payload)
+        if leaked:
+            raise ProviderRequestError(
+                "GEMINI_CACHED_INFERENCE_WIRE_INVALID",
+                f"Cached Gemini inference wire still contains forbidden fields: {', '.join(leaked)}",
+            )
 
 
     @staticmethod

@@ -254,7 +254,7 @@ class BindingResolver:
     ) -> dict[str, Any]:
         """Build the cache-only Gemini material projection.
 
-        Layout/6 never puts Gemini File references into CachedContent. Stable
+        Layout/6+ never puts Gemini File references into CachedContent. Stable
         cache-selected material is read from Relay storage and injected as
         inlineData. Layout/3-5 keep their frozen historical projection semantics.
         """
@@ -285,7 +285,10 @@ class BindingResolver:
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         projection_meta = metadata.get("_relay_gemini_projection") if isinstance(metadata.get("_relay_gemini_projection"), dict) else {}
         layout_version = str(projection_meta.get("layout_version") or "")
-        is_inline_cache_layout = layout_version == "gemini-physical-cache-layout/6"
+        is_inline_cache_layout = layout_version in {
+            "gemini-physical-cache-layout/6",
+            "gemini-physical-cache-layout/7",
+        }
 
         try:
             if is_inline_cache_layout:

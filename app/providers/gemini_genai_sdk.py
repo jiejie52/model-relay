@@ -342,12 +342,20 @@ class GeminiAIHubMixGenAIClient:
         if not isinstance(value, dict):
             return None
         parts = value.get("parts") or []
-        sdk_parts = []
+        texts: list[str] = []
         for part in parts:
             if isinstance(part, dict) and "text" in part:
-                sdk_parts.append(types_module.Part.from_text(text=str(part.get("text") or "")))
-        if not sdk_parts:
+                texts.append(str(part.get("text") or ""))
+        if not texts:
             return None
+        # google-genai documents CreateCachedContentConfig.system_instruction
+        # with the string form. Relay's canonical Request instruction projects
+        # to one text part, so prefer that exact representation. Preserve the
+        # existing Content form only if a future projection supplies multiple
+        # parts.
+        if len(texts) == 1:
+            return texts[0]
+        sdk_parts = [types_module.Part.from_text(text=text) for text in texts]
         return types_module.Content(role="user", parts=sdk_parts)
 
     @staticmethod

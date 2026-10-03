@@ -1,3 +1,37 @@
+# Model Relay 4.3.1 快速部署补充
+
+> 4.3.1 修复 AIHubMix 在 cached inference 上拒绝 `cachedContent + systemInstruction/tools/toolConfig` 的 400。新 layout/7 把 Request `instructions` 固化进 CachedContent，命中后只发送动态增量。
+
+```text
+stable inline material + instructions
+  -> caches.create(... + system_instruction)
+  -> cachedContent handle
+  -> generateContent(
+       cachedContent,
+       dynamic contents,
+       generationConfig
+     )
+```
+
+cached `generateContent` 最终 wire 中不得出现：
+
+```text
+systemInstruction
+tools
+toolConfig
+```
+
+部署 API / Worker 4.3.1 后必须创建新 Gemini Session，并确认冻结：
+
+```text
+gemini-physical-cache-layout/7
+gemini-physical-projector/7
+```
+
+不要用旧 layout/6 Session 验证此修复。详细见 `DEPLOYMENT_4.3.1.md`。
+
+---
+
 # Model Relay 4.3.0 快速部署补充
 
 > 4.3.0 的关键变化：**CachedContent 不再引用 Gemini File**。新 layout/6 只把稳定静态 bytes 以内联方式写入 Cache；Files API 只用于 >=70 MiB 分支中的 inference-only 剩余材料。

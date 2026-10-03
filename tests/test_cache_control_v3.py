@@ -26,6 +26,7 @@ from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
 from app.providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
@@ -1091,6 +1092,8 @@ def _gemini_v2_session(*, material_manifest=None, layout_version=None):
             projection["projector_version"] = "gemini-physical-projector/4"
         elif layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V5:
             projection["projector_version"] = "gemini-physical-projector/5"
+        elif layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V6:
+            projection["projector_version"] = "gemini-physical-projector/6"
     return {
         "id": "s-v2",
         "context_policy": "conversation",
@@ -1202,16 +1205,20 @@ def test_gemini_physical_plan_moves_session_material_into_cached_prefix_and_stri
     assert "inlineData" in cached_wire
     assert "https://files.example/session" not in cached_wire
     assert "https://files.example/request" not in cached_wire
-    assert "request-stage-instruction" not in cached_wire
+    assert "request-stage-instruction" in cached_wire
 
     suffix_wire = json.dumps(plan["uncached_suffix"], ensure_ascii=False)
-    assert "request-stage-instruction" in suffix_wire
+    assert "request-stage-instruction" not in suffix_wire
+    assert "systemInstruction" not in plan["uncached_suffix"]
+    assert "tools" not in plan["uncached_suffix"]
+    assert "toolConfig" not in plan["uncached_suffix"]
     assert "old question" in suffix_wire and "old answer" in suffix_wire
     assert "https://files.example/session" not in suffix_wire
     assert "https://files.example/request" in suffix_wire
     assert "current question" in suffix_wire
 
     full_wire = json.dumps(plan["full_uncached_payload"], ensure_ascii=False)
+    assert "request-stage-instruction" in full_wire
     assert "https://files.example/session" in full_wire
     assert "https://files.example/request" in full_wire
     assert "old question" in full_wire and "current question" in full_wire
@@ -1259,6 +1266,160 @@ def test_gemini_v2_cache_spec_consumes_exact_physical_cached_prefix():
     assert spec["physical_plan_hash"] == plan["physical_plan_hash"]
     assert spec["measurement_order"] == "provider_create"
     assert "dynamic-stage" not in json.dumps(spec["provider_payload"])
+
+
+def test_layout7_cache_identity_changes_when_request_instruction_changes():
+    session = _gemini_v2_session()
+
+    def build(instructions: str):
+        return build_gemini_physical_cache_plan(
+            snapshot={
+                "schema_version": "relay-request/2.3",
+                "model": "gemini-3.1-flash-lite",
+                "instructions": instructions,
+                "input": "question",
+                "protocol_profile_hash": "profile",
+                "capability_contract_hash": "cap",
+                "cache_contract_hash": "cache",
+            },
+            session=session,
+            history=[],
+            material_ids=[],
+            material_bindings=[],
+            context_plan={"context_plan_hash": "ctx"},
+            cache_material_projection={
+                "schema_version": "relay-gemini-cache-material-plan/2",
+                "projection_version": "gemini-cache-material-projection/2",
+                "mode": "inline_cache_all_no_files",
+                "total_material_bytes": 0,
+                "inline_limit_bytes": 70 * 1024 * 1024,
+                "cache_material_ids": [],
+                "inline_material_ids": [],
+                "inference_only_session_material_ids": [],
+                "files_api_inference_material_ids": [],
+                "external_url_inference_material_ids": [],
+                "files_api_cache_material_ids": [],
+                "cache_material_bindings": [],
+            },
+        )
+
+    first = build("instruction-a")
+    second = build("instruction-b")
+    assert first["cached_prefix"]["systemInstruction"]["parts"][0]["text"] == "instruction-a"
+    assert "systemInstruction" not in first["uncached_suffix"]
+    assert first["content_fingerprint"] != second["content_fingerprint"]
+    assert first["reuse_key"] != second["reuse_key"]
+
+
+def test_frozen_layout6_keeps_pre_431_instruction_placement():
+    session = _gemini_v2_session(layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V6)
+    plan = build_gemini_physical_cache_plan(
+        snapshot={
+            "schema_version": "relay-request/2.3",
+            "model": "gemini-3.1-flash-lite",
+            "instructions": "legacy-layout6-instruction",
+            "input": "question",
+        },
+        session=session,
+        history=[],
+        material_ids=[],
+        material_bindings=[],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection={
+            "cache_material_ids": [],
+            "inline_material_ids": [],
+            "cache_material_bindings": [],
+        },
+    )
+    assert plan["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION_V6
+    assert "systemInstruction" not in plan["cached_prefix"]
+    assert plan["uncached_suffix"]["systemInstruction"]["parts"][0]["text"] == "legacy-layout6-instruction"
+
+
+@pytest.mark.asyncio
+async def test_layout7_cached_generate_wire_never_contains_system_instruction_tools_or_tool_config():
+    session = _gemini_v2_session()
+    snapshot = {
+        "schema_version": "relay-request/2.1",
+        "model": "gemini-3.1-flash-lite",
+        "connection_id": "aihubmix_gemini_native",
+        "channel_id": "aihubmix",
+        "instructions": "frozen-in-cache",
+        "input": "incremental-question",
+        "provider_payload": {
+            "tools": [{"functionDeclarations": [{"name": "legacy_tool"}]}],
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "temperature": 0.1,
+        },
+        "metadata": {},
+    }
+    physical = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=[],
+        material_bindings=[],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection={
+            "schema_version": "relay-gemini-cache-material-plan/2",
+            "projection_version": "gemini-cache-material-projection/2",
+            "mode": "inline_cache_all_no_files",
+            "total_material_bytes": 0,
+            "inline_limit_bytes": 70 * 1024 * 1024,
+            "cache_material_ids": [],
+            "inline_material_ids": [],
+            "inference_only_session_material_ids": [],
+            "files_api_inference_material_ids": [],
+            "external_url_inference_material_ids": [],
+            "files_api_cache_material_ids": [],
+            "cache_material_bindings": [],
+        },
+    )
+    # Simulate any future/legacy projection accidentally re-introducing these
+    # fields before final dispatch. The wire guard must still remove them.
+    physical["uncached_suffix"]["systemInstruction"] = {"parts": [{"text": "must-not-send"}]}
+    physical["uncached_suffix"]["tools"] = [{"functionDeclarations": [{"name": "must_not_send"}]}]
+    physical["uncached_suffix"]["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        assert body["cachedContent"] == "cachedContents/cache-431"
+        assert "systemInstruction" not in body
+        assert "tools" not in body
+        assert "toolConfig" not in body
+        assert body["generationConfig"]["temperature"] == 0.1
+        raw = json.dumps(
+            {
+                "responseId": "r431",
+                "candidates": [{"content": {"role": "model", "parts": [{"text": "ok"}]}}],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11},
+            }
+        ).encode()
+
+        class _Stream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield raw
+
+        return httpx.Response(200, headers={"content-type": "application/json"}, stream=_Stream())
+
+    adapter = GeminiNativeAdapter(settings(), transport=httpx.MockTransport(handler))
+    context = V2ExecutionContext(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=[],
+        material_bindings=[],
+        tenant_id="t",
+        conversation_hash="c",
+        cache_execution_binding={
+            "mechanism": "stateful_resource",
+            "provider_handle": "cachedContents/cache-431",
+            "metadata": {},
+        },
+        provider_physical_plan=physical,
+    )
+    result = await adapter.execute(context)
+    assert result.text == "ok"
 
 
 
@@ -2430,7 +2591,7 @@ async def test_layout5_google_genai_rehydrates_file_object_after_process_boundar
     assert config.contents[0][0] is rehydrated
 
 @pytest.mark.asyncio
-async def test_layout6_google_genai_cache_create_uses_inline_bytes_without_files_api():
+async def test_layout7_google_genai_cache_create_uses_inline_bytes_and_frozen_instruction_without_files_api():
     import base64
 
     from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
@@ -2518,11 +2679,14 @@ async def test_layout6_google_genai_cache_create_uses_inline_bytes_without_files
     assert spec["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
     assert spec["sdk_file_refs"] == []
     assert "fileData" not in json.dumps(spec["provider_payload"])
+    assert spec["provider_payload"]["systemInstruction"]["parts"][0]["text"] == "dynamic"
+    assert "systemInstruction" not in physical["uncached_suffix"]
     await cache_adapter.create(spec=spec, operation={"lease_epoch": 1})
     assert fake_client.files_api.get_calls == []
     assert fake_client.files_api.upload_calls == []
     _, config = fake_client.caches_api.create_calls[-1]
     assert config.contents[0][0] == ("bytes", b"pdf-data", "application/pdf")
+    assert config.system_instruction == "dynamic"
 
 class _Relay43SplitRepo:
     def __init__(self):
