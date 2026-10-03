@@ -107,10 +107,12 @@ class Settings(BaseSettings):
     material_allow_http: bool = False
     material_default_durability_policy: str = "native_first"
     material_default_fallback_policy: str = "on_provider_unavailable"
-    # Relay 4.0: Gemini Files API is always the primary provider transport.
-    # If Files upload fails, Session-stable fallback bytes may be injected once
-    # into CachedContent. The inline fallback budget is strictly below 70 MiB;
-    # larger fallback materials remain External-URL inference inputs.
+    # Relay 4.3: Gemini material placement is frozen from the authoritative
+    # Request aggregate. Below 70 MiB no Gemini Files API is used; stable Session
+    # material is injected once into CachedContent from Relay bytes. At/above
+    # 70 MiB a deterministic small stable subset is cached inline and all
+    # remaining material uses Gemini Files API for inference, with External URL
+    # fallback on Files upload failure.
     gemini_cache_inline_fallback_limit_bytes: int = 70 * 1024 * 1024
     # Deprecated compatibility knob retained so older deployments do not fail
     # settings validation. It no longer selects Gemini ingress transport.

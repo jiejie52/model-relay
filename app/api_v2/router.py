@@ -1232,13 +1232,17 @@ async def create_request(
             material_count=len(effective_material_ids),
             material_total_bytes=material_total_bytes,
             cache_inline_fallback_limit_bytes=inline_limit,
-            selected_transport="gemini_files",
-            fallback_branch=(
-                "inline_all_failed_session_materials"
+            selected_transport=(
+                "inline_cache_no_files"
                 if material_total_bytes < inline_limit
-                else "inline_small_failed_session_subset"
+                else "hybrid_inline_cache_files"
             ),
-            decision_source="gemini_files_preferred_relay_request_material_sum",
+            cache_branch=(
+                "inline_all_stable_materials_no_files_api"
+                if material_total_bytes < inline_limit
+                else "inline_small_stable_subset_files_for_remaining"
+            ),
+            decision_source="relay_request_material_sum_authoritative",
         )
 
     try:

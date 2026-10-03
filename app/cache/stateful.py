@@ -112,9 +112,10 @@ class StatefulResourceManager:
         provider_create_threshold = measurement_order == "provider_create"
         token_count: int | None = None
 
-        # Legacy layouts may pre-measure the exact frozen cached prefix. Layout/4
-        # and layout/5 both use Provider create as the authoritative threshold gate;
-        # layout/5 changes only the create transport to the official google-genai SDK.
+        # Legacy layouts may pre-measure the exact frozen cached prefix. Layout/4,
+        # layout/5 and layout/6 use Provider create as the authoritative threshold
+        # gate. Layout/5 introduced SDK cache creation; layout/6 keeps SDK create
+        # while removing Gemini File references from CachedContent.
         if measure_before_lookup:
             measured = await self._measure(
                 adapter=adapter,

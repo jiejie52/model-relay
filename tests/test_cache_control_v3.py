@@ -26,6 +26,7 @@ from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
 from app.providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
@@ -1088,6 +1089,8 @@ def _gemini_v2_session(*, material_manifest=None, layout_version=None):
         projection["layout_version"] = layout_version
         if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V4:
             projection["projector_version"] = "gemini-physical-projector/4"
+        elif layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V5:
+            projection["projector_version"] = "gemini-physical-projector/5"
     return {
         "id": "s-v2",
         "context_policy": "conversation",
@@ -1119,6 +1122,8 @@ def _gemini_binding(material_id: str, uri: str, *, sha: str) -> dict:
 
 
 def test_gemini_physical_plan_moves_session_material_into_cached_prefix_and_strips_history_occurrence():
+    import base64
+
     session = _gemini_v2_session(material_manifest=["m-session"])
     snapshot = {
         "schema_version": "relay-request/2.3",
@@ -1163,12 +1168,39 @@ def test_gemini_physical_plan_moves_session_material_into_cached_prefix_and_stri
         material_ids=["m-session", "m-request"],
         material_bindings=bindings,
         context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection={
+            "schema_version": "relay-gemini-cache-material-plan/2",
+            "mode": "inline_cache_all_no_files",
+            "total_material_bytes": 1024,
+            "inline_limit_bytes": 70 * 1024 * 1024,
+            "cache_material_ids": ["m-session"],
+            "inline_material_ids": ["m-session"],
+            "inference_only_session_material_ids": [],
+            "files_api_inference_material_ids": [],
+            "external_url_inference_material_ids": [],
+            "cache_material_bindings": [
+                {
+                    "material_id": "m-session",
+                    "binding_generation": 1,
+                    "binding_kind": "gemini_inline_data",
+                    "representation": "gemini_inline_data",
+                    "connection_id": "aihubmix_gemini_native",
+                    "account_scope_hash": "acct",
+                    "provider": "gemini",
+                    "content_sha256": "sha-session",
+                    "content_type": "application/pdf",
+                    "filename": "m-session.pdf",
+                    "inline_data": base64.b64encode(b"session-static").decode("ascii"),
+                }
+            ],
+        },
     )
 
     assert plan["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
     assert plan["cacheable"] is True
     cached_wire = json.dumps(plan["cached_prefix"], ensure_ascii=False)
-    assert "https://files.example/session" in cached_wire
+    assert "inlineData" in cached_wire
+    assert "https://files.example/session" not in cached_wire
     assert "https://files.example/request" not in cached_wire
     assert "request-stage-instruction" not in cached_wire
 
@@ -1192,7 +1224,10 @@ def test_gemini_physical_plan_moves_session_material_into_cached_prefix_and_stri
 
 
 def test_gemini_v2_cache_spec_consumes_exact_physical_cached_prefix():
-    session = _gemini_v2_session(material_manifest=["m-session"])
+    session = _gemini_v2_session(
+        material_manifest=["m-session"],
+        layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+    )
     snapshot = {
         "schema_version": "relay-request/2.3",
         "model": "gemini-3.1-flash-lite",
@@ -1572,6 +1607,8 @@ async def test_layout4_native_wire_is_cachedcontent_create_then_generate_without
 
 
 def test_gemini_v2_generate_payload_uses_exact_uncached_suffix_with_cache_handle():
+    import base64
+
     session = _gemini_v2_session(material_manifest=["m-session"])
     snapshot = {
         "schema_version": "relay-request/2.3",
@@ -1587,6 +1624,32 @@ def test_gemini_v2_generate_payload_uses_exact_uncached_suffix_with_cache_handle
         material_ids=["m-session"],
         material_bindings=bindings,
         context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection={
+            "schema_version": "relay-gemini-cache-material-plan/2",
+            "mode": "inline_cache_all_no_files",
+            "total_material_bytes": 1024,
+            "inline_limit_bytes": 70 * 1024 * 1024,
+            "cache_material_ids": ["m-session"],
+            "inline_material_ids": ["m-session"],
+            "inference_only_session_material_ids": [],
+            "files_api_inference_material_ids": [],
+            "external_url_inference_material_ids": [],
+            "cache_material_bindings": [
+                {
+                    "material_id": "m-session",
+                    "binding_generation": 1,
+                    "binding_kind": "gemini_inline_data",
+                    "representation": "gemini_inline_data",
+                    "connection_id": "aihubmix_gemini_native",
+                    "account_scope_hash": "acct",
+                    "provider": "gemini",
+                    "content_sha256": "sha-session",
+                    "content_type": "application/pdf",
+                    "filename": "m-session.pdf",
+                    "inline_data": base64.b64encode(b"session-static").decode("ascii"),
+                }
+            ],
+        },
     )
     context = V2ExecutionContext(
         snapshot=snapshot,
@@ -1928,7 +1991,7 @@ async def test_missing_cache_handle_is_logged_unknown_and_never_verified_or_recr
     assert "raw-missing-handle-request-id" not in caplog.text
 
 
-def test_gemini_4_primary_transport_is_files_api_even_for_small_materials():
+def test_gemini_43_ingress_stages_material_until_request_aggregate_is_known():
     from app.materials.gemini_transport import decide_gemini_transport
 
     decision = decide_gemini_transport(
@@ -1937,8 +2000,8 @@ def test_gemini_4_primary_transport_is_files_api_even_for_small_materials():
         request_file_count=1,
         threshold_bytes=99 * 1024 * 1024,
     )
-    assert decision.mode == "gemini_files"
-    assert decision.source == "gemini_files_preferred"
+    assert decision.mode == "relay_staged"
+    assert decision.source == "relay_staging_request_aggregate_deferred"
 
 
 def test_gemini_4_inline_fallback_planner_under_70mb_caches_all_failed_session_materials():
@@ -1986,9 +2049,12 @@ def test_gemini_4_inline_fallback_planner_over_70mb_chooses_small_files_determin
         inline_limit_bytes=70 * mib,
     )
     # Sorted by (size, id): 10 MiB + 20 MiB fit; adding 60 MiB would exceed the strict budget.
-    assert plan.inline_material_ids == ("m-small-a", "m-small-b")
+    # Cache prefix preserves Session manifest order even though selection is
+    # decided deterministically by (size, id).
+    assert plan.inline_material_ids == ("m-small-b", "m-small-a")
     assert plan.cache_material_ids == ("m-small-b", "m-small-a")
     assert plan.inference_only_session_material_ids == ("m-large",)
+    assert plan.files_api_inference_material_ids == ("m-large",)
 
 
 def test_gemini_4_hybrid_physical_plan_keeps_large_external_url_out_of_cache_and_in_inference():
@@ -2096,9 +2162,10 @@ def test_gemini_4_exact_70mb_uses_large_aggregate_branch():
         inline_limit_bytes=70 * mib,
     )
     assert plan.total_material_bytes == 70 * mib
-    assert plan.mode == "files_preferred_inline_small_subset"
+    assert plan.mode == "inline_cache_small_subset_files_for_remaining"
     assert plan.inline_material_ids == ("m-small",)
     assert plan.inference_only_session_material_ids == ("m-large",)
+    assert plan.files_api_inference_material_ids == ("m-large",)
 
 
 class _FakeGenAIFileState:
@@ -2256,7 +2323,10 @@ async def test_layout5_google_genai_passes_uploaded_file_object_directly_to_cach
         "filename": "session.pdf",
         **prepared.binding,
     }
-    session = _gemini_v2_session(material_manifest=["m-session"])
+    session = _gemini_v2_session(
+        material_manifest=["m-session"],
+        layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+    )
     snapshot = {
         "schema_version": "relay-request/2.3",
         "model": "gemini-3.1-flash-lite",
@@ -2324,7 +2394,10 @@ async def test_layout5_google_genai_rehydrates_file_object_after_process_boundar
         "content_type": "application/pdf",
         "metadata": {"mime_type": "application/pdf"},
     }
-    session = _gemini_v2_session(material_manifest=["m-session"])
+    session = _gemini_v2_session(
+        material_manifest=["m-session"],
+        layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+    )
     snapshot = {
         "schema_version": "relay-request/2.3",
         "model": "gemini-3.1-flash-lite",
@@ -2355,3 +2428,288 @@ async def test_layout5_google_genai_rehydrates_file_object_after_process_boundar
     assert fake_client.files_api.get_calls == ["files/session-pdf"]
     _, config = fake_client.caches_api.create_calls[-1]
     assert config.contents[0][0] is rehydrated
+
+@pytest.mark.asyncio
+async def test_layout6_google_genai_cache_create_uses_inline_bytes_without_files_api():
+    import base64
+
+    from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+
+    placeholder = _FakeGenAIFile(
+        name="files/unused",
+        uri="https://files.example/unused",
+    )
+    fake_client = _FakeGenAIClient(placeholder)
+    sdk = GeminiAIHubMixGenAIClient(
+        settings(),
+        client=fake_client,
+        types_module=_FakeGenAITypes,
+    )
+    cache_adapter = GeminiAIHubMixCacheResourceAdapter(settings(), sdk=sdk)
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    binding = {
+        "material_id": "m-session",
+        "binding_generation": 1,
+        "binding_kind": "gemini_external_url",
+        "representation": "gemini_external_url",
+        "connection_id": "aihubmix_gemini_native",
+        "account_scope_hash": "acct",
+        "provider": "gemini",
+        "external_uri": "https://supabase.example/m-session",
+        "content_sha256": "sha-session",
+        "content_type": "application/pdf",
+        "filename": "session.pdf",
+    }
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic",
+        "input": "question",
+        "protocol_profile_hash": "profile",
+        "capability_contract_hash": "cap",
+        "cache_contract_hash": "cache",
+    }
+    cache_projection = {
+        "schema_version": "relay-gemini-cache-material-plan/2",
+        "projection_version": "gemini-cache-material-projection/2",
+        "mode": "inline_cache_all_no_files",
+        "total_material_bytes": 8,
+        "inline_limit_bytes": 70 * 1024 * 1024,
+        "cache_material_ids": ["m-session"],
+        "inline_material_ids": ["m-session"],
+        "inference_only_session_material_ids": [],
+        "files_api_inference_material_ids": [],
+        "external_url_inference_material_ids": [],
+        "files_api_cache_material_ids": [],
+        "cache_material_bindings": [
+            {
+                "material_id": "m-session",
+                "binding_generation": 1,
+                "binding_kind": "gemini_inline_data",
+                "representation": "gemini_inline_data",
+                "connection_id": "aihubmix_gemini_native",
+                "account_scope_hash": "acct",
+                "provider": "gemini",
+                "content_sha256": "sha-session",
+                "content_type": "application/pdf",
+                "filename": "session.pdf",
+                "inline_data": base64.b64encode(b"pdf-data").decode("ascii"),
+            }
+        ],
+    }
+    physical = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=[binding],
+        context_plan={"context_plan_hash": "ctx"},
+        cache_material_projection=cache_projection,
+    )
+    spec = cache_adapter.build_spec(
+        snapshot=snapshot,
+        history=[],
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[binding],
+        session=session,
+        ttl_seconds=300,
+        provider_physical_plan=physical,
+    )
+    assert spec["layout_version"] == GEMINI_PHYSICAL_LAYOUT_VERSION
+    assert spec["sdk_file_refs"] == []
+    assert "fileData" not in json.dumps(spec["provider_payload"])
+    await cache_adapter.create(spec=spec, operation={"lease_epoch": 1})
+    assert fake_client.files_api.get_calls == []
+    assert fake_client.files_api.upload_calls == []
+    _, config = fake_client.caches_api.create_calls[-1]
+    assert config.contents[0][0] == ("bytes", b"pdf-data", "application/pdf")
+
+class _Relay43SplitRepo:
+    def __init__(self):
+        self.upserts = []
+        self.updates = []
+        self.fallback = {
+            "object_id": "obj-1",
+            "object_key": "t/c/material.pdf",
+            "storage_id": "supabase_shared",
+        }
+
+    async def get_material_fallback(self, material_id):
+        return dict(self.fallback)
+
+    async def get_object(self, object_id, *, tenant_id, conversation_hash):
+        return {"content_type": "application/pdf"}
+
+    async def upsert_provider_binding(self, binding):
+        self.upserts.append(dict(binding))
+        return binding
+
+    async def update_material(self, material_id, patch):
+        self.updates.append((material_id, dict(patch)))
+        return {"id": material_id, **patch}
+
+
+class _Relay43SplitFallback:
+    def __init__(self):
+        self.settings = settings(
+            gemini_cache_inline_fallback_limit_bytes=70 * 1024 * 1024,
+            supabase_signed_url_ttl=3600,
+        )
+
+    async def read(self, fallback):
+        return b"pdf-data"
+
+    async def sign_read_url(self, fallback, *, expires_in):
+        return "https://supabase.example/material.pdf"
+
+
+class _Relay43SplitAdapter:
+    provider = "gemini"
+    account_scope_hash = "acct"
+
+    def __init__(self):
+        self.prepare_calls = 0
+
+    async def prepare(self, material_file, *, generation):
+        self.prepare_calls += 1
+        return type(
+            "Prepared",
+            (),
+            {
+                "binding": {
+                    "provider": "gemini",
+                    "connection_id": "aihubmix_gemini_native",
+                    "account_scope_hash": "acct",
+                    "purpose": "file",
+                    "representation": "gemini_file_uri",
+                    "external_file_id": "files/large",
+                    "provider_file_id": "files/large",
+                    "external_uri": "https://files.example/large",
+                    "file_uri": "https://files.example/large",
+                    "state": "active",
+                    "processing_state": "active",
+                    "generation": generation,
+                    "metadata": {"mime_type": "application/pdf"},
+                }
+            },
+        )()
+
+
+@pytest.mark.asyncio
+async def test_relay43_under_70mb_never_calls_gemini_files_for_material_binding():
+    from app.materials.binding_resolver import BindingResolver
+    from app.materials.gemini_transport import GeminiTransportDecision
+
+    repo = _Relay43SplitRepo()
+    fallback = _Relay43SplitFallback()
+    adapter = _Relay43SplitAdapter()
+    resolver = BindingResolver(repo, fallback, file_adapters=None)  # type: ignore[arg-type]
+    binding = await resolver._ensure_gemini_split_request_binding(
+        material={
+            "id": "m-small",
+            "filename": "material.pdf",
+            "content_type": "application/pdf",
+            "sha256": "sha",
+            "binding_generation": 0,
+            "metadata": {},
+        },
+        binding=None,
+        adapter=adapter,
+        connection_id="aihubmix_gemini_native",
+        tenant_id="t",
+        conversation_hash="c",
+        decision=GeminiTransportDecision(
+            mode="inline_cache_no_files",
+            total_bytes=10 * 1024 * 1024,
+            threshold_bytes=70 * 1024 * 1024,
+            source="test",
+        ),
+        cache_inline=True,
+        request_id="r",
+        session_id="s",
+    )
+    assert adapter.prepare_calls == 0
+    assert binding["representation"] == "gemini_external_url"
+    assert binding["metadata"]["files_api_skipped"] is True
+    assert binding["metadata"]["cache_inline_selected"] is True
+
+
+@pytest.mark.asyncio
+async def test_relay43_over_70mb_uses_gemini_files_only_for_non_cache_material():
+    from app.materials.binding_resolver import BindingResolver
+    from app.materials.gemini_transport import GeminiTransportDecision
+
+    repo = _Relay43SplitRepo()
+    fallback = _Relay43SplitFallback()
+    adapter = _Relay43SplitAdapter()
+    resolver = BindingResolver(repo, fallback, file_adapters=None)  # type: ignore[arg-type]
+    binding = await resolver._ensure_gemini_split_request_binding(
+        material={
+            "id": "m-large",
+            "filename": "material.pdf",
+            "content_type": "application/pdf",
+            "sha256": "sha",
+            "binding_generation": 0,
+            "metadata": {},
+        },
+        binding=None,
+        adapter=adapter,
+        connection_id="aihubmix_gemini_native",
+        tenant_id="t",
+        conversation_hash="c",
+        decision=GeminiTransportDecision(
+            mode="hybrid_inline_cache_files",
+            total_bytes=80 * 1024 * 1024,
+            threshold_bytes=70 * 1024 * 1024,
+            source="test",
+        ),
+        cache_inline=False,
+        request_id="r",
+        session_id="s",
+    )
+    assert adapter.prepare_calls == 1
+    assert binding["representation"] == "gemini_file_uri"
+    assert binding["metadata"]["cache_projection"] == "inference_only"
+
+@pytest.mark.asyncio
+async def test_relay43_over_70mb_files_failure_falls_back_to_external_url_inference_only():
+    from app.materials.binding_resolver import BindingResolver
+    from app.materials.gemini_transport import GeminiTransportDecision
+
+    class FailingAdapter(_Relay43SplitAdapter):
+        async def prepare(self, material_file, *, generation):
+            self.prepare_calls += 1
+            raise RuntimeError("files unavailable")
+
+    repo = _Relay43SplitRepo()
+    fallback = _Relay43SplitFallback()
+    adapter = FailingAdapter()
+    resolver = BindingResolver(repo, fallback, file_adapters=None)  # type: ignore[arg-type]
+    binding = await resolver._ensure_gemini_split_request_binding(
+        material={
+            "id": "m-large",
+            "filename": "material.pdf",
+            "content_type": "application/pdf",
+            "sha256": "sha",
+            "binding_generation": 0,
+            "metadata": {},
+        },
+        binding=None,
+        adapter=adapter,
+        connection_id="aihubmix_gemini_native",
+        tenant_id="t",
+        conversation_hash="c",
+        decision=GeminiTransportDecision(
+            mode="hybrid_inline_cache_files",
+            total_bytes=80 * 1024 * 1024,
+            threshold_bytes=70 * 1024 * 1024,
+            source="test",
+        ),
+        cache_inline=False,
+        request_id="r",
+        session_id="s",
+    )
+    assert adapter.prepare_calls == 1
+    assert binding["representation"] == "gemini_external_url"
+    assert binding["metadata"]["files_api_fallback"] is True
+    assert binding["metadata"]["cache_projection"] == "inference_only"

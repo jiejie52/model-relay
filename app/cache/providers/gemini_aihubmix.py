@@ -8,9 +8,12 @@ import httpx
 
 from ...config import Settings
 from ...core.idempotency import stable_hash
-from ...providers.base import ProviderHTTPError
+from ...providers.base import ProviderHTTPError, ProviderRequestError
 from ...providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
-from ...providers.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION
+from ...providers.gemini_physical import (
+    GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+)
 from ...providers.gemini_wire import (
     PROJECTION_VERSION,
     prefix_fingerprint,
@@ -23,14 +26,14 @@ class GeminiAIHubMixCacheResourceAdapter:
     """Gemini explicit CachedContent lifecycle over the AIHubMix native proxy.
 
     The adapter owns Provider wire only. Policy, idempotency and Request
-    dispatch rights remain in Relay core. Layout/5 uses the official google-genai
-    SDK for Files API -> caches.create(), while model inference keeps the existing
-    Gemini Native Adapter and cachedContent reference path. Layout/4 and older
-    Sessions preserve their frozen native-REST cache-create semantics. ``measure``
-    remains only for frozen legacy layouts that explicitly require it.
+    dispatch rights remain in Relay core. Layout/5 preserves the historical
+    google-genai File -> caches.create() path for already-frozen Sessions.
+    Layout/6 also uses google-genai, but CachedContent receives inline bytes only;
+    Gemini Files API is reserved for inference-only material. Layout/4 and older
+    Sessions preserve their frozen native-REST cache-create semantics.
     """
 
-    adapter_version = "gemini-cache-aihubmix/5"
+    adapter_version = "gemini-cache-aihubmix/6"
 
     def __init__(
         self,
@@ -63,6 +66,11 @@ class GeminiAIHubMixCacheResourceAdapter:
             physical = provider_physical_plan
             payload = dict(physical.get("cached_prefix") or {})
             layout_version = str(physical.get("layout_version") or "")
+            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION and self._payload_has_file_data(payload):
+                raise ProviderRequestError(
+                    "GEMINI_CACHE_FILE_REF_FORBIDDEN",
+                    "Layout/6 CachedContent must contain inline static data only; Gemini File references are inference-only",
+                )
             return {
                 "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
                 "projection_version": str(physical.get("projector_version") or ""),
@@ -85,12 +93,12 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "measurement_order": str(physical.get("measurement_order") or "before_lookup"),
                 "cache_create_transport": (
                     "google_genai_sdk"
-                    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+                    if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V5, GEMINI_PHYSICAL_LAYOUT_VERSION}
                     else "native_rest"
                 ),
                 "sdk_file_refs": (
                     self._sdk_file_refs(payload=payload, material_bindings=material_bindings)
-                    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+                    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V5
                     else []
                 ),
             }
@@ -303,6 +311,16 @@ class GeminiAIHubMixCacheResourceAdapter:
                 seen.add(identity)
                 refs.append({"name": name, "uri": uri, "mime_type": mime_type})
         return refs
+
+    @staticmethod
+    def _payload_has_file_data(payload: dict[str, Any]) -> bool:
+        for content in payload.get("contents") or []:
+            if not isinstance(content, dict):
+                continue
+            for part in content.get("parts") or []:
+                if isinstance(part, dict) and "fileData" in part:
+                    return True
+        return False
 
     @staticmethod
     def validate_handle(value: Any) -> str:

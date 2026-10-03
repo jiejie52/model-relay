@@ -18,6 +18,7 @@ from ..providers.registry import ProviderRegistry
 from ..providers.gemini_physical import (
     build_gemini_physical_cache_plan,
     uses_cache_material_projection_layout,
+    uses_physical_layout_v6,
     uses_supported_physical_layout,
 )
 from ..providers.base import ProviderHTTPError, ProviderRequestError
@@ -134,6 +135,14 @@ class SharedExecutionRuntime:
             existing_snapshot=existing_binding_snapshot,
             request_id=request_id,
             session_id=session_id,
+            gemini_inline_cache_strategy=(
+                str(snapshot.get("provider") or "") == "gemini" and uses_physical_layout_v6(session)
+            ),
+            gemini_session_material_ids=(
+                [str(x) for x in (session.get("material_manifest") or []) if str(x)]
+                if session.get("context_policy") == "conversation"
+                else []
+            ),
         )
         log_info(
             logger,

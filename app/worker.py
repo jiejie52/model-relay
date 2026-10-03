@@ -39,7 +39,7 @@ from .utils import utcnow
 from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "4.2.2"
+WORKER_VERSION = "4.3.0"
 
 settings = get_settings()
 configure_logging(settings)

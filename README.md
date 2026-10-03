@@ -1,3 +1,24 @@
+# Model Relay 4.3.0 - Gemini Inline Cache / Files Inference Split
+
+## 4.3.0 版本定位
+
+4.3.0 暂停使用 `Gemini Files API -> caches.create(File)` 作为新 Session 的缓存构造方式。新 `layout/6` 将 **CachedContent 与 Files API 完全解耦**：缓存只接收 Relay 持有的静态 bytes（`inlineData`）；Gemini Files API 只服务于 `>=70 MiB` 分支中未进入缓存的小/大文件剩余集合的 inference。
+
+### 核心规则
+
+- Gemini `inference_input` 上传时先进入 Relay staging，不在 ingress 阶段调用 Files API。
+- Request 冻结时以 Relay 实际 Material bytes 重新计算总量。
+- **总量 <70 MiB**：不使用 Gemini Files API；Session-stable 静态材料单点注入 CachedContent，命中后只发送 `cachedContent` 引用 + 动态增量。
+- **总量 >=70 MiB**：按 `(size_bytes, material_id)` 决定小文件缓存子集，累计严格 `<70 MiB`；这些文件仍以 inline bytes 单点注入 Cache。其他剩余材料只用于 inference，优先 Gemini Files API，失败后 Supabase Signed External URL fallback。
+- External URL / Gemini File 都不会进入 layout/6 CachedContent。
+- 新 Session：`gemini-physical-cache-layout/6` / `gemini-physical-projector/6`。
+- 旧 layout/5 Session 保留 4.2.x 冻结语义，不静默升级。
+- API / Worker：`4.3.0`；无 SQL migration。
+
+部署见 `DEPLOYMENT_4.3.0.md`，验证见 `VALIDATION_4.3.0.md`，改动见 `CHANGELOG_4.3.0.md`。
+
+---
+
 # Model Relay 4.2.2 - AIHubMix Gemini Cache Raw HTTP Diagnostics
 
 ## 4.2.2 版本定位

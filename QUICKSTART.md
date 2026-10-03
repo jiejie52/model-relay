@@ -1,3 +1,25 @@
+# Model Relay 4.3.0 快速部署补充
+
+> 4.3.0 的关键变化：**CachedContent 不再引用 Gemini File**。新 layout/6 只把稳定静态 bytes 以内联方式写入 Cache；Files API 只用于 >=70 MiB 分支中的 inference-only 剩余材料。
+
+```text
+<70 MiB
+  upload -> Relay staging
+  -> stable static bytes -> caches.create(inlineData)
+  -> generateContent(cachedContent + dynamic delta)
+  -> no Gemini Files API
+
+>=70 MiB
+  upload -> Relay staging
+  -> small stable subset (<70 MiB cumulative) -> caches.create(inlineData)
+  -> remaining files -> Gemini Files API inference
+     -> failure: Supabase External URL inference fallback
+```
+
+必须新建 Gemini Session 才会冻结 layout/6。详细见 `DEPLOYMENT_4.3.0.md`。
+
+---
+
 # Model Relay 4.2.2 快速部署补充
 
 > 4.2.2 只增强 AIHubMix Gemini `caches.create()` 原始 HTTP 错误诊断，不改变缓存策略或 layout/5。

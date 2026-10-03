@@ -13,14 +13,7 @@ GEMINI_EXTERNAL_URL_ADAPTER_VERSION = "gemini-external-url-supabase/1"
 
 
 def project_gemini_input_content_type(source_content_type: str | None) -> str:
-    """Project canonical Relay material MIME into Gemini input wire MIME.
-
-    Relay keeps the source material content type unchanged in the material registry.
-    Gemini input transport uses a provider-compatible MIME only at the wire/binding
-    boundary. JSON artifacts are textual model inputs for Gemini and are projected
-    to ``text/plain`` instead of being sent as ``fileData`` with
-    ``application/json``.
-    """
+    """Project canonical Relay material MIME into Gemini input wire MIME."""
     source = str(source_content_type or "").strip()
     if not source:
         return "application/octet-stream"
@@ -34,13 +27,7 @@ def project_gemini_external_url_filename(
     source_filename: str | None,
     source_content_type: str | None,
 ) -> str:
-    """Project only the provider-facing External URL object filename.
-
-    Canonical Relay material metadata is not changed.  When Gemini's input MIME
-    projection changes a JSON artifact from ``application/json`` to
-    ``text/plain``, the Supabase bridge object must expose a matching text-file
-    name as well.  Other material types keep their original filename.
-    """
+    """Project only the provider-facing External URL object filename."""
     filename = str(source_filename or "material").strip() or "material"
     source = str(source_content_type or "").split(";", 1)[0].strip().lower()
     projected = project_gemini_input_content_type(source_content_type).split(";", 1)[0].strip().lower()
@@ -55,20 +42,15 @@ def project_gemini_external_url_filename(
 
 @dataclass(frozen=True)
 class GeminiTransportDecision:
-    mode: str  # gemini_files primary; supabase_external_url is fallback-only
+    mode: str
     total_bytes: int
-    threshold_bytes: int  # Relay 4.0 inline-cache fallback budget
+    threshold_bytes: int
     source: str
     caller_total_hint: int | None = None
 
 
 class GeminiTransportPolicyError(ValueError):
     pass
-
-
-def _mode(total_bytes: int, threshold_bytes: int) -> str:
-    # Relay 4.0 no longer chooses Supabase by size. Files API is always primary.
-    return "gemini_files"
 
 
 def decide_gemini_transport(
@@ -78,13 +60,18 @@ def decide_gemini_transport(
     request_file_count: int | None,
     threshold_bytes: int,
 ) -> GeminiTransportDecision:
-    """Choose the primary Gemini ingress transport.
+    """Choose Gemini ingress behavior for Relay 4.3.
 
-    Relay 4.0 always attempts Gemini Files API first. Aggregate hints remain
-    diagnostic-only; ``threshold_bytes`` is the cache-inline fallback budget.
-    Supabase External URL is created only after a Files API failure, and the 70 MiB cache fallback rule
-    is applied later against the exact frozen Request material set.
+    Gemini inference-input uploads are staged in Relay storage first.  Provider
+    placement is deliberately deferred until the Request has the authoritative
+    aggregate material set, because the 70 MiB rule is an aggregate rule and a
+    single upload cannot know which stable materials belong in the cache subset.
+
+    ``request_file_total_bytes`` therefore remains an observability hint only;
+    the Request aggregate is recomputed from canonical Material rows before any
+    Gemini Files API side effect is attempted.
     """
+
     actual = int(actual_size)
     threshold = int(threshold_bytes)
     if actual < 0 or threshold <= 0:
@@ -97,10 +84,10 @@ def decide_gemini_transport(
         raise GeminiTransportPolicyError("request_file_count must be >= 1")
 
     return GeminiTransportDecision(
-        mode=_mode(actual, threshold),
+        mode="relay_staged",
         total_bytes=actual,
         threshold_bytes=threshold,
-        source="gemini_files_preferred",
+        source="relay_staging_request_aggregate_deferred",
         caller_total_hint=caller_hint,
     )
 
@@ -110,11 +97,17 @@ def decide_gemini_request_transport(
     material_sizes: Iterable[int],
     threshold_bytes: int,
 ) -> GeminiTransportDecision:
-    """Return the Request aggregate for observability/legacy callers.
+    """Freeze the authoritative Gemini Request aggregate strategy.
 
-    The aggregate no longer changes the primary Gemini transport in Relay 4.0;
-    Files API remains first choice for every material.
+    * aggregate < 70 MiB: no Gemini Files API; stable Session material is
+      injected once into CachedContent as inline bytes, while any uncached file
+      is represented by Relay's signed External URL.
+    * aggregate >= 70 MiB: a deterministic small stable subset (chosen by the
+      cache projection) is injected into CachedContent; all remaining files use
+      Gemini Files API first and fall back to a signed External URL only when
+      Files upload fails.
     """
+
     threshold = int(threshold_bytes)
     if threshold <= 0:
         raise GeminiTransportPolicyError("invalid Gemini transport size configuration")
@@ -123,10 +116,10 @@ def decide_gemini_request_transport(
         raise GeminiTransportPolicyError("material size cannot be negative")
     total = sum(sizes)
     return GeminiTransportDecision(
-        mode=_mode(total, threshold),
+        mode=("inline_cache_no_files" if total < threshold else "hybrid_inline_cache_files"),
         total_bytes=total,
         threshold_bytes=threshold,
-        source="relay_request_material_sum_files_preferred",
+        source="relay_request_material_sum_authoritative",
     )
 
 

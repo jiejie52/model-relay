@@ -12,10 +12,12 @@ from .base import ProviderHTTPError, ProviderRequestError
 class GeminiAIHubMixGenAIClient:
     """Small testable wrapper around the official ``google-genai`` SDK.
 
-    New Gemini cache layouts use the SDK for Files + CachedContent lifecycle.
-    Relay still owns all durable resource identities, fencing and retry policy.
-    The in-memory File registry is only an optimization: async Worker recovery
-    always rehydrates a Provider File via ``files.get`` when needed.
+    Layout/5 uses the SDK for the historical Files -> CachedContent path.
+    Layout/6 uses the same SDK for CachedContent creation from inline bytes and
+    reserves Files API for inference-only material. Relay still owns durable
+    resource identities, fencing and retry policy. The in-memory File registry
+    remains only an optimization for frozen layout/5 Sessions and inference
+    File bindings.
     """
 
     adapter_version = "google-genai-aihubmix/2"

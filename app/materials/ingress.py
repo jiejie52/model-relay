@@ -346,21 +346,18 @@ class MaterialIngress:
                 cache_inline_fallback_limit_bytes=gemini_transport.threshold_bytes,
                 material_size_bytes=len(data),
             )
-            if (
-                gemini_transport.caller_total_hint is not None
-                and gemini_transport.caller_total_hint != gemini_transport.total_bytes
-            ):
-                log_warning(
+            if gemini_transport.caller_total_hint is not None:
+                log_info(
                     logger,
-                    "gemini_client_size_hint_ignored",
+                    "gemini_client_size_hint_recorded",
                     ingress_id=ingress_id,
                     provider=provider,
                     model=model,
                     connection_id=resolved_connection_id,
                     material_batch_id=material_batch_id,
                     caller_total_hint=gemini_transport.caller_total_hint,
-                    relay_actual_bytes=gemini_transport.total_bytes,
-                    reason="Relay actual bytes are authoritative; caller aggregate is diagnostic only",
+                    material_actual_bytes=gemini_transport.total_bytes,
+                    reason="Request aggregate is recomputed from frozen Material rows before provider placement",
                 )
 
         digest = hashlib.sha256(data).hexdigest()
@@ -482,9 +479,59 @@ class MaterialIngress:
             )
             return updated
 
-        # Relay 4.0 has no pre-emptive Supabase branch for Gemini. Files API
-        # is always attempted first; Supabase is activated only from the Files
-        # failure handler below.
+        if gemini_transport is not None and str(adapter.provider or "").lower() == "gemini":
+            # Relay 4.3 defers all Gemini provider placement until the Request
+            # has the authoritative aggregate material set. This is what lets a
+            # <70 MiB Request avoid Gemini Files API entirely and lets a >=70 MiB
+            # Request cache only the deterministic small stable subset before
+            # uploading the remaining inference-only files.
+            fallback_row = await self._store_fallback_logged(
+                ingress_id=ingress_id,
+                row=row,
+                data=data,
+                retention_policy="gemini-request-staging",
+                provider=provider,
+                connection_id=resolved_connection_id,
+            )
+            updated_metadata = dict(material_metadata)
+            policy = dict(updated_metadata.get("_relay_gemini_transport") or {})
+            policy.update(
+                {
+                    "mode": "relay_staged",
+                    "decision_source": "relay_staging_request_aggregate_deferred",
+                    "provider_placement_deferred": True,
+                    "cache_inline_fallback_limit_bytes": gemini_transport.threshold_bytes,
+                }
+            )
+            updated_metadata["_relay_gemini_transport"] = policy
+            updated = await self.repo.update_material(
+                material_id,
+                {
+                    "status": "ready",
+                    "object_id": fallback_row["object_id"],
+                    "durability": "relay_backed",
+                    "metadata": updated_metadata,
+                },
+            ) or row
+            log_info(
+                logger,
+                "gemini_material_staged_for_request_strategy",
+                ingress_id=ingress_id,
+                material_id=material_id,
+                provider=provider,
+                model=model,
+                connection_id=resolved_connection_id,
+                route_revision=route_revision,
+                material_size_bytes=len(data),
+                caller_total_hint=gemini_transport.caller_total_hint,
+                cache_inline_fallback_limit_bytes=gemini_transport.threshold_bytes,
+                provider_file_upload_attempted=False,
+                fallback_stored=True,
+                duration_ms=elapsed_ms(ingress_started_ms),
+            )
+            return updated
+
+        # Non-Gemini provider-file paths keep their existing eager behavior.
 
         force_no_supabase = bool(
             gemini_transport is not None and gemini_transport.mode == "gemini_files"
