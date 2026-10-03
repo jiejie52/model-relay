@@ -30,11 +30,31 @@ class GeminiAIHubMixGenAIClient:
         if settings.aihubmix_api_key is None:
             raise RuntimeError("AIHUBMIX_API_KEY is required for Gemini google-genai SDK")
         self.settings = settings
-        self.base_url = settings.aihubmix_gemini_sdk_base_url.rstrip("/")
+        self.base_url = self._normalize_aihubmix_base_url(
+            settings.aihubmix_gemini_sdk_base_url
+        )
         self._client = client
         self._types_module = types_module
         self._files_by_name: dict[str, Any] = {}
         self._files_by_uri: dict[str, Any] = {}
+
+
+    @staticmethod
+    def _normalize_aihubmix_base_url(value: str) -> str:
+        """Return the google-genai gateway root expected by AIHubMix.
+
+        AIHubMix documents the native SDK base as ``https://aihubmix.com/gemini``.
+        4.2.0 accidentally documented the site root.  Keep one narrow compatibility
+        shim for that exact legacy value so an existing Railway variable does not
+        keep routing Files/Cache SDK calls to the object-upload frontend.  Custom
+        proxy URLs are otherwise preserved verbatim.
+        """
+        base = str(value or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("AIHUBMIX_GEMINI_SDK_BASE_URL is required")
+        if base.lower() == "https://aihubmix.com":
+            return "https://aihubmix.com/gemini"
+        return base
 
     def _types(self) -> Any:
         if self._types_module is not None:

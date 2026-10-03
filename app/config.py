@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # google-genai custom base URL for AIHubMix Files/Context Caching. Keep this
     # separate from the existing native generateContent base so frozen routes
     # do not change when the SDK transport is enabled.
-    aihubmix_gemini_sdk_base_url: str = "https://aihubmix.com"
+    aihubmix_gemini_sdk_base_url: str = "https://aihubmix.com/gemini"
     aihubmix_gemini_connection_id: str = "aihubmix_gemini_native"
 
     moonshot_api_key: SecretStr | None = None

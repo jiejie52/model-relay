@@ -75,6 +75,23 @@ def _context_plan(*, with_stable_prefix: bool = True, measured: tuple[int | None
     return plan
 
 
+
+def test_aihubmix_google_genai_sdk_base_uses_gemini_gateway():
+    from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+
+    current = GeminiAIHubMixGenAIClient(settings())
+    assert current.base_url == "https://aihubmix.com/gemini"
+
+    legacy_root = GeminiAIHubMixGenAIClient(
+        settings(aihubmix_gemini_sdk_base_url="https://aihubmix.com/")
+    )
+    assert legacy_root.base_url == "https://aihubmix.com/gemini"
+
+    custom = GeminiAIHubMixGenAIClient(
+        settings(aihubmix_gemini_sdk_base_url="https://proxy.example/gemini")
+    )
+    assert custom.base_url == "https://proxy.example/gemini"
+
 def test_new_request_contract_normalizes_omitted_cache_mode_to_auto():
     body = SessionRequestCreate(input="x", execution=ExecutionSpec(mode="sync"))
     assert body.requested_cache_mode == "auto"
