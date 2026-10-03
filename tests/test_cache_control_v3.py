@@ -92,6 +92,61 @@ def test_aihubmix_google_genai_sdk_base_uses_gemini_gateway():
     )
     assert custom.base_url == "https://proxy.example/gemini"
 
+
+def test_google_genai_sdk_error_prefers_exact_http_response_bytes_for_cache_diagnostics():
+    from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+
+    raw_body = (
+        b'{"error":{"message":"raw-aihubmix-file-permission-error",'
+        b'"type":"Aihubmix_api_error","tid":"20261003-test"}}\n'
+    )
+
+    class FakeRequest:
+        method = "POST"
+        url = "https://aihubmix.com/gemini/v1beta/cachedContents?key=must-not-log"
+
+    class FakeResponse:
+        content = raw_body
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Content-Length": str(len(raw_body)),
+            "X-Request-Id": "aihubmix-request-raw-123",
+            "Set-Cookie": "must-not-log=1",
+        }
+        request = FakeRequest()
+
+    class FakeClientError(Exception):
+        status_code = 403
+        response = FakeResponse()
+        # Deliberately different from the raw body. The wrapper must not use it
+        # when the underlying HTTP response bytes are available.
+        response_json = {"error": {"message": "sdk-normalized-message"}}
+
+    wrapped = GeminiAIHubMixGenAIClient._provider_error(
+        FakeClientError("SDK rendered message"),
+        phase="gemini_cache_create",
+    )
+    assert isinstance(wrapped, ProviderHTTPError)
+    assert wrapped.status_code == 403
+    assert wrapped.body == raw_body
+    assert wrapped.raw_body_source == "response.content"
+    assert wrapped.request_method == "POST"
+    assert wrapped.request_url.endswith("?key=must-not-log")
+    assert wrapped.content_type == "application/json; charset=utf-8"
+    assert wrapped.request_id == "aihubmix-request-raw-123"
+
+    observed = provider_http_error_observation(wrapped)
+    assert observed["body"]["error"]["message"] == "raw-aihubmix-file-permission-error"
+    assert observed["body"]["error"]["tid"] == "20261003-test"
+    assert observed["raw_body_text"] == raw_body.decode("utf-8")
+    assert observed["raw_body_text_truncated"] is False
+    assert observed["raw_body_source"] == "response.content"
+    assert observed["request_method"] == "POST"
+    assert observed["request_url"] == "https://aihubmix.com/gemini/v1beta/cachedContents"
+    assert observed["response_headers"]["x-request-id"] == "aihubmix-request-raw-123"
+    assert "set-cookie" not in observed["response_headers"]
+    assert "must-not-log" not in json.dumps(observed, ensure_ascii=False)
+
 def test_new_request_contract_normalizes_omitted_cache_mode_to_auto():
     body = SessionRequestCreate(input="x", execution=ExecutionSpec(mode="sync"))
     assert body.requested_cache_mode == "auto"

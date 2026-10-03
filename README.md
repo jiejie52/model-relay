@@ -1,3 +1,16 @@
+# Model Relay 4.2.2 - AIHubMix Gemini Cache Raw HTTP Diagnostics
+
+## 4.2.2 版本定位
+
+4.2.2 不改变 layout/5 缓存语义，只增强 `google-genai` `caches.create()` 失败诊断。SDK 抛出 4xx/5xx 时，Relay 优先抓取底层 HTTP response 的原始 entity bytes，而不是只重新序列化 `response_json`。`cache_create_provider_http_error` 现在会带上`raw_body_text`、原始 body 来源、body SHA-256、content type、无 query 的请求 URL，以及经过 allowlist 的 trace/request headers；Authorization/API key/Cookie 不进入日志。
+
+- API / Worker 版本：`4.2.2`。
+- `google-genai` 内部 adapter：`google-genai-aihubmix/2`。
+- 无 SQL 变更。
+- 部署见 `DEPLOYMENT_4.2.2.md`，验证见 `VALIDATION_4.2.2.md`，改动见 `CHANGELOG_4.2.2.md`。
+
+---
+
 # Model Relay 4.2.1 - AIHubMix Gemini SDK Gateway Hotfix
 
 ## 4.2.1 版本定位

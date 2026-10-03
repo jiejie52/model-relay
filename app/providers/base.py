@@ -35,6 +35,10 @@ class ProviderHTTPError(RuntimeError):
         request_id: str | None = None,
         response_headers: dict[str, str] | None = None,
         phase: str | None = None,
+        request_method: str | None = None,
+        request_url: str | None = None,
+        raw_body_source: str | None = None,
+        upstream_exception_type: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -44,6 +48,10 @@ class ProviderHTTPError(RuntimeError):
         self.request_id = request_id
         self.response_headers = response_headers or {}
         self.phase = phase
+        self.request_method = request_method
+        self.request_url = request_url
+        self.raw_body_source = raw_body_source
+        self.upstream_exception_type = upstream_exception_type
 
 
 class ProviderAdapter(Protocol):

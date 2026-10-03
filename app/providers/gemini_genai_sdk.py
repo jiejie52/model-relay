@@ -18,7 +18,7 @@ class GeminiAIHubMixGenAIClient:
     always rehydrates a Provider File via ``files.get`` when needed.
     """
 
-    adapter_version = "google-genai-aihubmix/1"
+    adapter_version = "google-genai-aihubmix/2"
 
     def __init__(
         self,
@@ -423,23 +423,83 @@ class GeminiAIHubMixGenAIClient:
                 request_id = str(lowered[key])
                 break
 
-        body_obj = getattr(exc, "response_json", None)
-        if body_obj is None:
+        # Prefer the exact HTTP entity returned by AIHubMix. google-genai
+        # normally exposes an httpx-like response on APIError/ClientError.
+        # 4.2.1 reconstructed the body from response_json, which could hide
+        # provider details or change formatting.  The raw response bytes are
+        # authoritative for diagnostics; parsed SDK data is only a fallback.
+        body: bytes | None = None
+        raw_body_source: str | None = None
+        if response is not None:
+            try:
+                content = getattr(response, "content", None)
+                if isinstance(content, bytes):
+                    body = content
+                    raw_body_source = "response.content"
+                elif isinstance(content, (bytearray, memoryview)):
+                    body = bytes(content)
+                    raw_body_source = "response.content"
+                elif isinstance(content, str):
+                    body = content.encode("utf-8", errors="strict")
+                    raw_body_source = "response.content_text"
+            except Exception:
+                body = None
+            if body is None:
+                try:
+                    text = getattr(response, "text", None)
+                    if isinstance(text, str):
+                        body = text.encode("utf-8", errors="strict")
+                        raw_body_source = "response.text"
+                except Exception:
+                    body = None
+
+        if body is None:
+            body_obj = getattr(exc, "response_json", None)
+            if body_obj is not None:
+                try:
+                    body = json.dumps(body_obj, ensure_ascii=False, default=str).encode("utf-8")
+                    raw_body_source = "sdk.response_json"
+                except Exception:
+                    body = None
+        if body is None:
             body_obj = getattr(exc, "details", None)
-        if body_obj is None:
-            body_obj = {"error": str(exc)}
-        try:
-            body = json.dumps(body_obj, ensure_ascii=False, default=str).encode("utf-8")
-        except Exception:
+            if body_obj is not None:
+                try:
+                    body = json.dumps(body_obj, ensure_ascii=False, default=str).encode("utf-8")
+                    raw_body_source = "sdk.details"
+                except Exception:
+                    body = None
+        if body is None:
             body = str(exc).encode("utf-8", errors="replace")
+            raw_body_source = "exception_string"
+
+        request_method = None
+        request_url = None
+        request = getattr(response, "request", None) if response is not None else None
+        if request is not None:
+            try:
+                method = getattr(request, "method", None)
+                request_method = str(method) if method not in (None, "") else None
+            except Exception:
+                request_method = None
+            try:
+                url = getattr(request, "url", None)
+                request_url = str(url) if url not in (None, "") else None
+            except Exception:
+                request_url = None
 
         if status_code is not None:
             return ProviderHTTPError(
                 status_code,
                 body,
-                content_type=headers.get("content-type"),
+                content_type=lowered.get("content-type"),
+                content_encoding=lowered.get("content-encoding"),
                 request_id=request_id,
                 response_headers=headers,
                 phase=phase,
+                request_method=request_method,
+                request_url=request_url,
+                raw_body_source=raw_body_source,
+                upstream_exception_type=type(exc).__name__,
             )
         return ProviderRequestError("GEMINI_GENAI_SDK_ERROR", f"{phase}: {exc}")

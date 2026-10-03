@@ -1,3 +1,28 @@
+# Model Relay 4.2.2 快速部署补充
+
+> 4.2.2 只增强 AIHubMix Gemini `caches.create()` 原始 HTTP 错误诊断，不改变缓存策略或 layout/5。
+
+部署 API / Worker 4.2.2 后复现 403，重点检查 Worker 日志事件：
+
+```text
+cache_create_provider_http_error
+  provider_error.status
+  provider_error.request_method
+  provider_error.request_url
+  provider_error.raw_body_source
+  provider_error.content_type
+  provider_error.response_headers
+  provider_error.raw_body_text
+  provider_error.body
+  provider_error.body_sha256
+```
+
+正常情况下 `raw_body_source=response.content`，表示抓到 AIHubMix 返回的底层 HTTP entity bytes。敏感认证头、Cookie 和 URL query 不会写日志。
+
+详细见 `DEPLOYMENT_4.2.2.md`。
+
+---
+
 # Model Relay 4.2.1 快速部署补充
 
 > 4.2.1 修复 4.2.0 的 AIHubMix `google-genai` SDK 根地址：必须使用 `https://aihubmix.com/gemini`。layout/5、Files -> Cache -> inference 语义不变。
