@@ -9,6 +9,8 @@ import httpx
 from ...config import Settings
 from ...core.idempotency import stable_hash
 from ...providers.base import ProviderHTTPError
+from ...providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+from ...providers.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION
 from ...providers.gemini_wire import (
     PROJECTION_VERSION,
     prefix_fingerprint,
@@ -21,18 +23,21 @@ class GeminiAIHubMixCacheResourceAdapter:
     """Gemini explicit CachedContent lifecycle over the AIHubMix native proxy.
 
     The adapter owns Provider wire only. Policy, idempotency and Request
-    dispatch rights remain in Relay core. Layout/4 follows AIHubMix's native SDK
-    sequence directly: Files API -> caches.create() -> generateContent(cachedContent).
-    ``measure`` remains only for frozen legacy layouts that explicitly require it.
+    dispatch rights remain in Relay core. Layout/5 uses the official google-genai
+    SDK for Files API -> caches.create(), while model inference keeps the existing
+    Gemini Native Adapter and cachedContent reference path. Layout/4 and older
+    Sessions preserve their frozen native-REST cache-create semantics. ``measure``
+    remains only for frozen legacy layouts that explicitly require it.
     """
 
-    adapter_version = "gemini-cache-aihubmix/4"
+    adapter_version = "gemini-cache-aihubmix/5"
 
     def __init__(
         self,
         settings: Settings,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        sdk: GeminiAIHubMixGenAIClient | Any | None = None,
     ) -> None:
         if not settings.aihubmix_gemini_base_url:
             raise RuntimeError("AIHUBMIX_GEMINI_BASE_URL is required for Gemini cache")
@@ -41,6 +46,7 @@ class GeminiAIHubMixCacheResourceAdapter:
         self.settings = settings
         self.base_url = settings.aihubmix_gemini_base_url.rstrip("/")
         self._transport = transport
+        self.sdk = sdk or GeminiAIHubMixGenAIClient(settings)
 
     def build_spec(
         self,
@@ -56,10 +62,11 @@ class GeminiAIHubMixCacheResourceAdapter:
         if isinstance(provider_physical_plan, dict):
             physical = provider_physical_plan
             payload = dict(physical.get("cached_prefix") or {})
+            layout_version = str(physical.get("layout_version") or "")
             return {
                 "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
                 "projection_version": str(physical.get("projector_version") or ""),
-                "layout_version": str(physical.get("layout_version") or ""),
+                "layout_version": layout_version,
                 "physical_plan_hash": str(physical.get("physical_plan_hash") or ""),
                 "cached_prefix_wire_hash": str(physical.get("cached_prefix_wire_hash") or ""),
                 "uncached_suffix_wire_hash": str(physical.get("uncached_suffix_wire_hash") or ""),
@@ -76,6 +83,16 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "context_plan_hash": context_plan.get("context_plan_hash"),
                 "material_binding_hash": stable_hash(material_bindings),
                 "measurement_order": str(physical.get("measurement_order") or "before_lookup"),
+                "cache_create_transport": (
+                    "google_genai_sdk"
+                    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+                    else "native_rest"
+                ),
+                "sdk_file_refs": (
+                    self._sdk_file_refs(payload=payload, material_bindings=material_bindings)
+                    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+                    else []
+                ),
             }
 
         # Legacy 3.1 Sessions keep their frozen projection. The current user
@@ -154,6 +171,31 @@ class GeminiAIHubMixCacheResourceAdapter:
 
     async def create(self, *, spec: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
         model = self._model(spec)
+        if str(spec.get("cache_create_transport") or "") == "google_genai_sdk":
+            cache = await self.sdk.create_cache(
+                model=model,
+                cached_prefix=dict(spec.get("provider_payload") or {}),
+                file_refs=[
+                    dict(x) for x in (spec.get("sdk_file_refs") or []) if isinstance(x, dict)
+                ],
+                display_name=f"relay-{str(spec.get('content_fingerprint') or '')[:24]}",
+                ttl_seconds=int(spec.get("ttl_seconds") or 3600),
+            )
+            data = self.sdk.dump_model(cache)
+            raw_handle = data.get("name") or getattr(cache, "name", None)
+            handle = self.validate_handle(raw_handle) if raw_handle not in (None, "") else None
+            usage = data.get("usageMetadata") or data.get("usage_metadata") or {}
+            return {
+                "handle": handle,
+                "expire_time": data.get("expireTime") or data.get("expire_time"),
+                "create_time": data.get("createTime") or data.get("create_time"),
+                "usage_metadata": usage if isinstance(usage, dict) else {},
+                "provider_request_id": self.sdk.request_id(cache),
+                "operation_epoch": int(operation.get("lease_epoch") or 0),
+                "provider_transport": "google_genai_sdk",
+                "sdk_adapter_version": str(getattr(self.sdk, "adapter_version", "")),
+            }
+
         body: dict[str, Any] = {
             "model": f"models/{model}",
             "ttl": f"{int(spec.get('ttl_seconds') or 3600)}s",
@@ -175,6 +217,7 @@ class GeminiAIHubMixCacheResourceAdapter:
             "usage_metadata": data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {},
             "provider_request_id": self._request_id(headers),
             "operation_epoch": int(operation.get("lease_epoch") or 0),
+            "provider_transport": "native_rest",
         }
 
     async def get(self, *, handle: str, operation: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -222,6 +265,44 @@ class GeminiAIHubMixCacheResourceAdapter:
             allow_empty=True,
         )
         return {"handle": safe, "deleted": True, "provider_request_id": self._request_id(headers)}
+
+    @staticmethod
+    def _sdk_file_refs(*, payload: dict[str, Any], material_bindings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        bindings_by_uri: dict[str, dict[str, Any]] = {}
+        for binding in material_bindings:
+            uri = str(binding.get("file_uri") or binding.get("external_uri") or "")
+            if uri:
+                bindings_by_uri[uri] = binding
+
+        refs: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for content in payload.get("contents") or []:
+            if not isinstance(content, dict):
+                continue
+            for part in content.get("parts") or []:
+                if not isinstance(part, dict) or "fileData" not in part:
+                    continue
+                file_data = part.get("fileData") or {}
+                uri = str(file_data.get("fileUri") or file_data.get("file_uri") or "")
+                binding = bindings_by_uri.get(uri) or {}
+                name = str(binding.get("provider_file_id") or binding.get("external_file_id") or "")
+                mime_type = str(
+                    file_data.get("mimeType")
+                    or file_data.get("mime_type")
+                    or (binding.get("metadata") or {}).get("mime_type")
+                    or binding.get("content_type")
+                    or ""
+                )
+                if not uri or not name:
+                    raise RuntimeError(
+                        "Current Gemini SDK cache layout requires a frozen Files API name and URI"
+                    )
+                identity = (name, uri)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                refs.append({"name": name, "uri": uri, "mime_type": mime_type})
+        return refs
 
     @staticmethod
     def validate_handle(value: Any) -> str:

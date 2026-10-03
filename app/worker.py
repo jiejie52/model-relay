@@ -29,6 +29,7 @@ from .persistence.object_storage import StorageRegistry
 from .persistence.supabase_storage import SupabaseObjectStorage
 from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
+from .providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from .providers.registry import ProviderRegistry
 from .providers.factory import register_protocol_adapters
 from .routing import RouteCatalog, RouteResolver
@@ -38,7 +39,7 @@ from .utils import utcnow
 from .observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "4.1.0"
+WORKER_VERSION = "4.2.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -52,11 +53,16 @@ class RelayWorker:
         self.storage = StorageRegistry(SupabaseObjectStorage(self.backend, settings))
         self.materials = MaterialResolver(self.repo, self.storage, settings)
         self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
+        self.gemini_sdk = (
+            GeminiAIHubMixGenAIClient(settings)
+            if settings.connection_is_active(settings.aihubmix_gemini_connection_id)
+            else None
+        )
         self.file_adapters = ProviderFileRegistry()
         if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
             self.file_adapters.register(
                 settings.aihubmix_gemini_connection_id,
-                GeminiAIHubMixFileAdapter(settings),
+                GeminiAIHubMixFileAdapter(settings, sdk=self.gemini_sdk),
             )
         if settings.connection_is_active(settings.moonshot_connection_id):
             self.file_adapters.register(
@@ -103,7 +109,7 @@ class RelayWorker:
         if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
             self.cache_resources.register(
                 settings.aihubmix_gemini_connection_id,
-                GeminiAIHubMixCacheResourceAdapter(settings),
+                GeminiAIHubMixCacheResourceAdapter(settings, sdk=self.gemini_sdk),
             )
         self.cache_orchestrator = CacheOrchestrator(
             self.repo, resource_registry=self.cache_resources
@@ -246,6 +252,8 @@ class RelayWorker:
     async def close(self) -> None:
         if self._legacy is not None:
             await self._legacy.close()
+        if self.gemini_sdk is not None:
+            await self.gemini_sdk.close()
         await self.backend.close()
 
     async def run_forever(self) -> None:

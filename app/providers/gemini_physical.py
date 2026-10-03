@@ -15,18 +15,23 @@ from .gemini_wire import (
 GEMINI_SESSION_PROJECTION_METADATA_KEY = "_relay_gemini_projection"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V2 = "gemini-physical-cache-layout/2"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V3 = "gemini-physical-cache-layout/3"
-GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/4"
+GEMINI_PHYSICAL_LAYOUT_VERSION_V4 = "gemini-physical-cache-layout/4"
+GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/5"
 SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS = {
     GEMINI_PHYSICAL_LAYOUT_VERSION_V2,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
     GEMINI_PHYSICAL_LAYOUT_VERSION,
 }
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V3 = "gemini-physical-projector/3"
-GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/4"
+GEMINI_PHYSICAL_PROJECTOR_VERSION_V4 = "gemini-physical-projector/4"
+GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/5"
 PHYSICAL_PLAN_SCHEMA_VERSION_V3 = "relay-gemini-physical-cache-plan/2"
-PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/3"
+PHYSICAL_PLAN_SCHEMA_VERSION_V4 = "relay-gemini-physical-cache-plan/3"
+PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/4"
 CACHE_SPEC_SCHEMA_VERSION_V3 = "relay-gemini-cache-spec/3"
-CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/4"
+CACHE_SPEC_SCHEMA_VERSION_V4 = "relay-gemini-cache-spec/4"
+CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/5"
 
 
 def frozen_session_projection_metadata() -> dict[str, str]:
@@ -54,12 +59,17 @@ def uses_physical_layout_v3(session: dict[str, Any]) -> bool:
 
 
 def uses_physical_layout_v4(session: dict[str, Any]) -> bool:
+    return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION_V4
+
+
+def uses_physical_layout_v5(session: dict[str, Any]) -> bool:
     return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION
 
 
 def uses_cache_material_projection_layout(session: dict[str, Any]) -> bool:
     return session_projection_version(session) in {
         GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
     }
 
@@ -83,9 +93,10 @@ def build_gemini_physical_cache_plan(
     The canonical Session/Material/History objects stay unchanged. This plan is
     an execution-only projection and is deliberately built after Material
     bindings are frozen so cache identity, CachedContent.create and generateContent
-    all consume one deterministic physical layout. Layout/4 deliberately removes
-    countTokens from the pre-create execution path and lets CachedContent.create be
-    the Provider-authoritative threshold gate.
+    all consume one deterministic physical layout. Layout/5 keeps the Layout/4
+    logical prefix/suffix contract but switches new AIHubMix Sessions to the
+    official google-genai Files + Context Caching SDK transport. CachedContent
+    create remains the Provider-authoritative threshold gate.
     """
 
     layout_version = session_projection_version(session)
@@ -111,6 +122,7 @@ def build_gemini_physical_cache_plan(
     projection = cache_material_projection if isinstance(cache_material_projection, dict) else {}
     uses_split_cache_projection = layout_version in {
         GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
     }
     if uses_split_cache_projection:
@@ -218,19 +230,26 @@ def build_gemini_physical_cache_plan(
         full_uncached_payload["systemInstruction"] = copy.deepcopy(request_instruction)
 
     is_current_layout = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION
+    is_layout_v4 = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V4
     projector_version = (
         GEMINI_PHYSICAL_PROJECTOR_VERSION
         if is_current_layout
+        else GEMINI_PHYSICAL_PROJECTOR_VERSION_V4
+        if is_layout_v4
         else GEMINI_PHYSICAL_PROJECTOR_VERSION_V3
     )
     physical_plan_schema_version = (
         PHYSICAL_PLAN_SCHEMA_VERSION
         if is_current_layout
+        else PHYSICAL_PLAN_SCHEMA_VERSION_V4
+        if is_layout_v4
         else PHYSICAL_PLAN_SCHEMA_VERSION_V3
     )
     cache_spec_schema_version = (
         CACHE_SPEC_SCHEMA_VERSION
         if is_current_layout
+        else CACHE_SPEC_SCHEMA_VERSION_V4
+        if is_layout_v4
         else CACHE_SPEC_SCHEMA_VERSION_V3
     )
 
@@ -300,10 +319,15 @@ def build_gemini_physical_cache_plan(
         # fixed physical-prefix revision.
         "prefix_version": 0,
         "compatible_prefix_fingerprints": ({"0": content_fingerprint} if cacheable else {}),
-        # Layout/4 follows the AIHubMix/Google Gen AI SDK recipe directly:
-        # Files -> caches.create() -> generateContent(cachedContent=...).
-        # The Provider create call is authoritative for model-specific minimums.
-        "measurement_order": ("provider_create" if is_current_layout else "before_lookup"),
+        # Layout/4 introduced Provider-create threshold measurement. Layout/5
+        # preserves that semantic and changes only the Provider transport to the
+        # official google-genai SDK for new Sessions.
+        "measurement_order": (
+            "provider_create" if (is_current_layout or is_layout_v4) else "before_lookup"
+        ),
+        "cache_create_transport": (
+            "google_genai_sdk" if is_current_layout else "native_rest"
+        ),
     }
     plan["cached_prefix_wire_hash"] = stable_hash(cached_prefix)
     plan["uncached_suffix_wire_hash"] = stable_hash(uncached_suffix)

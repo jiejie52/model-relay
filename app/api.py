@@ -33,6 +33,7 @@ from .providers.registry import ProviderRegistry
 from .providers.factory import register_protocol_adapters
 from .providers.moonshot_chat import MoonshotChatAdapter
 from .providers.gemini_native import GeminiNativeAdapter
+from .providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from .routing import RouteCatalog, RouteResolver
 from .core.execution_runtime import SharedExecutionRuntime
 from .cache.orchestrator import CacheOrchestrator
@@ -44,7 +45,7 @@ from .observability import configure_logging, elapsed_ms, error as log_error, in
 
 
 
-API_VERSION = "4.1.0"
+API_VERSION = "4.2.0"
 
 
 settings = get_settings()
@@ -146,11 +147,16 @@ async def lifespan(_: FastAPI):
     storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
     material_resolver = MaterialResolver(repo, storage_registry, settings)
     fallback_storage = FallbackObjectStorage(repo, storage_registry, settings)
+    gemini_sdk = (
+        GeminiAIHubMixGenAIClient(settings)
+        if settings.connection_is_active(settings.aihubmix_gemini_connection_id)
+        else None
+    )
     file_adapters = ProviderFileRegistry()
     if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
         file_adapters.register(
             settings.aihubmix_gemini_connection_id,
-            GeminiAIHubMixFileAdapter(settings),
+            GeminiAIHubMixFileAdapter(settings, sdk=gemini_sdk),
         )
     if settings.connection_is_active(settings.moonshot_connection_id):
         file_adapters.register(
@@ -198,7 +204,7 @@ async def lifespan(_: FastAPI):
     if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
         cache_resources.register(
             settings.aihubmix_gemini_connection_id,
-            GeminiAIHubMixCacheResourceAdapter(settings),
+            GeminiAIHubMixCacheResourceAdapter(settings, sdk=gemini_sdk),
         )
     cache_orchestrator = CacheOrchestrator(repo, resource_registry=cache_resources)
     runtime = SharedExecutionRuntime(
@@ -222,6 +228,7 @@ async def lifespan(_: FastAPI):
     app.state.route_resolver = route_resolver
     app.state.shared_runtime = runtime
     app.state.cache_resource_registry = cache_resources
+    app.state.gemini_genai_sdk = gemini_sdk
     app.state.cache_orchestrator = cache_orchestrator
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
@@ -253,6 +260,9 @@ async def lifespan(_: FastAPI):
         notifier = getattr(app.state, "worker_wake_notifier", None)
         if notifier is not None:
             await notifier.close()
+        sdk_client = getattr(app.state, "gemini_genai_sdk", None)
+        if sdk_client is not None:
+            await sdk_client.close()
         await backend.close()
 
 

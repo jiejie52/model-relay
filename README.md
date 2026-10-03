@@ -1,3 +1,30 @@
+# Model Relay 4.2.0 - AIHubMix `google-genai` Files + Context Cache
+
+## 4.2.0 版本定位
+
+本版是在 4.1.0 Provider-create 语义不变的前提下，把 AIHubMix Gemini 的 **Files 上传 + 新版 Context Cache 创建**切换到官方最新 `google-genai` SDK。Relay 的 Request/Binding/Fencing/dispatch 主链不变；新的 SDK 只是 Provider transport。
+
+### 4.2.0 核心规则
+
+- **官方 SDK**：新增 `google-genai>=2.28.0,<3`，使用 `genai.Client(..., http_options=types.HttpOptions(base_url="https://aihubmix.com"))`。
+- **File 对象直传**：同一进程中，`client.aio.files.upload` 返回的 SDK `File` 对象会被原样传入 `CreateCachedContentConfig.contents`。
+- **跨进程可恢复**：Python `File` 对象不持久化；API/Worker 切换或重启后，按冻结的 file name 调 `files.get` 重新拿到 SDK `File` 对象，再传给 `caches.create`。
+- **Inference 不改**：创建成功后仍进入现有 Stateful Resource ledger/binding/seal；模型调用继续由现有 Gemini Native Adapter 发送 `cachedContent=<handle>` + uncached suffix。
+- **版本冻结**：新 Session 使用 `gemini-physical-cache-layout/5` / `gemini-physical-projector/5`；4.1 layout/4 保留原 native REST cache-create 路径，不静默迁移。
+- **无新增 SQL**：继续使用 005/006；API/Worker 版本均为 `4.2.0`。
+
+新增环境变量（有默认值）：
+
+```text
+AIHUBMIX_GEMINI_SDK_BASE_URL=https://aihubmix.com
+```
+
+原 `AIHUBMIX_GEMINI_BASE_URL` 继续用于既有 Gemini Native inference/资源验证路径，默认部署仍建议 `https://aihubmix.com/gemini`。
+
+部署见 `DEPLOYMENT_4.2.0.md`，验证见 `VALIDATION_4.2.0.md`，改动明细见 `CHANGELOG_4.2.0.md`。
+
+---
+
 # Model Relay 4.1.0 - AIHubMix Native Cache Create Flow
 
 ## 4.1.0 版本定位

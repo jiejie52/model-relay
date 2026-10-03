@@ -26,6 +26,7 @@ from app.providers.openai_compatible import OpenAICompatibleResponsesProvider
 from app.providers.gemini_native import GeminiNativeAdapter
 from app.providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
     build_gemini_physical_cache_plan,
@@ -1008,13 +1009,19 @@ def test_gemini_native_cache_reference_is_reserved_from_legacy_provider_payload(
 
 
 
-def _gemini_v2_session(*, material_manifest=None):
+def _gemini_v2_session(*, material_manifest=None, layout_version=None):
+    projection = frozen_session_projection_metadata()
+    if layout_version is not None:
+        projection = dict(projection)
+        projection["layout_version"] = layout_version
+        if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V4:
+            projection["projector_version"] = "gemini-physical-projector/4"
     return {
         "id": "s-v2",
         "context_policy": "conversation",
         "material_manifest": list(material_manifest or []),
         "metadata": {
-            GEMINI_SESSION_PROJECTION_METADATA_KEY: frozen_session_projection_metadata(),
+            GEMINI_SESSION_PROJECTION_METADATA_KEY: projection,
             "_relay_route": {"account_scope_hash": "acct"},
         },
     }
@@ -1030,6 +1037,9 @@ def _gemini_binding(material_id: str, uri: str, *, sha: str) -> dict:
         "account_scope_hash": "acct",
         "provider": "gemini",
         "external_uri": uri,
+        "file_uri": uri,
+        "external_file_id": f"files/{material_id}",
+        "provider_file_id": f"files/{material_id}",
         "content_sha256": sha,
         "content_type": "application/pdf",
         "filename": f"{material_id}.pdf",
@@ -1412,7 +1422,10 @@ async def test_layout4_native_wire_is_cachedcontent_create_then_generate_without
         async def finish_cache_operation(self, **kwargs):
             raise AssertionError("successful create should not finish as a failed/unknown operation")
 
-    session = _gemini_v2_session(material_manifest=["m-session"])
+    session = _gemini_v2_session(
+        material_manifest=["m-session"],
+        layout_version=GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
+    )
     snapshot = {
         "schema_version": "relay-request/2.3",
         "model": "gemini-3.1-flash-lite",
@@ -2014,3 +2027,259 @@ def test_gemini_4_exact_70mb_uses_large_aggregate_branch():
     assert plan.mode == "files_preferred_inline_small_subset"
     assert plan.inline_material_ids == ("m-small",)
     assert plan.inference_only_session_material_ids == ("m-large",)
+
+
+class _FakeGenAIFileState:
+    def __init__(self, name: str):
+        self.name = name
+        self.value = name
+
+
+class _FakeGenAIFile:
+    def __init__(self, *, name: str, uri: str, mime_type: str = "application/pdf", state: str = "ACTIVE"):
+        self.name = name
+        self.uri = uri
+        self.mime_type = mime_type
+        self.display_name = name.rsplit("/", 1)[-1]
+        self.state = _FakeGenAIFileState(state)
+
+
+class _FakePart:
+    @classmethod
+    def from_text(cls, *, text):
+        return ("text", text)
+
+    @classmethod
+    def from_bytes(cls, *, data, mime_type):
+        return ("bytes", data, mime_type)
+
+    @classmethod
+    def from_uri(cls, *, file_uri, mime_type):
+        return ("uri", file_uri, mime_type)
+
+
+class _FakeContent:
+    def __init__(self, *, role, parts):
+        self.role = role
+        self.parts = parts
+
+
+class _FakeUploadFileConfig:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _FakeCreateCachedContentConfig:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _FakeUpdateCachedContentConfig:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _FakeGenAITypes:
+    UploadFileConfig = _FakeUploadFileConfig
+    CreateCachedContentConfig = _FakeCreateCachedContentConfig
+    UpdateCachedContentConfig = _FakeUpdateCachedContentConfig
+    Part = _FakePart
+    Content = _FakeContent
+
+
+class _FakeFilesAPI:
+    def __init__(self, uploaded, rehydrated=None):
+        self.uploaded = uploaded
+        self.rehydrated = rehydrated or uploaded
+        self.get_calls = []
+        self.upload_calls = []
+        self.delete_calls = []
+
+    async def upload(self, *, file, config):
+        self.upload_calls.append((file, config))
+        return self.uploaded
+
+    async def get(self, *, name):
+        self.get_calls.append(name)
+        return self.rehydrated
+
+    async def delete(self, *, name):
+        self.delete_calls.append(name)
+        return None
+
+
+class _FakeCachesAPI:
+    def __init__(self):
+        self.create_calls = []
+
+    async def create(self, *, model, config):
+        self.create_calls.append((model, config))
+        return type(
+            "FakeCache",
+            (),
+            {
+                "name": "cachedContents/sdk-cache-1",
+                "expire_time": "2099-01-01T00:00:00Z",
+                "create_time": "2026-10-03T00:00:00Z",
+                "usage_metadata": {"totalTokenCount": 5000},
+            },
+        )()
+
+
+class _FakeAIO:
+    def __init__(self, files_api, caches_api):
+        self.files = files_api
+        self.caches = caches_api
+
+    async def aclose(self):
+        return None
+
+
+class _FakeGenAIClient:
+    def __init__(self, uploaded, rehydrated=None):
+        self.files_api = _FakeFilesAPI(uploaded, rehydrated=rehydrated)
+        self.caches_api = _FakeCachesAPI()
+        self.aio = _FakeAIO(self.files_api, self.caches_api)
+
+    def close(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_layout5_google_genai_passes_uploaded_file_object_directly_to_cache_create():
+    from app.materials.provider_files.base import MaterialFile
+    from app.materials.provider_files.gemini_aihubmix import GeminiAIHubMixFileAdapter
+    from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+
+    uploaded = _FakeGenAIFile(
+        name="files/session-pdf",
+        uri="https://files.example/session-pdf",
+    )
+    fake_client = _FakeGenAIClient(uploaded)
+    sdk = GeminiAIHubMixGenAIClient(
+        settings(),
+        client=fake_client,
+        types_module=_FakeGenAITypes,
+    )
+    file_adapter = GeminiAIHubMixFileAdapter(settings(), sdk=sdk)
+    prepared = await file_adapter.prepare(
+        MaterialFile(
+            material_id="m-session",
+            tenant_id="t",
+            conversation_hash="c",
+            filename="session.pdf",
+            content_type="application/pdf",
+            size_bytes=8,
+            sha256="sha-session",
+            data=b"pdf-data",
+        ),
+        generation=1,
+    )
+    persisted_binding = {
+        "material_id": "m-session",
+        "binding_generation": 1,
+        "binding_kind": prepared.binding["representation"],
+        "content_sha256": "sha-session",
+        "content_type": "application/pdf",
+        "filename": "session.pdf",
+        **prepared.binding,
+    }
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic",
+        "input": "question",
+        "protocol_profile_hash": "profile",
+        "capability_contract_hash": "cap",
+        "cache_contract_hash": "cache",
+    }
+    physical = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=[persisted_binding],
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    cache_adapter = GeminiAIHubMixCacheResourceAdapter(settings(), sdk=sdk)
+    spec = cache_adapter.build_spec(
+        snapshot=snapshot,
+        history=[],
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[persisted_binding],
+        session=session,
+        ttl_seconds=300,
+        provider_physical_plan=physical,
+    )
+    assert spec["cache_create_transport"] == "google_genai_sdk"
+    created = await cache_adapter.create(spec=spec, operation={"lease_epoch": 1})
+    assert created["handle"] == "cachedContents/sdk-cache-1"
+    assert fake_client.files_api.get_calls == []
+    _, config = fake_client.caches_api.create_calls[-1]
+    assert config.ttl == "300s"
+    # The exact object returned by files.upload survives through the shared SDK
+    # wrapper and is handed to CreateCachedContentConfig.contents.
+    assert config.contents[0][0] is uploaded
+
+
+@pytest.mark.asyncio
+async def test_layout5_google_genai_rehydrates_file_object_after_process_boundary():
+    from app.providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+
+    rehydrated = _FakeGenAIFile(
+        name="files/session-pdf",
+        uri="https://files.example/session-pdf",
+    )
+    fake_client = _FakeGenAIClient(rehydrated, rehydrated=rehydrated)
+    sdk = GeminiAIHubMixGenAIClient(
+        settings(),
+        client=fake_client,
+        types_module=_FakeGenAITypes,
+    )
+    cache_adapter = GeminiAIHubMixCacheResourceAdapter(settings(), sdk=sdk)
+    binding = {
+        "material_id": "m-session",
+        "binding_generation": 1,
+        "binding_kind": "gemini_file_uri",
+        "representation": "gemini_file_uri",
+        "connection_id": "aihubmix_gemini_native",
+        "external_uri": rehydrated.uri,
+        "file_uri": rehydrated.uri,
+        "external_file_id": rehydrated.name,
+        "provider_file_id": rehydrated.name,
+        "content_sha256": "sha-session",
+        "content_type": "application/pdf",
+        "metadata": {"mime_type": "application/pdf"},
+    }
+    session = _gemini_v2_session(material_manifest=["m-session"])
+    snapshot = {
+        "schema_version": "relay-request/2.3",
+        "model": "gemini-3.1-flash-lite",
+        "instructions": "dynamic",
+        "input": "question",
+        "protocol_profile_hash": "profile",
+        "capability_contract_hash": "cap",
+        "cache_contract_hash": "cache",
+    }
+    physical = build_gemini_physical_cache_plan(
+        snapshot=snapshot,
+        session=session,
+        history=[],
+        material_ids=["m-session"],
+        material_bindings=[binding],
+        context_plan={"context_plan_hash": "ctx"},
+    )
+    spec = cache_adapter.build_spec(
+        snapshot=snapshot,
+        history=[],
+        context_plan={"context_plan_hash": "ctx"},
+        material_bindings=[binding],
+        session=session,
+        ttl_seconds=300,
+        provider_physical_plan=physical,
+    )
+    await cache_adapter.create(spec=spec, operation={"lease_epoch": 1})
+    assert fake_client.files_api.get_calls == ["files/session-pdf"]
+    _, config = fake_client.caches_api.create_calls[-1]
+    assert config.contents[0][0] is rehydrated

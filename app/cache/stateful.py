@@ -113,8 +113,8 @@ class StatefulResourceManager:
         token_count: int | None = None
 
         # Legacy layouts may pre-measure the exact frozen cached prefix. Layout/4
-        # deliberately follows the AIHubMix/Google Gen AI SDK flow and skips this
-        # step: CachedContent.create is the provider-authoritative threshold gate.
+        # and layout/5 both use Provider create as the authoritative threshold gate;
+        # layout/5 changes only the create transport to the official google-genai SDK.
         if measure_before_lookup:
             measured = await self._measure(
                 adapter=adapter,

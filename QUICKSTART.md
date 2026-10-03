@@ -1,3 +1,43 @@
+# Model Relay 4.2.0 快速部署补充
+
+> 4.2.0 将 AIHubMix Gemini 的 Files 上传与新 layout/5 `caches.create` 切换到官方 `google-genai` SDK；Relay 的缓存资源账本、fencing、binding/seal 与 Gemini Native inference 主链保持不变。
+
+安装完整 requirements，并确认包含：
+
+```text
+google-genai>=2.28.0,<3
+```
+
+API / Worker 使用同一 4.2.0 镜像，并配置：
+
+```text
+AIHUBMIX_API_KEY=<secret>
+AIHUBMIX_GEMINI_BASE_URL=https://aihubmix.com/gemini
+AIHUBMIX_GEMINI_SDK_BASE_URL=https://aihubmix.com
+MODEL_CONTROL_PLANE_REVISION=relay-model-control-plane/2026-10-02.1
+GEMINI_CACHE_INLINE_FALLBACK_LIMIT_BYTES=73400320
+```
+
+新 Session 主链：
+
+```text
+Material bytes
+  -> google-genai files.upload
+  -> File ACTIVE
+  -> physical layout/5
+  -> caches.create(contents=[SDK File object / Parts...])
+  -> Relay Stateful resource verify + binding + seal
+  -> existing Gemini Native generateContent(cachedContent=<handle> + suffix)
+```
+
+同进程时直接复用 `files.upload` 返回的 `File` 实例；跨 API/Worker 或进程重启时，按冻结 file name 调 `files.get` 恢复官方 `File` 对象。要使用新 transport 必须**新建 Gemini Session**；4.1 layout/4 不静默升级。
+
+详细见 `DEPLOYMENT_4.2.0.md`。
+
+> 下方 4.1.0 / 4.0.0 / 3.x 内容保留为历史迁移记录。
+
+---
+
 # Model Relay 4.1.0 快速部署补充
 
 > 4.1.0 纠正 4.0.0 的 Gemini Stateful Cache 创建方式：新 layout/4 按 **Files API -> `cachedContents.create` -> `generateContent(cachedContent=...)`** 执行，取消 Relay 的 `countTokens` 前置测量。
