@@ -30,6 +30,7 @@ class RouteEntry:
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
     source: str = "legacy"
+    unavailable_action: str = "try_next"  # try_next | reject_new_session
 
     def matches(self, *, provider: str, model: str, deployment_id: str) -> bool:
         if self.provider.lower() != provider.lower():
@@ -95,6 +96,7 @@ class RouteCatalog:
                     "observed_model_policy": x.observed_model_policy,
                     "quota": x.quota,
                     "source": x.source,
+                    "unavailable_action": x.unavailable_action,
                 }
                 for x in self.entries
             ],
@@ -130,6 +132,9 @@ class RouteCatalog:
         cp = control_plane or ModelControlPlane.from_settings(settings)
         entries: list[RouteEntry] = []
         for offering in cp.offerings.values():
+            # Disabled supplies are declarations, never executable routes.
+            if not offering.enabled:
+                continue
             connection = cp.connection(offering.connection_id)
             contract = cp.contract(offering.capability_contract_id)
             profile = cp.protocol_profile(offering.protocol_profile_id)
@@ -157,6 +162,7 @@ class RouteCatalog:
                     observed_model_policy=offering.observed_model_policy,
                     quota=dict(offering.quota),
                     source="control_plane",
+                    unavailable_action=str(offering.metadata.get("unavailable_action", "try_next")),
                 )
             )
         return cls(
@@ -195,6 +201,7 @@ class RouteCatalog:
             observed_model_policy=str(value.get("observed_model_policy") or "audit").lower(),
             quota=dict(value.get("quota") or {}),
             source="legacy",
+            unavailable_action=str(value.get("unavailable_action") or "try_next"),
         )
 
     def candidates(self, *, provider: str, model: str, deployment_id: str) -> list[RouteEntry]:
