@@ -223,6 +223,37 @@ class SharedExecutionRuntime:
                 cache_material_ids=(provider_physical_plan.get("dependencies") or {}).get("cache_material_ids"),
                 inference_only_session_material_ids=(provider_physical_plan.get("dependencies") or {}).get("inference_only_session_material_ids"),
                 cacheable=provider_physical_plan.get("cacheable"),
+                cache_layout_version=provider_physical_plan.get("layout_version"),
+                instruction_source=(
+                    "request" if snapshot.get("instructions") else
+                    "session" if (provider_physical_plan.get("cached_prefix") or {}).get("systemInstruction") else
+                    "none"
+                ),
+                request_instruction_fingerprint=(
+                    stable_hash(str(snapshot.get("instructions"))) if snapshot.get("instructions") else None
+                ),
+                cached_instruction_fingerprint=(
+                    stable_hash((provider_physical_plan.get("cached_prefix") or {}).get("systemInstruction"))
+                    if (provider_physical_plan.get("cached_prefix") or {}).get("systemInstruction") is not None else None
+                ),
+                suffix_instruction_fingerprint=(
+                    stable_hash((provider_physical_plan.get("uncached_suffix") or {}).get("systemInstruction"))
+                    if (provider_physical_plan.get("uncached_suffix") or {}).get("systemInstruction") is not None else None
+                ),
+                stable_prefix_fingerprint=(context_plan or {}).get("stable_prefix_fingerprint"),
+                content_fingerprint=provider_physical_plan.get("content_fingerprint"),
+                reuse_key_hash=(stable_hash(provider_physical_plan.get("reuse_key")) if provider_physical_plan.get("reuse_key") else None),
+                cache_material_representation_digests=(provider_physical_plan.get("dependencies") or {}).get("session_material_representation_digests"),
+                cache_material_projection_hash=(provider_physical_plan.get("dependencies") or {}).get("cache_material_projection_hash"),
+                cache_identity_diff_reasons=(
+                    [reason for reason, present in [
+                        ("request_instruction_present", bool(snapshot.get("instructions"))),
+                        ("cached_instruction_present", (provider_physical_plan.get("cached_prefix") or {}).get("systemInstruction") is not None),
+                        ("suffix_instruction_present", (provider_physical_plan.get("uncached_suffix") or {}).get("systemInstruction") is not None),
+                        ("cache_materials_empty", not bool((provider_physical_plan.get("dependencies") or {}).get("cache_material_ids"))),
+                        ("inference_only_materials_present", bool((provider_physical_plan.get("dependencies") or {}).get("inference_only_session_material_ids"))),
+                    ] if present]
+                ),
             )
 
         cache_binding = None

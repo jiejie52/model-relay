@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+import hashlib
 import logging
 from typing import Any, Protocol
 
@@ -18,6 +20,23 @@ from .contracts import CacheDecisionError, ExecutionFence
 
 
 logger = logging.getLogger("model-relay-cache")
+
+
+def _private_raw_provider_response(exc: ProviderHTTPError) -> dict[str, Any]:
+    """Exact upstream body for the access-controlled cache operation ledger.
+
+    Ordinary logs continue to use the redacted provider_http_error observation.
+    """
+    raw = bytes(exc.body or b"")
+    return {
+        "encoding": "base64",
+        "body_base64": base64.b64encode(raw).decode("ascii"),
+        "body_size": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+        "http_status": int(exc.status_code),
+        "request_id": exc.request_id,
+        "phase": exc.phase,
+    }
 
 
 class CacheResourceAdapter(Protocol):
@@ -282,6 +301,7 @@ class StatefulResourceManager:
             raw_result = {
                 "outcome": "cache_create_rejected" if state == "failed" else "cache_create_unknown",
                 "provider_http_error": error_observation,
+                "provider_raw_response": _private_raw_provider_response(exc),
             }
             await self._record_error_observation(
                 operation_id=op_id,
@@ -421,6 +441,7 @@ class StatefulResourceManager:
                 **self._safe_provider_observation(observation),
                 "outcome": "cache_create_verify_failed",
                 "verify_provider_http_error": error_observation,
+                "provider_raw_response": _private_raw_provider_response(exc),
                 "recreate_attempted": False,
             }
             await self._record_error_observation(

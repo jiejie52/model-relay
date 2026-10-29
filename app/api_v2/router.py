@@ -1378,6 +1378,8 @@ async def create_request(
                 cache_contract_hash=(str(frozen_route.get("cache_contract_hash")) if frozen_route.get("cache_contract_hash") else None),
                 profile_hash=(str(frozen_route.get("protocol_profile_hash")) if frozen_route.get("protocol_profile_hash") else None),
                 policy_hash=(str(frozen_route.get("cache_policy_hash")) if frozen_route.get("cache_policy_hash") else None),
+                provider=provider,
+                model=model,
             )
         except CacheDecisionError as exc:
             raise HTTPException(status_code=409, detail=exc.public_detail()) from exc

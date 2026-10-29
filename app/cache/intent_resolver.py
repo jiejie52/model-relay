@@ -25,6 +25,8 @@ class CacheIntentResolver:
         cache_contract_hash: str | None,
         profile_hash: str | None,
         policy_hash: str | None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> CacheIntentPlan:
         mode = str(requested_mode or "auto").strip().lower()
         if mode not in {"off", "auto", "on"}:
@@ -49,6 +51,14 @@ class CacheIntentResolver:
         raw_mechanisms = contract.get("supported_mechanisms") or contract.get("mechanisms") or []
         mechanisms = [str(x) for x in raw_mechanisms if str(x)]
         verification = str(contract.get("verification_status") or "unverified").lower()
+        # Approved architecture exception: Gemini cache attempts are admitted by
+        # Relay when a concrete cache mechanism is declared. This does not mark
+        # the upstream provider as verified and does not bypass protocol-profile,
+        # policy, physical-layout, or Adapter execution constraints.
+        gemini_admission_override = (
+            str(provider or "").strip().lower() == "gemini"
+            and str(model or "").strip().lower().startswith("gemini-")
+        )
         if not mechanisms:
             if mode == "on":
                 raise CacheDecisionError(
@@ -58,7 +68,7 @@ class CacheIntentResolver:
                 )
             return self._none(mode, context_plan, policy_hash, profile_hash, cache_contract_hash, scope, "mechanism_unavailable")
 
-        if verification not in {"verified", "published", "legacy_verified"}:
+        if verification not in {"verified", "published", "legacy_verified"} and not gemini_admission_override:
             if mode == "on":
                 raise CacheDecisionError(
                     "CACHE_PROTOCOL_UNVERIFIED",
@@ -93,6 +103,16 @@ class CacheIntentResolver:
         mechanism = ordered[0]
         mechanism_cfg = contract.get("mechanism_profiles", {}).get(mechanism, {}) if isinstance(contract.get("mechanism_profiles"), dict) else {}
         mechanism_cfg = dict(mechanism_cfg or {})
+        if gemini_admission_override and verification not in {"verified", "published", "legacy_verified"}:
+            mechanism_cfg["system_admission_override"] = "gemini_model_cache_attempt"
+            mechanism_cfg["upstream_verification_status"] = verification or "unverified"
+            # For Gemini's explicit Stateful Resource path, let the upstream
+            # create operation be the threshold/protocol authority instead of
+            # preemptively declining an attempt because local threshold metadata
+            # is unknown. The original provider response is retained for diagnosis.
+            if mechanism == "stateful_resource" and str(mechanism_cfg.get("threshold_mode") or "unknown").lower() == "unknown":
+                mechanism_cfg["threshold_mode"] = "provider_create"
+                mechanism_cfg["threshold_admission_override"] = "provider_create"
 
         assessment = context_plan.get("token_assessment") if isinstance(context_plan.get("token_assessment"), dict) else {}
         threshold_mode = str(mechanism_cfg.get("threshold_mode") or "unknown").lower()
@@ -136,7 +156,12 @@ class CacheIntentResolver:
             requested_mode=mode,  # type: ignore[arg-type]
             planned_mechanism=mechanism,  # type: ignore[arg-type]
             resolution_status=("pending" if pending_final_guard else "finalized"),
-            decision_reason=("final_threshold_pending" if pending_final_guard else "selected"),
+            decision_reason=(
+                "final_threshold_pending" if pending_final_guard
+                else "selected_gemini_admission_override"
+                if gemini_admission_override and verification not in {"verified", "published", "legacy_verified"}
+                else "selected"
+            ),
             context_plan_hash=str(context_plan["context_plan_hash"]),
             policy_hash=policy_hash,
             profile_hash=profile_hash,

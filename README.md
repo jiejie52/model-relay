@@ -1,6 +1,8 @@
-# Model Relay 4.3.2 - Gemini Layout/8 Cache Execution Fix
+# Model Relay 5.0.0 - Gemini Cache Admission and Diagnostics
 
-## 4.3.2 版本定位
+## 5.0.0 版本定位
+
+本版本在保留既有 Session / Request、缓存资源副作用隔离和故障恢复语义的前提下，调整 Gemini 缓存准入与诊断：Relay 对已声明具体缓存机制的 `gemini-*` 允许系统侧尝试，不把该例外视为供应商能力已认证；缓存协议投影、缓存策略、物理布局和 Adapter 约束仍然生效。缓存创建/验证失败会在受控缓存操作记录中保留供应商原始响应实体（Base64、长度、SHA-256、HTTP 状态、请求 ID 和阶段），普通日志继续使用脱敏诊断摘要。Gemini 物理缓存计划日志新增指令、稳定前缀、材料表示和复用身份的指纹，辅助定位身份变化来源。
 
 4.3.2 修复 4.3.1 的 layout/7 执行层回归：API 已选择 `<70 MiB -> inline_cache_no_files`，但 `SharedExecutionRuntime` 仍只对 layout/6 启用 split inline-cache binding，导致 layout/7 可能回落到历史 Files-first 路径，并在 `contents` 为空时错误尝试创建 CachedContent。
 
@@ -14,7 +16,7 @@
 
 ### 版本
 
-- API / Worker：`4.3.2`
+- API / Worker：`5.0.0`
 - Gemini inference adapter：`gemini-native-aihubmix/7`
 - Gemini cache adapter：`gemini-cache-aihubmix/8`
 - Gemini physical layout/projector：`8` / `8`
@@ -371,3 +373,12 @@ route_binding_mismatch
 **0.5.0 -> 0.5.1 没有新增 SQL migration。** 路由冻结信息使用现有 `relay_sessions.metadata` 与 Request snapshot 保存。数据库仍需已完成 0.4.0 的 `sql/004_provider_native_file_ingress.sql`。
 
 详细部署与调用示例见 `QUICKSTART.md`。
+
+
+## V2 workbook-driven governed runtime settings
+
+`config/model_management_v2.xlsx` is the operator-facing declaration workbook.
+It is no longer a test fixture. Use the offline governance compiler and
+external approval process in [`config/README.md`](config/README.md) to deploy
+a SHA256-pinned `MODEL_CONTROL_PLANE_FILE` snapshot. Directly editing Excel
+does not activate new models or channels.
