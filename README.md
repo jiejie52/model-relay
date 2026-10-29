@@ -371,3 +371,12 @@ route_binding_mismatch
 **0.5.0 -> 0.5.1 没有新增 SQL migration。** 路由冻结信息使用现有 `relay_sessions.metadata` 与 Request snapshot 保存。数据库仍需已完成 0.4.0 的 `sql/004_provider_native_file_ingress.sql`。
 
 详细部署与调用示例见 `QUICKSTART.md`。
+
+
+## V2 workbook-driven governed runtime settings
+
+`config/model_management_v2.xlsx` is the operator-facing declaration workbook.
+It is no longer a test fixture. Use the offline governance compiler and
+external approval process in [`config/README.md`](config/README.md) to deploy
+a SHA256-pinned `MODEL_CONTROL_PLANE_FILE` snapshot. Directly editing Excel
+does not activate new models or channels.
