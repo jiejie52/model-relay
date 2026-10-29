@@ -80,6 +80,7 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
                 raise DeclarationError(f"模型清单!row {idx}: duplicate model")
             if row["发布意向"] not in ("暂不发布", "申请发布", "暂停"):
                 raise DeclarationError(f"模型清单!row {idx}: invalid publication intention")
+
             models.add(key)
             result["models"].append(row)
         route_keys: set[tuple[str, str, str]] = set()
@@ -113,6 +114,7 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
             cache_keys.add(key)
             row["计划门槛 Token"] = _positive_int(row["计划门槛 Token"], "缓存设置", idx, "计划门槛 Token", optional=True)
             row["资源有效期 分钟"] = _positive_int(row["资源有效期 分钟"], "缓存设置", idx, "资源有效期 分钟", optional=True)
+
             if row["缓存机制"] not in ("显式资源", "隐式前缀", "不使用"):
                 raise DeclarationError(f"缓存设置!row {idx}: invalid cache mechanism")
             if row["默认策略"] not in ("关闭", "自动", "强制") or row["可选强制"] not in ("是", "否"):
