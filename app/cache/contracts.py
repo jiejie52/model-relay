@@ -46,6 +46,7 @@ class CacheIntentPlan:
     # Only mechanisms already certified by the frozen Supply and Profile may
     # appear here. CacheOrchestrator may resolve one before dispatch is sealed.
     fallback_mechanisms: tuple[dict[str, Any], ...] = ()
+
     resolver_version: str = "relay-cache-resolver/3"
 
     def canonical(self) -> dict[str, Any]:
