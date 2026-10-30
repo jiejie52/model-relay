@@ -35,16 +35,22 @@ class CacheIntentPlan:
     profile_hash: str | None
     cache_contract_hash: str | None
     scope: str
+    requested_mechanism: str = "auto"
+    reuse_prediction: dict[str, Any] = field(default_factory=dict)
+    selection_evidence: dict[str, Any] = field(default_factory=dict)
     allow_uncached_same_context: bool = False
     final_threshold_guard: bool = False
     candidate_rejections: tuple[dict[str, Any], ...] = ()
     mechanism_config: dict[str, Any] = field(default_factory=dict)
-    resolver_version: str = "relay-cache-resolver/2"
+    resolver_version: str = "relay-cache-resolver/3"
 
     def canonical(self) -> dict[str, Any]:
         return {
             "schema_version": "relay-cache-plan/1",
             "requested_mode": self.requested_mode,
+            "requested_mechanism": self.requested_mechanism,
+            "reuse_prediction": self.reuse_prediction,
+            "selection_evidence": self.selection_evidence,
             "planned_mechanism": self.planned_mechanism,
             "resolution_status": self.resolution_status,
             "decision_reason": self.decision_reason,
@@ -140,12 +146,16 @@ class CacheUsageObservation:
     attribution: str = "provider_reported"
     transparent_observation: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    prompt_tokens_total: int | None = None
+    cache_read_ratio: float | None = None
 
     def canonical(self) -> dict[str, Any]:
         return {
+            "prompt_tokens_total": self.prompt_tokens_total,
             "cache_read_tokens": self.cache_read_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
             "uncached_input_tokens": self.uncached_input_tokens,
+            "cache_read_ratio": self.cache_read_ratio,
+            "cache_write_tokens": self.cache_write_tokens,
             "actual_cache_hit_status": self.actual_cache_hit_status,
             "evidence_level": self.evidence_level,
             "attribution": self.attribution,

@@ -36,6 +36,82 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0] if rows else None
 
+    async def recent_session_cache_reuse_evidence(
+        self, *, session_id: str, tenant_id: str,
+        conversation_hash: str, reuse_evidence_key: str,
+    ) -> dict[str, int]:
+        """Read only same-Session completed, matching static-context facts.
+
+        The last 32 requests are bounded; omitted/older records are not evidence.
+        This method does not predict future business workflow steps.
+        """
+        rows = await self.backend.select(
+            "relay_requests",
+            filters={
+                "session_id": f"eq.{session_id}",
+                "tenant_id": f"eq.{tenant_id}",
+                "conversation_hash": f"eq.{conversation_hash}",
+                "status": "eq.succeeded",
+            },
+            select="id,metadata,status",
+            order="created_at.desc",
+            limit=32,
+        )
+        matched = 0
+        stateful_matched = 0
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            cache = metadata.get("_relay_cache") if isinstance(metadata.get("_relay_cache"), dict) else {}
+            if cache.get("reuse_evidence_key") == reuse_evidence_key:
+                matched += 1
+                # This remains a preliminary admission hint. StatefulResourceManager
+                # must prove the exact wire fingerprint and get() the resource.
+                if cache.get("planned_mechanism") == "stateful_resource":
+                    stateful_matched += 1
+        return {
+            "observed_compatible_uses": matched,
+            "observed_stateful_compatible_uses": stateful_matched,
+        }
+
+    async def ready_session_cache_resource_hint(
+        self, *, scope_hash: str, connection_id: str,
+    ) -> bool:
+        """Bounded, same-Supply *hint* only; NOT a cache compatibility proof.
+
+        Exact reuse-key, semantic prefix, expiry, account and provider handle
+        verification remain exclusively in StatefulResourceManager.prepare().
+        This hint only prevents the admission planner from ignoring an existing
+        resource when another certified mechanism is also available.
+        """
+        rows = await self.backend.select(
+            "relay_cache_resources",
+            filters={
+                "scope_hash": f"eq.{scope_hash}",
+                "connection_id": f"eq.{connection_id}",
+                "state": "eq.ready",
+            },
+            select="id,expire_time,provider_handle_ref",
+            order="created_at.desc",
+            limit=20,
+        )
+        now = datetime.now(timezone.utc)
+        safety = max(0, int(getattr(self.settings, "cache_expiry_safety_seconds", 30)))
+        for row in rows:
+            if not row.get("provider_handle_ref"):
+                continue
+            expiry = row.get("expire_time")
+            if expiry:
+                try:
+                    parsed = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if (parsed - now).total_seconds() <= safety:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+            return True
+        return False
+
     async def get_request(
         self,
         request_id: str | UUID,
