@@ -41,6 +41,7 @@ from .observability import configure_logging, info as log_info, warning as log_w
 
 WORKER_VERSION = "5.1.0"
 
+
 settings = get_settings()
 configure_logging(settings)
 logger = logging.getLogger("model-relay-worker")
