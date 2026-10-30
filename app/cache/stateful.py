@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+import math
+import hashlib
 import logging
 from typing import Any, Protocol
 
@@ -18,6 +21,23 @@ from .contracts import CacheDecisionError, ExecutionFence
 
 
 logger = logging.getLogger("model-relay-cache")
+
+
+def _private_raw_provider_response(exc: ProviderHTTPError) -> dict[str, Any]:
+    """Exact upstream body for the access-controlled cache operation ledger.
+
+    Ordinary logs continue to use the redacted provider_http_error observation.
+    """
+    raw = bytes(exc.body or b"")
+    return {
+        "encoding": "base64",
+        "body_base64": base64.b64encode(raw).decode("ascii"),
+        "body_size": len(raw),
+        "body_sha256": hashlib.sha256(raw).hexdigest(),
+        "http_status": int(exc.status_code),
+        "request_id": exc.request_id,
+        "phase": exc.phase,
+    }
 
 
 class CacheResourceAdapter(Protocol):
@@ -90,11 +110,19 @@ class StatefulResourceManager:
             build_kwargs["provider_physical_plan"] = provider_physical_plan
         spec = adapter.build_spec(**build_kwargs)
         if not bool(spec.get("cacheable")):
+            cacheability_reason = str(spec.get("cacheability_reason") or "no_cacheable_contents")
+            if cacheability_reason not in {"no_cacheable_contents"}:
+                return self._prepare_failure(
+                    plan,
+                    reason=cacheability_reason,
+                    message=f"Gemini cache prefix is not safe to prepare: {cacheability_reason}",
+                )
             return {
                 "mechanism": None,
                 "decision_reason": "no_cacheable_prefix",
                 "metadata": {
                     "provider_measurement": "not_applicable",
+                    "cacheability_reason": cacheability_reason,
                     **self._spec_binding_metadata(spec),
                 },
             }
@@ -138,6 +166,7 @@ class StatefulResourceManager:
             reuse_key=reuse_key,
             max_prefix_version=prefix_version,
         )
+        prefix_growth_decision: dict[str, Any] | None = None
         for existing in candidates:
             existing_version = int(existing.get("prefix_version") or 0)
             expected = str(compatible.get(str(existing_version)) or "")
@@ -195,6 +224,40 @@ class StatefulResourceManager:
                     state="expired",
                 )
                 continue
+
+            growth_decision: dict[str, Any] | None = None
+            if existing_version < prefix_version:
+                should_grow, growth_decision = await self._evaluate_prefix_growth(
+                    adapter=adapter,
+                    existing=existing,
+                    spec=spec,
+                    cfg=cfg,
+                    request_row=request_row,
+                    snapshot=snapshot,
+                )
+                log_info(
+                    logger,
+                    "cache_prefix_growth_decision",
+                    request_id=request_row.get("id"),
+                    session_id=request_row.get("session_id"),
+                    connection_id=connection_id,
+                    existing_prefix_version=existing_version,
+                    target_prefix_version=prefix_version,
+                    decision=("create_longer_prefix" if should_grow else "reuse_existing_prefix"),
+                    growth=growth_decision,
+                )
+                if should_grow:
+                    # The old immutable resource remains valid. Continue through
+                    # the existing fenced create-operation path for a new generation.
+                    prefix_growth_decision = growth_decision
+                    if growth_decision.get("target_prefix_tokens") is not None:
+                        token_count = int(growth_decision["target_prefix_tokens"])
+                    break
+            else:
+                growth_decision = {
+                    "decision": "reuse_exact_prefix",
+                    "reason": "resource_already_covers_current_prefix",
+                }
             return self._binding_from_resource(
                 existing,
                 decision_reason="resource_reused",
@@ -203,6 +266,7 @@ class StatefulResourceManager:
                 reuse_key=reuse_key,
                 spec=spec,
                 provider_observation=observation,
+                growth_decision=growth_decision,
             )
 
         if token_count is None and not provider_create_threshold:
@@ -282,6 +346,7 @@ class StatefulResourceManager:
             raw_result = {
                 "outcome": "cache_create_rejected" if state == "failed" else "cache_create_unknown",
                 "provider_http_error": error_observation,
+                "provider_raw_response": _private_raw_provider_response(exc),
             }
             await self._record_error_observation(
                 operation_id=op_id,
@@ -421,6 +486,7 @@ class StatefulResourceManager:
                 **self._safe_provider_observation(observation),
                 "outcome": "cache_create_verify_failed",
                 "verify_provider_http_error": error_observation,
+                "provider_raw_response": _private_raw_provider_response(exc),
                 "recreate_attempted": False,
             }
             await self._record_error_observation(
@@ -528,7 +594,133 @@ class StatefulResourceManager:
             reuse_key=reuse_key,
             spec=spec,
             provider_observation=observation,
+            growth_decision=prefix_growth_decision,
         )
+
+    async def _evaluate_prefix_growth(
+        self,
+        *,
+        adapter: CacheResourceAdapter,
+        existing: dict[str, Any],
+        spec: dict[str, Any],
+        cfg: dict[str, Any],
+        request_row: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> tuple[bool, dict[str, Any]]:
+        """Decide whether a longer immutable prefix has a positive cost case.
+
+        No growth is performed without an explicit, frozen price schedule and
+        expected future reuse count. Unknown prices/TTL economics are not treated
+        as zero-cost assumptions.
+        """
+        policy = cfg.get("prefix_growth") if isinstance(cfg.get("prefix_growth"), dict) else {}
+        if not policy or policy.get("enabled") is not True:
+            return False, {"decision": "reuse", "reason": "growth_policy_disabled"}
+
+        def _number(name: str, *, allow_zero: bool = True) -> float | None:
+            value = policy.get(name)
+            if isinstance(value, bool):
+                return None
+            try:
+                parsed = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(parsed) or parsed < 0 or (not allow_zero and parsed <= 0):
+                return None
+            return parsed
+
+        expected_reuses = policy.get("expected_future_reuses")
+        if isinstance(expected_reuses, bool):
+            expected_reuses = None
+        try:
+            expected_reuses = int(expected_reuses)
+        except Exception:
+            expected_reuses = 0
+        currency = str(policy.get("currency") or "").strip().upper()
+        price_revision = str(policy.get("price_revision") or "").strip()
+        input_rate = _number("input_cost_per_million_tokens", allow_zero=False)
+        read_rate = _number("cache_read_cost_per_million_tokens")
+        write_rate = _number("cache_write_cost_per_million_tokens")
+        storage_rate = _number("storage_cost_per_million_tokens_minute")
+        if (
+            expected_reuses <= 0
+            or not currency
+            or not price_revision
+            or input_rate is None
+            or read_rate is None
+            or write_rate is None
+            or storage_rate is None
+            or input_rate <= read_rate
+        ):
+            return False, {"decision": "reuse", "reason": "growth_cost_schedule_incomplete"}
+
+        existing_tokens = existing.get("token_count")
+        if isinstance(existing_tokens, bool):
+            existing_tokens = None
+        try:
+            existing_tokens = int(existing_tokens)
+        except Exception:
+            existing_tokens = None
+        if existing_tokens is None or existing_tokens < 0:
+            return False, {"decision": "reuse", "reason": "existing_prefix_token_count_unknown"}
+
+        try:
+            measured_tokens = int(await adapter.measure(spec=spec))
+        except Exception as exc:
+            return False, {
+                "decision": "reuse",
+                "reason": "target_prefix_measurement_failed",
+                "measurement_error_type": type(exc).__name__,
+            }
+        if measured_tokens < 0:
+            return False, {"decision": "reuse", "reason": "target_prefix_measurement_invalid"}
+
+        additional_tokens = max(0, measured_tokens - existing_tokens)
+        minimum_additional = policy.get("minimum_additional_tokens", 1)
+        if isinstance(minimum_additional, bool):
+            minimum_additional = 1
+        try:
+            minimum_additional = max(1, int(minimum_additional))
+        except Exception:
+            minimum_additional = 1
+        if additional_tokens < minimum_additional:
+            return False, {
+                "decision": "reuse",
+                "reason": "additional_prefix_too_small",
+                "existing_prefix_tokens": existing_tokens,
+                "target_prefix_tokens": measured_tokens,
+                "additional_prefix_tokens": additional_tokens,
+                "minimum_additional_tokens": minimum_additional,
+            }
+
+        ttl_seconds = int(spec.get("ttl_seconds") or 3600)
+        ttl_minutes = ttl_seconds / 60.0
+        expected_savings = (
+            expected_reuses * additional_tokens * (input_rate - read_rate) / 1_000_000.0
+        )
+        creation_cost = measured_tokens * write_rate / 1_000_000.0
+        storage_cost = measured_tokens * ttl_minutes * storage_rate / 1_000_000.0
+        total_creation_and_storage = creation_cost + storage_cost
+        should_grow = expected_savings > total_creation_and_storage
+        return should_grow, {
+            "decision": "grow" if should_grow else "reuse",
+            "reason": (
+                "expected_reuse_savings_exceed_create_and_ttl_storage_cost"
+                if should_grow
+                else "expected_reuse_savings_do_not_cover_create_and_ttl_storage_cost"
+            ),
+            "currency": currency,
+            "price_revision": price_revision,
+            "expected_future_reuses": expected_reuses,
+            "existing_prefix_tokens": existing_tokens,
+            "target_prefix_tokens": measured_tokens,
+            "additional_prefix_tokens": additional_tokens,
+            "ttl_seconds": ttl_seconds,
+            "expected_reuse_savings": round(expected_savings, 10),
+            "cache_creation_cost": round(creation_cost, 10),
+            "ttl_storage_cost": round(storage_cost, 10),
+            "expected_net_savings": round(expected_savings - total_creation_and_storage, 10),
+        }
 
     async def _measure(
         self,
@@ -644,7 +836,10 @@ class StatefulResourceManager:
             "physical_plan_hash": spec.get("physical_plan_hash"),
             "cached_prefix_wire_hash": spec.get("cached_prefix_wire_hash"),
             "uncached_suffix_wire_hash": spec.get("uncached_suffix_wire_hash"),
+            "uncached_suffix_wire_hashes": spec.get("uncached_suffix_wire_hashes"),
             "occurrence_mapping_hash": spec.get("occurrence_mapping_hash"),
+            "cacheability_reason": spec.get("cacheability_reason"),
+            "cache_create_request_bytes": spec.get("cache_create_request_bytes"),
         }
         return {key: value for key, value in values.items() if value not in (None, "")}
 
@@ -672,8 +867,11 @@ class StatefulResourceManager:
         reuse_key: str,
         spec: dict[str, Any],
         provider_observation: dict[str, Any] | None = None,
+        growth_decision: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         projection_version = str(spec.get("projection_version") or "")
+        suffix_hashes = spec.get("uncached_suffix_wire_hashes") if isinstance(spec.get("uncached_suffix_wire_hashes"), dict) else {}
+        selected_suffix_hash = suffix_hashes.get(str(cached_history_version)) or spec.get("uncached_suffix_wire_hash")
         metadata = {
             "cached_history_version": int(cached_history_version),
             "prefix_token_count": (int(token_count) if token_count is not None else None),
@@ -687,6 +885,10 @@ class StatefulResourceManager:
             "provider_expire_time": (provider_observation or {}).get("expire_time"),
             **cls._spec_binding_metadata(spec),
         }
+        if selected_suffix_hash not in (None, ""):
+            metadata["uncached_suffix_wire_hash"] = selected_suffix_hash
+        if growth_decision is not None:
+            metadata["prefix_growth_decision"] = growth_decision
         return {
             "mechanism": "stateful_resource",
             "decision_reason": decision_reason,
