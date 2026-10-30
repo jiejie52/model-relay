@@ -39,7 +39,7 @@ class CacheIntentPlan:
     final_threshold_guard: bool = False
     candidate_rejections: tuple[dict[str, Any], ...] = ()
     mechanism_config: dict[str, Any] = field(default_factory=dict)
-    resolver_version: str = "relay-cache-resolver/2"
+    resolver_version: str = "relay-cache-resolver/3"
 
     def canonical(self) -> dict[str, Any]:
         return {
@@ -140,12 +140,16 @@ class CacheUsageObservation:
     attribution: str = "provider_reported"
     transparent_observation: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    prompt_tokens_total: int | None = None
+    cache_read_ratio: float | None = None
 
     def canonical(self) -> dict[str, Any]:
         return {
+            "prompt_tokens_total": self.prompt_tokens_total,
             "cache_read_tokens": self.cache_read_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
             "uncached_input_tokens": self.uncached_input_tokens,
+            "cache_read_ratio": self.cache_read_ratio,
+            "cache_write_tokens": self.cache_write_tokens,
             "actual_cache_hit_status": self.actual_cache_hit_status,
             "evidence_level": self.evidence_level,
             "attribution": self.attribution,

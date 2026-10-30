@@ -5,6 +5,9 @@ from fnmatch import fnmatchcase
 import hashlib
 import json
 import os
+import hmac
+from pathlib import Path
+import re
 from typing import Any, Iterable
 
 from .config import Settings
@@ -262,6 +265,25 @@ class ModelControlPlane:
     def from_settings(cls, settings: Settings) -> "ModelControlPlane":
         base = cls._builtin(settings)
         raw = str(getattr(settings, "model_control_plane_json", None) or "").strip()
+        filename = str(getattr(settings, "model_control_plane_file", None) or "").strip()
+        if filename and raw:
+            raise ValueError("MODEL_CONTROL_PLANE_FILE conflicts with MODEL_CONTROL_PLANE_JSON")
+        if not filename and str(getattr(settings, "model_control_plane_file_sha256", None) or "").strip():
+            raise ValueError("MODEL_CONTROL_PLANE_FILE_SHA256 requires MODEL_CONTROL_PLANE_FILE")
+        if filename:
+            pinned_hash = str(getattr(settings, "model_control_plane_file_sha256", None) or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", pinned_hash):
+                raise ValueError("MODEL_CONTROL_PLANE_FILE_SHA256 must pin the approved snapshot")
+            source = Path(filename)
+            if source.stat().st_size > 4_000_000:
+                raise ValueError("Published model control-plane snapshot is too large")
+            content = source.read_bytes()  # Missing file is a startup error.
+            if len(content) > 4_000_000:
+                raise ValueError("Published model control-plane snapshot is too large")
+            content_hash = hashlib.sha256(content).hexdigest()
+            if not hmac.compare_digest(content_hash, pinned_hash):
+                raise ValueError("Published control-plane snapshot SHA256 mismatch")
+            raw = content.decode("utf-8")
         if not raw:
             return base
         parsed = json.loads(raw)
@@ -270,8 +292,22 @@ class ModelControlPlane:
         status = str(parsed.get("status") or "").strip().lower()
         if status != "published":
             raise ValueError(
-                "MODEL_CONTROL_PLANE_JSON must declare status=published; draft/review snapshots cannot enter runtime"
+                "Model control plane must declare status=published; draft/review snapshots cannot enter runtime"
             )
+        metadata = parsed.get("release_metadata") or {}
+        if not isinstance(metadata, dict):
+            raise ValueError("Control plane release metadata must be an object")
+        if metadata.get("managed_model_groups") and not filename:
+            raise ValueError("Published managed model groups require a pinned JSON snapshot file")
+        if metadata.get("source") == "v2-workbook":
+            if not filename:
+                raise ValueError("V2 workbook releases require the pinned MODEL_CONTROL_PLANE_FILE path")
+            if not all(isinstance(metadata.get(k), str) and metadata[k].strip() for k in (
+                "workbook_sha256", "base_control_plane_hash", "candidate_sha256", "approved_by", "approval_ref"
+            )):
+                raise ValueError("V2 workbook release lacks required governance approval metadata")
+            if metadata["base_control_plane_hash"] != base.control_plane_hash:
+                raise ValueError("V2 workbook release was compiled against a different base control plane")
         mode = str(parsed.get("mode") or "merge").strip().lower()
         if mode not in {"merge", "replace"}:
             raise ValueError("MODEL_CONTROL_PLANE_JSON mode must be merge or replace")
@@ -598,6 +634,26 @@ class ModelControlPlane:
     def _validate(self) -> None:
         if self.status != "published":
             raise ValueError("Runtime control-plane snapshots must have status=published")
+        managed_groups = self.release_metadata.get("managed_model_groups") or []
+        if not isinstance(managed_groups, list):
+            raise ValueError("managed_model_groups must be an array")
+        group_keys = set()
+        for group in managed_groups:
+            if not isinstance(group, dict) or set(group) != {"provider", "model", "deployment_id"}:
+                raise ValueError("managed group requires provider, model, deployment_id")
+            key = tuple(str(group[x]).strip() for x in ("provider", "model", "deployment_id"))
+            if not all(key) or any("*" in part or "?" in part for part in key):
+                raise ValueError("managed groups must be exact nonempty identities")
+            if key in group_keys:
+                raise ValueError("duplicate managed group")
+            group_keys.add(key)
+        for offering in self.offerings.values():
+            if offering.metadata.get("managed_v2") is True:
+                key = (offering.provider, offering.model_pattern, offering.deployment_id)
+                if key not in group_keys:
+                    raise ValueError(f"V2 managed offering {offering.offering_id!r} has no published managed group")
+                if offering.metadata.get("unavailable_action") not in ("try_next", "reject_new_session"):
+                    raise ValueError(f"Invalid managed offering fallback policy {offering.offering_id!r}")
         for offering in self.offerings.values():
             if offering.connection_id not in self.connections:
                 raise ValueError(

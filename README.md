@@ -1,6 +1,55 @@
-# Model Relay 4.3.2 - Gemini Layout/8 Cache Execution Fix
+# Model Relay 5.1.1 - Gemini Layout/9 Cache Correctness Hotfix
 
-## 4.3.2 版本定位
+## 5.1.1 Bug 修复
+
+本版本以原始 5.1.0 为唯一基线，仅修复 Gemini layout/9 的三个正确性问题；不变更 API、Fusion、Session 隔离、70 MiB 内联缓存预算、缓存资源作用域或首次 dispatch 之后的恢复边界。
+
+- **修复适配器 `NameError`**：`gemini_native.py` 补齐 `GEMINI_PHYSICAL_LAYOUT_VERSION_V9` 常量导入，确保无缓存、显式和隐式请求均可通过适配器的布局检查。
+- **保留未缓存历史附件**：layout/9 只从历史投影中移除已经进入冻结缓存前缀的 Session 附件。未被缓存的附件保留在原历史 Content 中，同时禁止含推理专用附件的历史轮次进入显式缓存资源前缀；不改旧 layout/8 及更早布局。
+- **防止 explicit Request 附件结构变化**：Gemini 当前协议无法证明将同一 `user Content` 中的 Request-only 附件和动态正文拆成两个 `user Contents` 等价。layout/9 对这种候选采取安全降级，不将 Request-only 附件提升为显式资源前缀；原始单条用户消息及其附件仍完整发送。隐式投影与无缓存投影必须维持完整的原始消息结构。此限制不影响 conversation 已经确认的 Session 稳定材料候选。
+
+### 版本与兼容性
+
+- API / Worker：`5.1.1`；Gemini Adapter 和物理 layout/projector 仍使用既有的 `/8` 与 `/9` 标识，不变更 API 或数据库表结构。
+- 原 layout/8 及更早版本保持原有冻结语义；修复仅针对 layout/9 新行为及共享适配器中的遗漏导入。
+- 不增加 SQL migration，不改测试文件。Provider 原始响应审计与既有脱敏测试冲突不属于本次修改范围。
+
+---
+
+# Model Relay 5.1.0 - Gemini Cache Prefix Planning and Usage Observability
+
+## 5.1.0 版本定位
+
+本版本在保留 5.0.0 既有架构、Session 隔离和执行恢复语义的前提下，增强 Gemini 缓存前缀规划与观测能力。新 Session 冻结 `gemini-physical-cache-layout/9`，旧 layout/8 及更早布局保持原有语义，不静默升级。
+
+### 主要改造
+
+- **统一前缀规划**：layout/9 将稳定材料与连续、可安全投影的已提交历史组成版本化前缀；按历史版本生成兼容指纹和对应未缓存后缀，优先复用同一 Session 内最长的合法资源前缀。
+- **显式上下文材料候选**：`context_policy="explicit"` 不继承历史，但本次 Request 明确提供的材料可以成为缓存候选；资源仍严格限定在同一 Session 作用域。
+- **显式资源增长成本门禁**：只有冻结的 `prefix_growth` 策略提供未来复用次数、同币种价格版本、输入/缓存读取/写入/TTL 存储价格，并且预期节省大于新资源创建与 TTL 存储成本时，才创建更长的不可变资源代次。缺少价格或复用预测时继续复用现有前缀，不假定成本为零。
+  `prefix_growth` 至少需要 `enabled`、`expected_future_reuses`、`currency`、`price_revision`、`input_cost_per_million_tokens`、`cache_read_cost_per_million_tokens`、`cache_write_cost_per_million_tokens` 和 `storage_cost_per_million_tokens_minute`；可选 `minimum_additional_tokens`。各费率必须使用同一币种与明确价格版本。
+- **隐式前缀投影**：Gemini 隐式前缀使用独立 binding 和 layout/9 稳定前缀投影，不创建 `CachedContent`、不发送 prompt-cache key；门槛未知时必须使用冻结的 `countTokens` guard 或可靠的上下文区间，不能把未知当作已满足。
+- **请求体大小保护**：保留 AIHubMix 70 MiB 材料选择规则，并在完整序列化 CachedContent 创建请求上执行 100,000,000 字节保护；历史前缀按完整 turn 边界截断到最长可安全缓存的版本，不裁剪模型推理上下文。
+- **用量观测**：Gemini Native 归一化 `promptTokenCount`、`cachedContentTokenCount`、未缓存输入量和缓存读取比例；同时记录资源创建/复用动作、前缀版本、generation 与内容指纹。存在完整冻结价格表时输出输入与缓存成本估算；没有价格版本或供应商账单证据时明确标记不可用，不伪造实际成本。
+
+### 版本与边界
+
+- API / Worker：`5.1.0`
+- Gemini inference adapter：`gemini-native-aihubmix/8`
+- Gemini cache adapter：`gemini-cache-aihubmix/9`
+- Gemini physical layout / projector：`9` / `9`
+- Cache material projection：`gemini-cache-material-projection/3`
+- Resolver：`relay-cache-resolver/3`
+- 无 SQL migration；沿用现有 `prefix_version`、generation、operation fencing 和 Session scope 字段。
+- 本版本不启用同一 Request 的显式+隐式混合执行，也不增加跨 Session 内容复用。隐式缓存只有在具体 Model Supply / Protocol Profile 完成认证并通过真实供应商验证后才能配置启用。
+
+---
+
+# Model Relay 5.0.0 - Gemini Cache Admission and Diagnostics
+
+## 5.0.0 版本定位
+
+本版本在保留既有 Session / Request、缓存资源副作用隔离和故障恢复语义的前提下，调整 Gemini 缓存准入与诊断：Relay 对已声明具体缓存机制的 `gemini-*` 允许系统侧尝试，不把该例外视为供应商能力已认证；缓存协议投影、缓存策略、物理布局和 Adapter 约束仍然生效。缓存创建/验证失败会在受控缓存操作记录中保留供应商原始响应实体（Base64、长度、SHA-256、HTTP 状态、请求 ID 和阶段），普通日志继续使用脱敏诊断摘要。Gemini 物理缓存计划日志新增指令、稳定前缀、材料表示和复用身份的指纹，辅助定位身份变化来源。
 
 4.3.2 修复 4.3.1 的 layout/7 执行层回归：API 已选择 `<70 MiB -> inline_cache_no_files`，但 `SharedExecutionRuntime` 仍只对 layout/6 启用 split inline-cache binding，导致 layout/7 可能回落到历史 Files-first 路径，并在 `contents` 为空时错误尝试创建 CachedContent。
 
@@ -14,7 +63,7 @@
 
 ### 版本
 
-- API / Worker：`4.3.2`
+- API / Worker：`5.0.0`
 - Gemini inference adapter：`gemini-native-aihubmix/7`
 - Gemini cache adapter：`gemini-cache-aihubmix/8`
 - Gemini physical layout/projector：`8` / `8`
@@ -371,3 +420,12 @@ route_binding_mismatch
 **0.5.0 -> 0.5.1 没有新增 SQL migration。** 路由冻结信息使用现有 `relay_sessions.metadata` 与 Request snapshot 保存。数据库仍需已完成 0.4.0 的 `sql/004_provider_native_file_ingress.sql`。
 
 详细部署与调用示例见 `QUICKSTART.md`。
+
+
+## V2 workbook-driven governed runtime settings
+
+`config/model_management_v2.xlsx` is the operator-facing declaration workbook.
+It is no longer a test fixture. Use the offline governance compiler and
+external approval process in [`config/README.md`](config/README.md) to deploy
+a SHA256-pinned `MODEL_CONTROL_PLANE_FILE` snapshot. Directly editing Excel
+does not activate new models or channels.

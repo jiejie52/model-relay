@@ -10,6 +10,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+# Keep the governed Excel authoring input and versioned published snapshots.
+COPY config ./config
 
 # Railway relay-api uses this default command.
 # Railway relay-worker overrides Start Command with: python -m app.worker

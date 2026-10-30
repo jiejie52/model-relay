@@ -27,7 +27,7 @@ from ..observability import error as log_error, info as log_info, warning as log
 from ..persistence.object_storage import ObjectLocation
 from ..providers.gemini_physical import (
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
-    frozen_session_projection_metadata,
+    frozen_session_projection_metadata_v9,
 )
 from ..routing import RouteBinding, RouteResolutionError
 from ..security import require_owner_headers, require_relay_auth
@@ -924,7 +924,7 @@ async def create_session(
     if route.provider == "gemini":
         # Physical provider layout is frozen at Session creation. Existing
         # Sessions created before this version keep their prior wire semantics.
-        session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata()
+        session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata_v9()
     row = await repo.create_session(
         {
             "id": str(session_id),
@@ -1378,6 +1378,8 @@ async def create_request(
                 cache_contract_hash=(str(frozen_route.get("cache_contract_hash")) if frozen_route.get("cache_contract_hash") else None),
                 profile_hash=(str(frozen_route.get("protocol_profile_hash")) if frozen_route.get("protocol_profile_hash") else None),
                 policy_hash=(str(frozen_route.get("cache_policy_hash")) if frozen_route.get("cache_policy_hash") else None),
+                provider=provider,
+                model=model,
             )
         except CacheDecisionError as exc:
             raise HTTPException(status_code=409, detail=exc.public_detail()) from exc

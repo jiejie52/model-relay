@@ -15,6 +15,7 @@ from ..structured_output import project_schema_for_provider, resolve_structured_
 from .gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
     SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS,
 )
 from .gemini_wire import (
@@ -28,7 +29,7 @@ from .gemini_wire import (
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/7"
+    adapter_version = "gemini-native-aihubmix/8"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
     _CACHED_INFERENCE_FORBIDDEN = {"systemInstruction", "tools", "toolConfig"}
 
@@ -190,6 +191,7 @@ class GeminiNativeAdapter:
         if physical.get("layout_version") not in {
             GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
             GEMINI_PHYSICAL_LAYOUT_VERSION,
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
         }:
             return
         if not payload.get("cachedContent"):
@@ -221,9 +223,54 @@ class GeminiNativeAdapter:
                     "GEMINI_PHYSICAL_PLAN_INVALID",
                     "Gemini physical plan has no canonical current user Content",
                 )
+            if binding.get("mechanism") == "implicit_prefix":
+                prefix = binding.get("prefix") if isinstance(binding.get("prefix"), dict) else {}
+                if physical.get("layout_version") != GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
+                    raise ProviderRequestError(
+                        "GEMINI_IMPLICIT_PREFIX_LAYOUT_UNSUPPORTED",
+                        "Gemini implicit-prefix binding requires physical layout/9",
+                    )
+                expected_plan_hash = str(prefix.get("physical_plan_hash") or "")
+                actual_plan_hash = str(physical.get("physical_plan_hash") or "")
+                expected_prefix_fingerprint = str(prefix.get("prefix_fingerprint") or "")
+                actual_prefix_fingerprint = str(physical.get("implicit_prefix_fingerprint") or "")
+                expected_payload_hash = str(prefix.get("implicit_prefix_payload_hash") or "")
+                actual_payload_hash = str(physical.get("implicit_prefix_payload_hash") or "")
+                physical_dependencies = physical.get("dependencies") if isinstance(physical.get("dependencies"), dict) else {}
+                try:
+                    expected_prefix_version = int(prefix.get("prefix_version"))
+                    actual_prefix_version = int(physical_dependencies.get("safe_history_prefix_version") or 0)
+                except Exception as exc:
+                    raise ProviderRequestError(
+                        "CACHE_CONTEXT_MISMATCH",
+                        "Gemini implicit-prefix binding has no valid prefix version",
+                    ) from exc
+                if (
+                    not expected_plan_hash
+                    or expected_plan_hash != actual_plan_hash
+                    or not expected_prefix_fingerprint
+                    or expected_prefix_fingerprint != actual_prefix_fingerprint
+                    or expected_prefix_version != actual_prefix_version
+                    or str(prefix.get("layout_version") or "") != str(physical.get("layout_version") or "")
+                    or str(prefix.get("projector_version") or "") != str(physical.get("projector_version") or "")
+                    or (expected_payload_hash and expected_payload_hash != actual_payload_hash)
+                ):
+                    raise ProviderRequestError(
+                        "CACHE_CONTEXT_MISMATCH",
+                        "Gemini implicit-prefix binding does not match the frozen physical plan",
+                    )
+                payload = copy.deepcopy(physical.get("implicit_prefix_payload") or {})
+                if not isinstance(payload.get("contents"), list) or "cachedContent" in payload:
+                    raise ProviderRequestError(
+                        "GEMINI_PHYSICAL_PLAN_INVALID",
+                        "Gemini implicit-prefix projection must contain complete contents without a CachedContent handle",
+                    )
+                return payload, current_user
+
             if binding.get("mechanism") == "stateful_resource":
                 handle = validate_cached_content_handle(binding.get("provider_handle"))
                 metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+                binding_prefix = binding.get("prefix") if isinstance(binding.get("prefix"), dict) else {}
                 expected_plan_hash = str(metadata.get("physical_plan_hash") or "")
                 actual_plan_hash = str(physical.get("physical_plan_hash") or "")
                 if expected_plan_hash and expected_plan_hash != actual_plan_hash:
@@ -231,18 +278,56 @@ class GeminiNativeAdapter:
                         "CACHE_CONTEXT_MISMATCH",
                         "Gemini CacheExecutionBinding does not match the frozen physical plan",
                     )
+                if physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
+                    cached_history_version = metadata.get("cached_history_version")
+                    if cached_history_version is None:
+                        cached_history_version = binding_prefix.get("prefix_version")
+                    try:
+                        cached_history_version = int(cached_history_version)
+                    except Exception as exc:
+                        raise ProviderRequestError(
+                            "CACHE_CONTEXT_MISMATCH",
+                            "Gemini layout/9 binding has no valid cached history prefix version",
+                        ) from exc
+                    if binding_prefix.get("prefix_version") is not None and int(binding_prefix["prefix_version"]) != cached_history_version:
+                        raise ProviderRequestError(
+                            "CACHE_CONTEXT_MISMATCH",
+                            "Gemini layout/9 binding prefix version differs from its history boundary",
+                        )
+                    compatible_fingerprints = physical.get("compatible_prefix_fingerprints")
+                    expected_content_fingerprint = (
+                        str(compatible_fingerprints.get(str(cached_history_version)) or "")
+                        if isinstance(compatible_fingerprints, dict)
+                        else ""
+                    )
+                    actual_content_fingerprint = str(binding_prefix.get("content_fingerprint") or "")
+                    if not expected_content_fingerprint or expected_content_fingerprint != actual_content_fingerprint:
+                        raise ProviderRequestError(
+                            "CACHE_CONTEXT_MISMATCH",
+                            "Gemini layout/9 CachedContent fingerprint does not match the selected compatible prefix",
+                        )
+                    suffix_map = physical.get("uncached_suffix_by_prefix_version")
+                    payload_source = suffix_map.get(str(cached_history_version)) if isinstance(suffix_map, dict) else None
+                    suffix_hashes = physical.get("uncached_suffix_wire_hashes")
+                    actual_suffix_hash = (
+                        str(suffix_hashes.get(str(cached_history_version)) or "")
+                        if isinstance(suffix_hashes, dict)
+                        else ""
+                    )
+                else:
+                    payload_source = physical.get("uncached_suffix")
+                    actual_suffix_hash = str(physical.get("uncached_suffix_wire_hash") or "")
                 expected_suffix_hash = str(metadata.get("uncached_suffix_wire_hash") or "")
-                actual_suffix_hash = str(physical.get("uncached_suffix_wire_hash") or "")
                 if expected_suffix_hash and expected_suffix_hash != actual_suffix_hash:
                     raise ProviderRequestError(
                         "CACHE_CONTEXT_MISMATCH",
-                        "Gemini cached execution suffix differs from the frozen physical plan",
+                        "Gemini cached execution suffix differs from the selected frozen history boundary",
                     )
-                payload = copy.deepcopy(physical.get("uncached_suffix") or {})
+                payload = copy.deepcopy(payload_source or {})
                 if not isinstance(payload.get("contents"), list):
                     raise ProviderRequestError(
                         "GEMINI_PHYSICAL_PLAN_INVALID",
-                        "Gemini physical plan has no uncached suffix contents",
+                        "Gemini physical plan has no uncached suffix contents for the selected prefix version",
                     )
                 payload["cachedContent"] = handle
                 return payload, current_user
