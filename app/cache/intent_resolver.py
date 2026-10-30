@@ -107,6 +107,7 @@ class CacheIntentResolver:
             str(provider or "").strip().lower() == "gemini"
             and mechanism == "implicit_prefix"
         )
+
         if gemini_admission_override and verification not in {"verified", "published", "legacy_verified"}:
             mechanism_cfg["system_admission_override"] = "gemini_model_cache_attempt"
             mechanism_cfg["upstream_verification_status"] = verification or "unverified"
