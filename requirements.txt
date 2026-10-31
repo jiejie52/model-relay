@@ -7,3 +7,6 @@ jsonschema>=4.23,<5
 python-multipart>=0.0.20,<1
 
 google-genai>=2.28.0,<3
+
+# V2 offline workbook governance import
+openpyxl>=3.1,<4

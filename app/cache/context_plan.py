@@ -139,6 +139,18 @@ def build_context_plan(
             "estimator_version": None,
         },
     }
+    materials = [
+        {"content_sha256": x.get("canonical_content_hash"),
+         "representation_digest": x.get("material_representation_digest")}
+        for x in segments if x.get("domain") == "material"
+    ]
+    plan["material_reuse"] = {
+        "schema_version": "relay-material-reuse/1",
+        "ordered_material_fingerprint": stable_hash(materials) if materials else None,
+        "material_count": len(materials),
+        "identity_complete": bool(materials) and all(x["content_sha256"] for x in materials),
+        "scope": "session", "projection_reuse_enabled": True,
+    }
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 
