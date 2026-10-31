@@ -107,18 +107,7 @@ class CacheSummary(BaseModel):
     reuse_evidence_source: str | None = None
     cache_cost_decision: dict[str, Any] | None = None
     planned_mechanism: str | None = None
-    primary_cache_mechanism: str | None = None
-    binding_plan_version: str | None = None
-    binding_set_version: str | None = None
     effective_cache_mechanism: str | None = None
-    effective_cache_mechanisms: list[str] = Field(default_factory=list)
-    additional_cache_bindings: list[dict[str, Any]] = Field(default_factory=list)
-    cache_bindings: list[dict[str, Any]] = Field(default_factory=list)
-    cache_binding_count: int | None = None
-    binding_composition: dict[str, Any] = Field(default_factory=dict)
-    planned_additional_binding_count: int | None = None
-    prepared_additional_binding_count: int | None = None
-    binding_observations: list[dict[str, Any]] = Field(default_factory=list)
     execution_mechanism: str | None = None
     resolution_status: str | None = None
     decision_reason: str | None = None

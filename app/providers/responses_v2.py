@@ -16,7 +16,7 @@ class ResponsesV2Adapter:
     Request code only deals with material_id and generic input.
     """
 
-    adapter_version = "responses-v2/3"
+    adapter_version = "responses-v2/2"
 
     def __init__(
         self,
@@ -25,21 +25,6 @@ class ResponsesV2Adapter:
     ) -> None:
         self.legacy = legacy
         self.materials = materials
-
-    def validate_cache_binding_set(
-        self,
-        *,
-        binding: dict[str, Any],
-        snapshot: dict[str, Any],
-        provider_physical_plan: dict[str, Any] | None = None,
-    ) -> None:
-        validator = getattr(self.legacy, "validate_cache_binding_set", None)
-        if callable(validator):
-            validator(
-                binding=binding,
-                snapshot=snapshot,
-                provider_physical_plan=provider_physical_plan,
-            )
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         snapshot = dict(context.snapshot)

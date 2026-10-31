@@ -9,7 +9,6 @@ from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..config import Settings
-from ..cache.contracts import cache_binding_records
 from ..materials.resolver import MaterialResolver
 from ..structured_output import StructuredOutputError, resolve_structured_output
 
@@ -22,7 +21,7 @@ class ChatCompletionsV2Adapter:
     arbitrary caller provider JSON.
     """
 
-    adapter_version = "chat-completions-v2/2"
+    adapter_version = "chat-completions-v2/1"
 
     def __init__(
         self,
@@ -40,20 +39,6 @@ class ChatCompletionsV2Adapter:
         self.api_key = api_key
         self.connection_id = connection_id
         self.channel_id = channel_id
-
-    def validate_cache_binding_set(
-        self,
-        *,
-        binding: dict[str, Any],
-        snapshot: dict[str, Any],
-        provider_physical_plan: dict[str, Any] | None = None,
-    ) -> None:
-        del snapshot, provider_physical_plan
-        if cache_binding_records(binding):
-            raise ProviderRequestError(
-                "CHAT_COMPLETIONS_CACHE_UNSUPPORTED",
-                "This Chat Completions Adapter has no verified cache wire projection",
-            )
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         messages: list[dict[str, Any]] = []
