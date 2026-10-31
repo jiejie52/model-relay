@@ -45,8 +45,32 @@ class V2ExecutionContext:
     provider_physical_plan: dict[str, Any] | None = None
 
 
+class CacheBindingProjectionProvider(Protocol):
+    """Optional adapter extension for provider-specific multi-projection wire plans."""
+
+    def build_cache_binding_projections(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        context_plan: dict[str, Any],
+        material_bindings: list[dict[str, Any]],
+        cache_plan: dict[str, Any],
+        provider_physical_plan: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        ...
+
+
 class V2ProviderAdapter(Protocol):
     adapter_version: str
+
+    def validate_cache_binding_set(
+        self,
+        *,
+        binding: dict[str, Any],
+        snapshot: dict[str, Any],
+        provider_physical_plan: dict[str, Any] | None = None,
+    ) -> None:
+        ...
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         ...
