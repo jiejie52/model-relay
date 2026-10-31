@@ -28,6 +28,8 @@ def normalize_cache_usage(
     read: int | None = None
     write: int | None = None
     uncached: int | None = None
+    prompt_total: int | None = None
+    cache_read_ratio: float | None = None
     evidence = "unknown"
 
     if protocol_n == "claude_messages":
@@ -37,7 +39,15 @@ def normalize_cache_usage(
     elif protocol_n == "gemini_native":
         gemini_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else raw
         read = _int_or_none(gemini_raw.get("cachedContentTokenCount"))
-        evidence = "provider_usage" if read is not None else "unknown"
+        prompt_total = _int_or_none(gemini_raw.get("promptTokenCount"))
+        if prompt_total is None:
+            prompt_total = _int_or_none(raw.get("prompt_tokens"))
+        if prompt_total is not None and read is not None:
+            # Gemini promptTokenCount includes cached content. Preserve the
+            # provider total and derive the uncached portion separately.
+            uncached = max(0, prompt_total - read)
+            cache_read_ratio = (read / prompt_total) if prompt_total > 0 else None
+        evidence = "provider_usage" if read is not None or prompt_total is not None else "unknown"
     elif protocol_n in {"responses", "chat_completions", "moonshot_chat"}:
         input_details = raw.get("input_tokens_details") if isinstance(raw.get("input_tokens_details"), dict) else {}
         prompt_details = raw.get("prompt_tokens_details") if isinstance(raw.get("prompt_tokens_details"), dict) else {}
@@ -57,7 +67,18 @@ def normalize_cache_usage(
             uncached = miss
         evidence = "provider_usage" if read is not None or miss is not None else "unknown"
 
-    if read is not None and read > 0:
+    if protocol_n == "gemini_native":
+        # Gemini's cachedContentTokenCount is the authoritative signal. An
+        # explicit zero is a Miss even when Relay did not bind a cache handle;
+        # an absent field remains Unknown and must never be inferred from the
+        # projected implicit-prefix plan or promptTokenCount.
+        if read is not None and read > 0:
+            status = "hit"
+        elif read == 0:
+            status = "miss"
+        else:
+            status = "unknown"
+    elif read is not None and read > 0:
         status = "hit"
     elif write is not None and write > 0:
         status = "write_only"
@@ -77,4 +98,6 @@ def normalize_cache_usage(
         evidence_level=evidence,
         transparent_observation=transparent,
         raw=raw,
+        prompt_tokens_total=prompt_total,
+        cache_read_ratio=cache_read_ratio,
     )
