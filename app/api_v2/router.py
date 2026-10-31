@@ -1651,6 +1651,7 @@ async def create_request(
         requested_cache_mechanism=(body.requested_cache_mechanism if cache_contract_session else None),
         cache_mechanism=(cache_plan or {}).get("planned_mechanism"),
         cache_decision_reason=(cache_plan or {}).get("decision_reason"),
+        additional_cache_binding_count=len((cache_plan or {}).get("additional_cache_bindings") or []),
         business_stage=(body.metadata or {}).get("stage") or (body.metadata or {}).get("purpose") or (body.input.get("stage") if isinstance(body.input, dict) else None),
     )
 

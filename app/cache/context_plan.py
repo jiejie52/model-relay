@@ -66,6 +66,11 @@ def build_context_plan(
                         "sha256": row.get("sha256"),
                     }
                 ),
+                # Provider-neutral material descriptors let Cache Policy select
+                # different immutable projections without reading material bytes.
+                "filename": row.get("filename"),
+                "content_type": row.get("content_type"),
+                "size_bytes": row.get("actual_size") if row.get("actual_size") is not None else row.get("size_bytes"),
                 "ordinal": ordinal,
                 "stability": "session_stable" if material_id in session_materials else "request_stable",
                 "sensitivity": "inherit",
@@ -112,7 +117,7 @@ def build_context_plan(
 
     stable_prefix = [x for x in segments if x.get("stability") != "dynamic_suffix"]
     plan = {
-        "schema_version": "relay-context-plan/1",
+        "schema_version": "relay-context-plan/2",
         "history_version": int(session.get("history_version") or 0),
         "history_object_id": session.get("history_object_id"),
         "segments": segments,
