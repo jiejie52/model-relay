@@ -10,9 +10,11 @@ from ..providers.base import ProviderRequestError
 from ..observability import error as log_error, info as log_info, warning as log_warning
 from ..utils import safe_segment, utcnow
 from ..v2_repository import RelayV2Repository
+from ..providers.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION_V9
 from .fallback_storage import FallbackObjectStorage
 from .gemini_cache_projection import (
     GEMINI_CACHE_PROJECTION_VERSION,
+    GEMINI_CACHE_PROJECTION_VERSION_V3,
     GEMINI_INLINE_CACHE_REPRESENTATION,
     plan_gemini_cache_materials,
     plan_gemini_cache_materials_legacy,
@@ -289,19 +291,46 @@ class BindingResolver:
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         projection_meta = metadata.get("_relay_gemini_projection") if isinstance(metadata.get("_relay_gemini_projection"), dict) else {}
         layout_version = str(projection_meta.get("layout_version") or "")
+        is_layout_v9 = layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9
         is_inline_cache_layout = layout_version in {
             "gemini-physical-cache-layout/6",
             "gemini-physical-cache-layout/7",
             "gemini-physical-cache-layout/8",
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
         }
+        # In layout/9, a Request-only attachment shares one canonical Gemini
+        # user Content with its changing input text. Extracting only its parts
+        # into CachedContent would split that Content into two user messages.
+        # Leave the 70 MiB inference transport decision intact, but do not
+        # prepare expensive inline-cache bytes for an unsafe projection.
+        request_material_boundary_blocked = (
+            is_layout_v9
+            and session.get("context_policy") == "explicit"
+            and bool(material_ids)
+        )
+        cache_candidate_material_ids = (
+            session_material_ids
+            if session.get("context_policy") == "conversation"
+            else []
+        )
 
         try:
             if is_inline_cache_layout:
                 planned_obj = plan_gemini_cache_materials(
                     material_rows=rows,
                     material_bindings=material_bindings,
-                    session_material_ids=session_material_ids,
+                    session_material_ids=cache_candidate_material_ids,
                     inline_limit_bytes=inline_limit,
+                    projection_version=(
+                        GEMINI_CACHE_PROJECTION_VERSION_V3
+                        if is_layout_v9
+                        else GEMINI_CACHE_PROJECTION_VERSION
+                    ),
+                    schema_version=(
+                        "relay-gemini-cache-material-plan/3"
+                        if is_layout_v9
+                        else "relay-gemini-cache-material-plan/2"
+                    ),
                 )
                 canonical = planned_obj.canonical()
             else:
@@ -362,7 +391,7 @@ class BindingResolver:
                     "filename": row.get("filename"),
                     "inline_data": base64.b64encode(data).decode("ascii"),
                     "metadata": {
-                        "projection_version": GEMINI_CACHE_PROJECTION_VERSION,
+                        "projection_version": canonical.get("projection_version") or GEMINI_CACHE_PROJECTION_VERSION,
                         "source_representation": binding.get("representation"),
                         "source_object_id": fallback.get("object_id"),
                         "size_bytes": len(data),
@@ -375,13 +404,31 @@ class BindingResolver:
         actual_cache_set = set(actual_cache_ids)
         inference_only = [
             material_id
-            for material_id in session_material_ids
+            for material_id in cache_candidate_material_ids
             if material_id not in actual_cache_set
         ]
         canonical.update(
             {
                 "cache_material_ids": actual_cache_ids,
-                "inference_only_session_material_ids": inference_only,
+                "inference_only_session_material_ids": (
+                    inference_only if session.get("context_policy") == "conversation" else []
+                ),
+                "inference_only_material_ids": (
+                    [value for value in material_ids if value not in actual_cache_set]
+                    if is_layout_v9 else inference_only
+                ),
+                "cache_candidate_exclusion_reason": (
+                    "request_material_content_boundary_not_equivalent"
+                    if request_material_boundary_blocked else None
+                ),
+                "cache_candidate_material_ids": list(cache_candidate_material_ids),
+                "cache_candidate_source": (
+                    "session.material_manifest"
+                    if session.get("context_policy") == "conversation"
+                    else "request.material_ids"
+                    if is_layout_v9
+                    else "none"
+                ),
                 "missing_inline_material_ids": missing_inline_ids,
                 "cache_material_bindings": cache_bindings,
             }
@@ -399,7 +446,15 @@ class BindingResolver:
             files_api_cache_count=len(canonical.get("files_api_material_ids") or canonical.get("files_api_cache_material_ids") or []),
             files_api_inference_count=len(canonical.get("files_api_inference_material_ids") or []),
             external_url_inference_count=len(canonical.get("external_url_inference_material_ids") or []),
-            inference_only_session_count=len(inference_only),
+            inference_only_session_count=(len(inference_only) if session.get("context_policy") == "conversation" else 0),
+            inference_only_material_count=len(inference_only),
+            cache_candidate_source=(
+                "session.material_manifest"
+                if session.get("context_policy") == "conversation"
+                else "request.material_ids"
+                if is_layout_v9
+                else "none"
+            ),
             missing_inline_count=len(missing_inline_ids),
         )
         return canonical
