@@ -53,6 +53,8 @@ def caller_intent_hash(value: dict[str, Any]) -> str:
         "requested_cache_mode": value.get("requested_cache_mode"),
         "metadata": value.get("metadata") or {},
     }
+    if value.get("requested_cache_mechanism_explicit"):
+        identity["requested_cache_mechanism"] = value.get("requested_cache_mechanism")
     return stable_hash(identity)
 
 
@@ -131,4 +133,6 @@ def request_identity(snapshot: dict[str, Any]) -> str:
             "context_plan_hash": snapshot.get("context_plan_hash"),
         }
     )
+    if snapshot.get("requested_cache_mechanism_explicit"):
+        identity["requested_cache_mechanism"] = snapshot.get("requested_cache_mechanism")
     return stable_hash(identity)

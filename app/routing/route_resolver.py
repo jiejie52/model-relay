@@ -323,6 +323,17 @@ class RouteResolver:
                 if str(x).strip()
             }
 
+            # V5: calculate candidate eligibility independently of route order.
+            # An ineligible higher-priority entry may prohibit switching to a
+            # lower-priority one, including when excluded by caller allowlist.
+            for entry in candidates:
+                if entry.unavailable_action not in ("try_next", "reject_new_session"):
+                    raise RouteResolutionError(
+                        "ROUTE_CONFIG_INVALID", "Invalid route unavailability policy",
+                        provider=provider_n, model=model_n, purpose=purpose_n,
+                        internal_connection_id=entry.connection_id,
+                    )
+
             for entry in candidates:
                 if channel_allowlist and str(entry.channel_id or "").lower() not in channel_allowlist:
                     rejections.append((entry, "channel_not_allowed", None))
@@ -365,8 +376,28 @@ class RouteResolver:
                             internal_reason=f"file_adapter_provider={file_provider}",
                         )
 
-                selected = entry
-                break
+                if selected is None:
+                    selected = entry
+                # Keep evaluating all candidates: qualification facts precede
+                # final policy resolution, not a short-circuit on first match.
+
+            # A rejected entry with fail-closed policy blocks any lower rank.
+            # The existing priority ordering is preserved for old snapshots.
+            selected_index = candidates.index(selected) if selected is not None else len(candidates)
+            blocking = [
+                item for item in rejections
+                if item[0].unavailable_action == "reject_new_session"
+                and candidates.index(item[0]) < selected_index
+            ]
+            if blocking:
+                blocked = blocking[0]
+                raise RouteResolutionError(
+                    "ROUTE_FALLBACK_FORBIDDEN",
+                    "A higher-priority route forbids fallback for this new session",
+                    provider=provider_n, model=model_n, purpose=purpose_n,
+                    internal_connection_id=blocked[0].connection_id,
+                    internal_reason=blocked[1],
+                )
 
             if selected is None:
                 raise self._no_eligible_candidate_error(
