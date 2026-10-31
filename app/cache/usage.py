@@ -67,7 +67,18 @@ def normalize_cache_usage(
             uncached = miss
         evidence = "provider_usage" if read is not None or miss is not None else "unknown"
 
-    if read is not None and read > 0:
+    if protocol_n == "gemini_native":
+        # Gemini's cachedContentTokenCount is the authoritative signal. An
+        # explicit zero is a Miss even when Relay did not bind a cache handle;
+        # an absent field remains Unknown and must never be inferred from the
+        # projected implicit-prefix plan or promptTokenCount.
+        if read is not None and read > 0:
+            status = "hit"
+        elif read == 0:
+            status = "miss"
+        else:
+            status = "unknown"
+    elif read is not None and read > 0:
         status = "hit"
     elif write is not None and write > 0:
         status = "write_only"

@@ -5,6 +5,7 @@ import httpx
 
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
+from ..cache.contracts import cache_binding_records
 from .base import ProviderHTTPError, ProviderRequestError, ProviderResult
 from .http_wire import read_raw_response, decode_entity
 from ..structured_output import (
@@ -44,6 +45,29 @@ class OpenAICompatibleResponsesProvider:
         self.api_key = api_key
         self.connection_id = connection_id
         self.channel_id = channel_id
+
+    def validate_cache_binding_set(
+        self,
+        *,
+        binding: dict[str, Any],
+        snapshot: dict[str, Any],
+        provider_physical_plan: dict[str, Any] | None = None,
+    ) -> None:
+        del snapshot, provider_physical_plan
+        records = cache_binding_records(binding)
+        if len(records) > 1:
+            raise ProviderRequestError(
+                "RESPONSES_CACHE_BINDING_COMBINATION_UNSUPPORTED",
+                "The Responses Adapter exposes one prompt_cache_key and cannot attach multiple Relay cache bindings",
+            )
+        if records and (
+            str(records[0].get("role") or "primary") != "primary"
+            or records[0].get("mechanism") != "implicit_prefix"
+        ):
+            raise ProviderRequestError(
+                "RESPONSES_CACHE_MECHANISM_UNSUPPORTED",
+                "The Responses Adapter only projects a single implicit-prefix cache binding",
+            )
 
     async def execute(
         self,
