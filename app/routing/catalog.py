@@ -30,6 +30,7 @@ class RouteEntry:
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
     source: str = "legacy"
+    unavailable_action: str = "try_next"  # try_next | reject_new_session
 
     def matches(self, *, provider: str, model: str, deployment_id: str) -> bool:
         if self.provider.lower() != provider.lower():
@@ -65,16 +66,25 @@ class RouteCatalog:
     provider/model Session contract.
     """
 
-    def __init__(self, *, revision: str, entries: list[RouteEntry], control_plane_hash: str | None = None) -> None:
+    def __init__(
+        self, *, revision: str, entries: list[RouteEntry],
+        control_plane_hash: str | None = None,
+        managed_groups: list[dict[str, str]] | None = None,
+    ) -> None:
         self.revision = revision
         self.entries = sorted(
             entries,
             key=lambda item: (-item.priority, item.offering_id or "", item.connection_id),
         )
         self.control_plane_hash = control_plane_hash
+        self.managed_groups = tuple(
+            (item["provider"].lower(), item["model"].lower(), item["deployment_id"])
+            for item in (managed_groups or [])
+        )
         canonical = {
             "revision": self.revision,
             "control_plane_hash": self.control_plane_hash,
+            "managed_groups": sorted(self.managed_groups),
             "entries": [
                 {
                     "provider": x.provider,
@@ -95,6 +105,7 @@ class RouteCatalog:
                     "observed_model_policy": x.observed_model_policy,
                     "quota": x.quota,
                     "source": x.source,
+                    "unavailable_action": x.unavailable_action,
                 }
                 for x in self.entries
             ],
@@ -110,8 +121,13 @@ class RouteCatalog:
         *,
         control_plane: ModelControlPlane | None = None,
     ) -> "RouteCatalog":
-        # Legacy full-route override retains precedence for compatibility.
+        # A published V2-managed model cannot be overridden by the old
+        # ROUTE_CATALOG_JSON wildcard/whole-catalog escape hatch.
+        cp = control_plane or ModelControlPlane.from_settings(settings)
+        groups = list(cp.release_metadata.get("managed_model_groups") or [])
         raw = (settings.route_catalog_json or "").strip()
+        if raw and groups:
+            raise ValueError("ROUTE_CATALOG_JSON conflicts with a published V2 managed model group")
         if raw:
             parsed = json.loads(raw)
             if isinstance(parsed, list):
@@ -127,9 +143,11 @@ class RouteCatalog:
             entries = [cls._entry_from_mapping(item, settings.deployment_id) for item in rows]
             return cls(revision=revision, entries=entries)
 
-        cp = control_plane or ModelControlPlane.from_settings(settings)
         entries: list[RouteEntry] = []
         for offering in cp.offerings.values():
+            # Disabled supplies are declarations, never executable routes.
+            if not offering.enabled:
+                continue
             connection = cp.connection(offering.connection_id)
             contract = cp.contract(offering.capability_contract_id)
             profile = cp.protocol_profile(offering.protocol_profile_id)
@@ -156,13 +174,15 @@ class RouteCatalog:
                     cache_policy=(cache_policy.canonical() if cache_policy else None),
                     observed_model_policy=offering.observed_model_policy,
                     quota=dict(offering.quota),
-                    source="control_plane",
+                    source=("managed_v2" if offering.metadata.get("managed_v2") is True else "control_plane"),
+                    unavailable_action=str(offering.metadata.get("unavailable_action", "try_next")),
                 )
             )
         return cls(
             revision=cp.revision,
             entries=entries,
             control_plane_hash=cp.control_plane_hash,
+            managed_groups=groups,
         )
 
     @staticmethod
@@ -195,13 +215,18 @@ class RouteCatalog:
             observed_model_policy=str(value.get("observed_model_policy") or "audit").lower(),
             quota=dict(value.get("quota") or {}),
             source="legacy",
+            unavailable_action=str(value.get("unavailable_action") or "try_next"),
         )
 
+    def _is_managed(self, provider: str, model: str, deployment_id: str) -> bool:
+        return (provider.lower(), model.lower(), deployment_id) in self.managed_groups
+
     def candidates(self, *, provider: str, model: str, deployment_id: str) -> list[RouteEntry]:
+        is_managed = self._is_managed(provider, model, deployment_id)
         return [
-            entry
-            for entry in self.entries
+            entry for entry in self.entries
             if entry.matches(provider=provider, model=model, deployment_id=deployment_id)
+            and (not is_managed or entry.source == "managed_v2")
         ]
 
     def match(self, *, provider: str, model: str, deployment_id: str) -> RouteEntry | None:
@@ -223,7 +248,7 @@ class RouteCatalog:
         return top[0]
 
     def providers(self) -> list[str]:
-        return sorted({entry.provider for entry in self.entries})
+        return sorted({entry.provider for entry in self.entries} | {p for p, _, _ in self.managed_groups})
 
     def patterns_for_provider(self, provider: str, *, deployment_id: str) -> list[str]:
         provider_n = str(provider or "").lower()
@@ -232,7 +257,7 @@ class RouteCatalog:
             for entry in self.entries
             if entry.provider.lower() == provider_n
             and entry.deployment_id in (None, "*", deployment_id)
-        })
+        } | {model for p, model, d in self.managed_groups if p == provider_n and d == deployment_id})
 
     def has_provider(self, provider: str, *, deployment_id: str) -> bool:
         provider_n = str(provider or "").lower()
@@ -240,4 +265,4 @@ class RouteCatalog:
             entry.provider.lower() == provider_n
             and entry.deployment_id in (None, "*", deployment_id)
             for entry in self.entries
-        )
+        ) or any(p == provider_n and d == deployment_id for p, _, d in self.managed_groups)
