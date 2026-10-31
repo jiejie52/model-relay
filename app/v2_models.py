@@ -11,6 +11,7 @@ ContextPolicy = Literal["conversation", "explicit"]
 ExecutionMode = Literal["sync", "async"]
 MaterialPurpose = Literal["inference_input", "archive"]
 CacheMode = Literal["off", "auto", "on"]
+CacheMechanismPreference = Literal["auto", "implicit_prefix", "stateful_resource"]
 
 
 class SessionCapabilityRequirements(BaseModel):
@@ -95,13 +96,29 @@ class SessionRequestCreate(BaseModel):
     # Cache contract 3.0. Callers express intent only; TTL, provider handles,
     # native cache fields and breakpoint positions stay server-governed.
     requested_cache_mode: CacheMode = "auto"
+    requested_cache_mechanism: CacheMechanismPreference = "auto"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CacheSummary(BaseModel):
     requested_cache_mode: str | None = None
+    requested_cache_mechanism: str | None = None
+    estimated_future_reuses: int | None = None
+    reuse_evidence_source: str | None = None
+    cache_cost_decision: dict[str, Any] | None = None
     planned_mechanism: str | None = None
+    primary_cache_mechanism: str | None = None
+    binding_plan_version: str | None = None
+    binding_set_version: str | None = None
     effective_cache_mechanism: str | None = None
+    effective_cache_mechanisms: list[str] = Field(default_factory=list)
+    additional_cache_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    cache_bindings: list[dict[str, Any]] = Field(default_factory=list)
+    cache_binding_count: int | None = None
+    binding_composition: dict[str, Any] = Field(default_factory=dict)
+    planned_additional_binding_count: int | None = None
+    prepared_additional_binding_count: int | None = None
+    binding_observations: list[dict[str, Any]] = Field(default_factory=list)
     execution_mechanism: str | None = None
     resolution_status: str | None = None
     decision_reason: str | None = None

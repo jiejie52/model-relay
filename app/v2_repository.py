@@ -36,6 +36,225 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0] if rows else None
 
+    async def recent_session_cache_reuse_evidence(
+        self, *, session_id: str, tenant_id: str,
+        conversation_hash: str, reuse_evidence_key: str,
+    ) -> dict[str, Any]:
+        """Read only same-Session completed, matching static-context facts.
+
+        The last 32 requests are bounded; omitted/older records are not evidence.
+        This method does not predict future business workflow steps.
+        """
+        rows = await self.backend.select(
+            "relay_requests",
+            filters={
+                "session_id": f"eq.{session_id}",
+                "tenant_id": f"eq.{tenant_id}",
+                "conversation_hash": f"eq.{conversation_hash}",
+                "status": "eq.succeeded",
+            },
+            select="id,metadata,cache_usage,created_at,status",
+            order="created_at.desc",
+            limit=32,
+        )
+        matched = 0
+        stateful_matched = 0
+        implicit_uses = 0
+        implicit_samples = 0
+        implicit_hits = 0
+        implicit_misses = 0
+        implicit_read_tokens = 0
+        implicit_read_tokens_with_denominator = 0
+        implicit_prompt_tokens = 0
+        implicit_prefix_tokens = 0
+        implicit_prompt_fallback_tokens = 0
+        measured_prefix_denominators = 0
+        prompt_denominators = 0
+        timestamps: list[datetime] = []
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            cache = metadata.get("_relay_cache") if isinstance(metadata.get("_relay_cache"), dict) else {}
+            if cache.get("reuse_evidence_key") == reuse_evidence_key:
+                matched += 1
+                created_at = row.get("created_at")
+                if created_at:
+                    try:
+                        parsed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        timestamps.append(parsed.astimezone(timezone.utc))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                usage = row.get("cache_usage") if isinstance(row.get("cache_usage"), dict) else {}
+                effective = str(
+                    usage.get("effective_cache_mechanism")
+                    or cache.get("effective_cache_mechanism")
+                    or cache.get("planned_mechanism")
+                    or ""
+                )
+                effective_mechanisms = {
+                    str(value) for value in (usage.get("effective_cache_mechanisms") or []) if str(value)
+                }
+                if not effective_mechanisms and effective:
+                    effective_mechanisms.add(effective)
+                binding_summaries = [
+                    item for item in (usage.get("cache_bindings") or []) if isinstance(item, dict)
+                ]
+                active_mechanisms = {
+                    str(item.get("mechanism"))
+                    for item in binding_summaries
+                    if item.get("active", item.get("mechanism") is not None) and item.get("mechanism")
+                }
+                if not active_mechanisms and not binding_summaries:
+                    active_mechanisms = set(effective_mechanisms)
+                # This remains a preliminary admission hint. StatefulResourceManager
+                # must prove the exact wire fingerprint and get() each resource.
+                if "stateful_resource" in active_mechanisms:
+                    stateful_matched += 1
+
+                transparent_hit = usage.get("transparent_observation") is True
+                if "implicit_prefix" in active_mechanisms or transparent_hit:
+                    implicit_uses += 1
+                    binding_observations = [
+                        item for item in (usage.get("binding_observations") or []) if isinstance(item, dict)
+                    ]
+                    implicit_observations = [
+                        item for item in binding_observations if item.get("mechanism") == "implicit_prefix" and item.get("attached") is not False
+                    ]
+                    # Aggregate Provider usage may be attributed to the implicit
+                    # binding only when it is the sole active binding. With multiple
+                    # mechanisms, require Provider binding-level evidence.
+                    attributable = None
+                    if len(implicit_observations) == 1 and implicit_observations[0].get("evidence_level") in {
+                        "provider_binding_usage", "provider_usage_single_binding"
+                    }:
+                        attributable = implicit_observations[0]
+                    elif not binding_observations and effective == "implicit_prefix":
+                        # Legacy scalar records predate per-binding observations.
+                        attributable = {
+                            "cache_read_tokens": usage.get("cache_read_tokens"),
+                            "actual_cache_hit_status": usage.get("actual_cache_hit_status"),
+                            "evidence_level": "legacy_single_binding",
+                        }
+                    elif transparent_hit:
+                        attributable = {
+                            "cache_read_tokens": usage.get("cache_read_tokens"),
+                            "actual_cache_hit_status": usage.get("actual_cache_hit_status"),
+                            "evidence_level": "provider_transparent_observation",
+                        }
+                    if attributable is not None:
+                        read = attributable.get("cache_read_tokens")
+                        prompt = usage.get("prompt_tokens_total")
+                        hit_status = str(attributable.get("actual_cache_hit_status") or "")
+                        if isinstance(read, int) and not isinstance(read, bool):
+                            implicit_samples += 1
+                            implicit_read_tokens += max(0, read)
+                            prefix_count = usage.get("cache_prefix_token_count") if len(active_mechanisms) == 1 else None
+                            if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt > 0:
+                                implicit_prompt_tokens += prompt
+                            if isinstance(prefix_count, int) and not isinstance(prefix_count, bool) and prefix_count > 0:
+                                implicit_prefix_tokens += prefix_count
+                                measured_prefix_denominators += 1
+                                implicit_read_tokens_with_denominator += max(0, read)
+                            elif isinstance(prompt, int) and not isinstance(prompt, bool) and prompt > 0:
+                                implicit_prompt_fallback_tokens += prompt
+                                prompt_denominators += 1
+                                implicit_read_tokens_with_denominator += max(0, read)
+                            if read > 0:
+                                implicit_hits += 1
+                            elif read == 0:
+                                implicit_misses += 1
+                        elif hit_status in {"hit", "miss"}:
+                            implicit_samples += 1
+                            if hit_status == "hit":
+                                implicit_hits += 1
+                            else:
+                                implicit_misses += 1
+
+        now = datetime.now(timezone.utc)
+        window_seconds = (
+            max(0.0, (max(timestamps) - min(timestamps)).total_seconds())
+            if len(timestamps) >= 2 else None
+        )
+        age_seconds = (
+            max(0.0, (now - max(timestamps)).total_seconds())
+            if timestamps else None
+        )
+        request_hit_rate = (
+            implicit_hits / implicit_samples if implicit_samples > 0 else None
+        )
+        if measured_prefix_denominators > 0:
+            # When countTokens was captured for an implicit projection, divide
+            # actual cached tokens by that stable prefix rather than by the
+            # whole prompt (which may contain a large dynamic suffix).
+            denominator_tokens = implicit_prefix_tokens + implicit_prompt_fallback_tokens
+            effective_hit_rate = min(1.0, implicit_read_tokens_with_denominator / max(1, denominator_tokens))
+            hit_rate_source = (
+                "provider_cached_tokens_over_measured_prefix_tokens"
+                if prompt_denominators == 0 else "provider_cached_tokens_over_mixed_prefix_prompt_tokens"
+            )
+        elif implicit_prompt_fallback_tokens > 0:
+            effective_hit_rate = min(1.0, implicit_read_tokens_with_denominator / implicit_prompt_fallback_tokens)
+            hit_rate_source = "provider_cached_tokens_over_prompt_tokens"
+        else:
+            effective_hit_rate = request_hit_rate
+            hit_rate_source = "provider_reported_hit_requests" if request_hit_rate is not None else None
+        return {
+            "observed_compatible_uses": matched,
+            "observed_stateful_compatible_uses": stateful_matched,
+            "observed_implicit_uses": implicit_uses,
+            "observed_implicit_samples": implicit_samples,
+            "observed_implicit_hit_requests": implicit_hits,
+            "observed_implicit_miss_requests": implicit_misses,
+            "observed_implicit_cache_read_tokens": implicit_read_tokens,
+            "observed_implicit_prompt_tokens": implicit_prompt_tokens,
+            "observed_implicit_prefix_tokens": implicit_prefix_tokens,
+            "observed_implicit_hit_rate": effective_hit_rate,
+            "observed_implicit_request_hit_rate": request_hit_rate,
+            "observed_implicit_hit_rate_source": hit_rate_source,
+            "observed_window_seconds": window_seconds,
+            "observed_age_seconds": age_seconds,
+        }
+
+    async def ready_session_cache_resource_hint(
+        self, *, scope_hash: str, connection_id: str,
+    ) -> bool:
+        """Bounded, same-Supply *hint* only; NOT a cache compatibility proof.
+
+        Exact reuse-key, semantic prefix, expiry, account and provider handle
+        verification remain exclusively in StatefulResourceManager.prepare().
+        This hint only prevents the admission planner from ignoring an existing
+        resource when another certified mechanism is also available.
+        """
+        rows = await self.backend.select(
+            "relay_cache_resources",
+            filters={
+                "scope_hash": f"eq.{scope_hash}",
+                "connection_id": f"eq.{connection_id}",
+                "state": "eq.ready",
+            },
+            select="id,expire_time,provider_handle_ref",
+            order="created_at.desc",
+            limit=20,
+        )
+        now = datetime.now(timezone.utc)
+        safety = max(0, int(getattr(self.settings, "cache_expiry_safety_seconds", 30)))
+        for row in rows:
+            if not row.get("provider_handle_ref"):
+                continue
+            expiry = row.get("expire_time")
+            if expiry:
+                try:
+                    parsed = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if (parsed - now).total_seconds() <= safety:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+            return True
+        return False
+
     async def get_request(
         self,
         request_id: str | UUID,

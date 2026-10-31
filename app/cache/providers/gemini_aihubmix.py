@@ -15,6 +15,9 @@ from ...providers.gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V5,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+    GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES,
 )
 from ...providers.gemini_wire import (
     PROJECTION_VERSION,
@@ -37,7 +40,7 @@ class GeminiAIHubMixCacheResourceAdapter:
     cache-create semantics.
     """
 
-    adapter_version = "gemini-cache-aihubmix/8"
+    adapter_version = "gemini-cache-aihubmix/10"
 
     def __init__(
         self,
@@ -65,29 +68,88 @@ class GeminiAIHubMixCacheResourceAdapter:
         session: dict[str, Any],
         ttl_seconds: int | None,
         provider_physical_plan: dict[str, Any] | None = None,
+        cache_binding_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        binding_plan = cache_binding_plan if isinstance(cache_binding_plan, dict) else {}
+        binding_id = str(binding_plan.get("binding_id") or "primary")
+        projection = binding_plan.get("projection") if isinstance(binding_plan.get("projection"), dict) else {"kind": "full_stable_prefix"}
+        projection_kind = str(projection.get("kind") or "full_stable_prefix")
+        if projection_kind != "full_stable_prefix" and not isinstance(provider_physical_plan, dict):
+            return {
+                "schema_version": "relay-gemini-cache-spec/10",
+                "cacheable": False,
+                "cacheability_reason": "provider_projection_not_supported",
+                "binding_id": binding_id,
+                "projection_kind": projection_kind,
+                "logical_projection_hash": projection.get("projection_hash") or stable_hash(projection),
+                "context_plan_hash": context_plan.get("context_plan_hash"),
+                "material_binding_hash": stable_hash(material_bindings),
+            }
         if isinstance(provider_physical_plan, dict):
             physical = provider_physical_plan
+            if projection_kind != "full_stable_prefix":
+                projection_map = provider_physical_plan.get("cache_binding_projections")
+                physical = (
+                    projection_map.get(binding_id)
+                    if isinstance(projection_map, dict) and isinstance(projection_map.get(binding_id), dict)
+                    else {}
+                )
+                if not physical:
+                    return {
+                        "schema_version": "relay-gemini-cache-spec/10",
+                        "cacheable": False,
+                        "cacheability_reason": "provider_projection_not_supported",
+                        "binding_id": binding_id,
+                        "projection_kind": projection_kind,
+                        "logical_projection_hash": projection.get("projection_hash") or stable_hash(projection),
+                        "context_plan_hash": context_plan.get("context_plan_hash"),
+                        "material_binding_hash": stable_hash(material_bindings),
+                    }
             payload = dict(physical.get("cached_prefix") or {})
             layout_version = str(physical.get("layout_version") or "")
             if layout_version in {
                 GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
                 GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
                 GEMINI_PHYSICAL_LAYOUT_VERSION,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
             } and self._payload_has_file_data(payload):
                 raise ProviderRequestError(
                     "GEMINI_CACHE_FILE_REF_FORBIDDEN",
                     "Layout/6+ CachedContent must contain inline static data only; Gemini File references are inference-only",
                 )
             physical_cacheable = bool(physical.get("cacheable"))
-            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION:
-                # Layout/8 must never claim a stateful cache operation for a
-                # systemInstruction-only prefix.  The resource adapter is the
-                # final protocol boundary before StatefulResourceManager may
-                # look up or create a Provider resource, so repeat the
-                # non-empty-contents invariant here even though the projector
-                # already enforces it.
+            cacheability_reason = physical.get("cacheability_reason")
+            ttl_value = int(ttl_seconds) if isinstance(ttl_seconds, int) and ttl_seconds > 0 else 3600
+            cache_create_request_bytes = (physical.get("dependencies") or {}).get("cache_create_request_bytes")
+            cache_create_oversized_candidate_request_bytes = (physical.get("dependencies") or {}).get("cache_create_oversized_candidate_request_bytes")
+            cache_create_max_request_bytes = (physical.get("dependencies") or {}).get("cache_create_max_request_bytes")
+            if layout_version in {
+                GEMINI_PHYSICAL_LAYOUT_VERSION,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+            }:
+                # Layout/8, /9 and /10 must never claim a stateful cache operation for
+                # a systemInstruction-only prefix. Repeat the invariant at the
+                # final protocol boundary before a resource operation is claimed.
                 physical_cacheable = physical_cacheable and bool(payload.get("contents"))
+            if layout_version in {
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+            } and physical_cacheable:
+                request_body = {
+                    "model": f"models/{physical.get('model') or snapshot.get('model') or ''}",
+                    "ttl": f"{ttl_value}s",
+                    "displayName": f"relay-{str(physical.get('content_fingerprint') or '')[:24]}",
+                    **payload,
+                }
+                cache_create_request_bytes = len(
+                    json.dumps(request_body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                )
+                cache_create_max_request_bytes = GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES
+                if cache_create_request_bytes > GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES:
+                    physical_cacheable = False
+                    cacheability_reason = "serialized_request_too_large"
 
             return {
                 "schema_version": str((physical.get("cache_spec") or {}).get("schema_version") or "relay-gemini-cache-spec/2"),
@@ -96,8 +158,19 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "physical_plan_hash": str(physical.get("physical_plan_hash") or ""),
                 "cached_prefix_wire_hash": str(physical.get("cached_prefix_wire_hash") or ""),
                 "uncached_suffix_wire_hash": str(physical.get("uncached_suffix_wire_hash") or ""),
+                "uncached_suffix_wire_hashes": dict(physical.get("uncached_suffix_wire_hashes") or {}),
                 "occurrence_mapping_hash": str(physical.get("occurrence_mapping_hash") or ""),
+                "cacheability_reason": cacheability_reason,
+                "cache_create_request_bytes": cache_create_request_bytes,
+                "cache_create_oversized_candidate_request_bytes": cache_create_oversized_candidate_request_bytes,
+                "cache_create_max_request_bytes": cache_create_max_request_bytes,
                 "cache_spec": dict(physical.get("cache_spec") or {}),
+                "stable_material_projection_fingerprint": physical.get("stable_material_projection_fingerprint"),
+                "request_instruction_fingerprint": physical.get("request_instruction_fingerprint"),
+                "cached_instruction_fingerprint": physical.get("cached_instruction_fingerprint"),
+                "cache_identity_components": physical.get("cache_identity_components"),
+                "cache_identity_fingerprint": physical.get("cache_identity_fingerprint"),
+                "cache_identity_policy": physical.get("cache_identity_policy"),
                 "model": str(physical.get("model") or snapshot.get("model") or ""),
                 "prefix_version": int(physical.get("prefix_version") or 0),
                 "reuse_key": str(physical.get("reuse_key") or ""),
@@ -105,7 +178,7 @@ class GeminiAIHubMixCacheResourceAdapter:
                 "compatible_prefix_fingerprints": dict(physical.get("compatible_prefix_fingerprints") or {}),
                 "provider_payload": payload,
                 "cacheable": physical_cacheable,
-                "ttl_seconds": int(ttl_seconds) if isinstance(ttl_seconds, int) and ttl_seconds > 0 else 3600,
+                "ttl_seconds": ttl_value,
                 "context_plan_hash": context_plan.get("context_plan_hash"),
                 "material_binding_hash": stable_hash(material_bindings),
                 "measurement_order": str(physical.get("measurement_order") or "before_lookup"),
@@ -116,6 +189,8 @@ class GeminiAIHubMixCacheResourceAdapter:
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
                         GEMINI_PHYSICAL_LAYOUT_VERSION,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
                     }
                     else "native_rest"
                 ),
@@ -124,6 +199,11 @@ class GeminiAIHubMixCacheResourceAdapter:
                     if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V5
                     else []
                 ),
+                "cache_binding_id": binding_id,
+                "logical_projection_kind": projection_kind,
+                "logical_projection_hash": projection.get("projection_hash") or stable_hash(projection),
+                "physical_wire_projection_hash": str(physical.get("cached_prefix_wire_hash") or ""),
+                "provider_physical_plan": physical,
             }
 
         # Legacy 3.1 Sessions keep their frozen projection. The current user
@@ -203,16 +283,31 @@ class GeminiAIHubMixCacheResourceAdapter:
     async def create(self, *, spec: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
         model = self._model(spec)
         if (
-            str(spec.get("layout_version") or "") == GEMINI_PHYSICAL_LAYOUT_VERSION
+            str(spec.get("layout_version") or "") in {
+                GEMINI_PHYSICAL_LAYOUT_VERSION,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+            }
             and not (spec.get("provider_payload") or {}).get("contents")
         ):
             # Defense in depth: build_spec() should make this spec non-cacheable
-            # so StatefulResourceManager never claims a create operation.  If a
+            # so StatefulResourceManager never claims a create operation. If a
             # caller bypasses that gate, still forbid any Provider side effect.
             raise ProviderRequestError(
                 "GEMINI_CACHE_EMPTY_CONTENTS_FORBIDDEN",
-                "Layout/8 CachedContent.create requires non-empty contents",
+                "Layout/8+ CachedContent.create requires non-empty contents",
             )
+        if str(spec.get("layout_version") or "") in {
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+        }:
+            request_bytes = spec.get("cache_create_request_bytes")
+            maximum_bytes = spec.get("cache_create_max_request_bytes") or GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES
+            if isinstance(request_bytes, int) and request_bytes > int(maximum_bytes):
+                raise ProviderRequestError(
+                    "GEMINI_CACHE_CREATE_REQUEST_TOO_LARGE",
+                    "Layout/9+ CachedContent.create exceeds the frozen serialized request-body limit",
+                )
         if str(spec.get("cache_create_transport") or "") == "google_genai_sdk":
             cache = await self.sdk.create_cache(
                 model=model,
