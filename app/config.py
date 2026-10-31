@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # reference credential *environment variable names* but never secret values.
     model_control_plane_revision: str = "relay-model-control-plane/2026-10-02.1"
     model_control_plane_json: str | None = None
+    # V2 governance releases are authored from config/model_management_v2.xlsx
+    # but only an externally approved, SHA256-pinned JSON snapshot enters runtime.
+    model_control_plane_file: str | None = None
+    model_control_plane_file_sha256: str | None = None
     route_legacy_hint_mode: str = "warn"  # warn | strict
     route_gemini_model_pattern: str = "gemini-*"
     route_grok_model_pattern: str = "grok-*"

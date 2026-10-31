@@ -16,6 +16,7 @@ from ..core.raw_error import raw_body_inline_fields
 from ..cache.context_plan import build_context_plan
 from ..cache.intent_resolver import CacheIntentResolver
 from ..cache.contracts import CacheDecisionError
+from ..cache.economics import reuse_evidence_key, stable_attachment_evidence
 from ..materials.ingress import MaterialIngressError
 from ..model_options import (
     CAPABILITY_PROFILE_REVISION,
@@ -27,7 +28,7 @@ from ..observability import error as log_error, info as log_info, warning as log
 from ..persistence.object_storage import ObjectLocation
 from ..providers.gemini_physical import (
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
-    frozen_session_projection_metadata,
+    frozen_session_projection_metadata_v10,
 )
 from ..routing import RouteBinding, RouteResolutionError
 from ..security import require_owner_headers, require_relay_auth
@@ -924,7 +925,7 @@ async def create_session(
     if route.provider == "gemini":
         # Physical provider layout is frozen at Session creation. Existing
         # Sessions created before this version keep their prior wire semantics.
-        session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata()
+        session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata_v10()
     row = await repo.create_session(
         {
             "id": str(session_id),
@@ -1038,13 +1039,17 @@ async def create_request(
     caller_version = request.headers.get("x-relay-client-version")
     session_protocol = str(session.get("protocol_version") or "v2.1").lower()
     cache_contract_session = session_protocol.startswith("v3")
-    cache_field_explicit = "requested_cache_mode" in body.model_fields_set
+    cache_field_explicit = (
+        "requested_cache_mode" in body.model_fields_set
+        or "requested_cache_mechanism" in body.model_fields_set
+    )
+    cache_mechanism_explicit = "requested_cache_mechanism" in body.model_fields_set
     if not cache_contract_session and cache_field_explicit:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "CACHE_CONTRACT_UPGRADE_REQUIRED",
-                "message": "Create a new Session before using requested_cache_mode",
+                "message": "Create a new Session before requesting cache controls",
             },
         )
 
@@ -1128,6 +1133,9 @@ async def create_request(
         "requested_cache_mode": requested_cache_mode,
         "metadata": body.metadata,
     }
+    if cache_contract_session and cache_mechanism_explicit:
+        public_intent["requested_cache_mechanism"] = body.requested_cache_mechanism
+        public_intent["requested_cache_mechanism_explicit"] = True
     public_intent_hash = caller_intent_hash(public_intent)
 
     # Cache-aware Requests must replay their original interpretation before any
@@ -1368,9 +1376,72 @@ async def create_request(
             material_rows=material_rows,
             history_identity=history_identity,
         )
+        evidence_key = reuse_evidence_key(plan_seed, context_plan)
+        observed_reuse: dict[str, Any] = {"observed_compatible_uses": 0}
+        frozen_cache_policy = frozen_route.get("cache_policy") if isinstance(frozen_route.get("cache_policy"), dict) else {}
+        policy_meta = frozen_cache_policy.get("metadata") if isinstance(frozen_cache_policy.get("metadata"), dict) else {}
+        economics_policy = policy_meta.get("auto_economics") if isinstance(policy_meta.get("auto_economics"), dict) else {}
+        inline_cache_limit_bytes = getattr(
+            settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024
+        )
+        if type(inline_cache_limit_bytes) is not int or inline_cache_limit_bytes <= 0:
+            inline_cache_limit_bytes = 70 * 1024 * 1024
+        attachment_evidence = stable_attachment_evidence(
+            context_plan=context_plan,
+            material_rows=material_rows,
+            large_min_bytes=economics_policy.get("large_attachment_min_bytes", 1024 * 1024),
+            context_policy=str(session.get("context_policy") or "conversation"),
+            inline_limit_bytes=inline_cache_limit_bytes,
+        )
+        if body.requested_cache_mode == "auto":
+            try:
+                observed_reuse = await repo.recent_session_cache_reuse_evidence(
+                    session_id=str(session_id), tenant_id=tenant_id,
+                    conversation_hash=conversation_hash, reuse_evidence_key=evidence_key,
+                )
+            except Exception as exc:
+                # Only a frozen candidate hint; failures cannot authorize reuse.
+                log_warning(logger, "cache_reuse_evidence_unavailable",
+                            session_id=str(session_id), error_type=type(exc).__name__)
+            # A ready resource may have been created by a Request that later
+            # failed before producing a successful response. Query the bounded
+            # Session inventory independently of historical success counts;
+            # the execution manager still proves exact fingerprint and handle
+            # compatibility before it can bind the resource.
+            cache_contract = frozen_route.get("cache_contract") if isinstance(frozen_route.get("cache_contract"), dict) else {}
+            contract_mechanisms = set(cache_contract.get("supported_mechanisms") or cache_contract.get("mechanisms") or [])
+            profile_cache = (
+                frozen_route.get("protocol_profile", {}).get("cache")
+                if isinstance(frozen_route.get("protocol_profile"), dict)
+                else {}
+            )
+            profile_mechanisms = set(profile_cache.get("supported_mechanisms") or contract_mechanisms)
+            if "stateful_resource" in contract_mechanisms and "stateful_resource" in profile_mechanisms:
+                try:
+                    scope_hash = repo.cache_scope_hash(
+                        tenant_id=tenant_id,
+                        conversation_hash=conversation_hash,
+                        session_id=str(session_id),
+                        offering_id=str(frozen_route.get("offering_id") or ""),
+                        account_scope_hash=str(frozen_route.get("account_scope_hash") or ""),
+                        protocol_profile_hash=str(frozen_route.get("protocol_profile_hash") or ""),
+                    )
+                    observed_reuse["existing_resource_candidate"] = (
+                        await repo.ready_session_cache_resource_hint(
+                            scope_hash=scope_hash, connection_id=str(connection_id),
+                        )
+                    )
+                except Exception as exc:
+                    # Never select a cache mechanism using unverified DB state.
+                    log_warning(logger, "cache_resource_hint_unavailable",
+                                session_id=str(session_id), error_type=type(exc).__name__)
         try:
             cache_intent = CacheIntentResolver().resolve(
                 requested_mode=body.requested_cache_mode,
+                requested_mechanism=body.requested_cache_mechanism,
+                mechanism_explicit=cache_mechanism_explicit,
+                reuse_evidence=observed_reuse,
+                attachment_evidence=attachment_evidence,
                 context_plan=context_plan,
                 cache_contract=(dict(frozen_route.get("cache_contract")) if isinstance(frozen_route.get("cache_contract"), dict) else None),
                 protocol_profile=(dict(frozen_route.get("protocol_profile")) if isinstance(frozen_route.get("protocol_profile"), dict) else None),
@@ -1378,6 +1449,8 @@ async def create_request(
                 cache_contract_hash=(str(frozen_route.get("cache_contract_hash")) if frozen_route.get("cache_contract_hash") else None),
                 profile_hash=(str(frozen_route.get("protocol_profile_hash")) if frozen_route.get("protocol_profile_hash") else None),
                 policy_hash=(str(frozen_route.get("cache_policy_hash")) if frozen_route.get("cache_policy_hash") else None),
+                provider=provider,
+                model=model,
             )
         except CacheDecisionError as exc:
             raise HTTPException(status_code=409, detail=exc.public_detail()) from exc
@@ -1398,6 +1471,9 @@ async def create_request(
             "history_version": int(session.get("history_version") or 0),
             "history_object_hash": (history_identity or {}).get("sha256"),
             "requested_cache_mode": body.requested_cache_mode,
+            "requested_cache_mechanism": body.requested_cache_mechanism,
+            "requested_cache_mechanism_explicit": cache_mechanism_explicit,
+            "reuse_evidence_key": evidence_key,
             "caller_intent_hash": public_intent_hash,
             "context_plan": context_plan,
             "context_plan_hash": context_plan["context_plan_hash"],
@@ -1462,7 +1538,20 @@ async def create_request(
     if cache_contract_session and cache_plan is not None:
         accept_metadata["_relay_cache"] = {
             "requested_cache_mode": body.requested_cache_mode,
+            "requested_cache_mechanism": body.requested_cache_mechanism,
+            "reuse_evidence_key": evidence_key,
+            "estimated_future_reuses": (cache_plan.get("reuse_prediction") or {}).get("expected_future_reuses"),
+            "reuse_evidence_source": (cache_plan.get("reuse_prediction") or {}).get("source"),
+                "observed_compatible_uses": observed_reuse.get("observed_compatible_uses", 0),
+                "observed_implicit_uses": observed_reuse.get("observed_implicit_uses", 0),
+                "observed_implicit_hit_rate": observed_reuse.get("observed_implicit_hit_rate"),
+                "observed_implicit_samples": observed_reuse.get("observed_implicit_samples", 0),
+            "selection_evidence": cache_plan.get("selection_evidence") or {},
             "planned_mechanism": cache_plan.get("planned_mechanism"),
+                "fallback_mechanisms": [
+                    item.get("mechanism") for item in cache_plan.get("fallback_mechanisms", [])
+                    if isinstance(item, dict)
+                ],
             "effective_cache_mechanism": cache_plan.get("planned_mechanism") if cache_plan.get("resolution_status") == "finalized" else None,
             "resolution_status": cache_plan.get("resolution_status"),
             "decision_reason": cache_plan.get("decision_reason"),
@@ -1559,6 +1648,7 @@ async def create_request(
         execution_pool=row.get("execution_pool"),
         material_count=len(effective_material_ids),
         requested_cache_mode=requested_cache_mode,
+        requested_cache_mechanism=(body.requested_cache_mechanism if cache_contract_session else None),
         cache_mechanism=(cache_plan or {}).get("planned_mechanism"),
         cache_decision_reason=(cache_plan or {}).get("decision_reason"),
         business_stage=(body.metadata or {}).get("stage") or (body.metadata or {}).get("purpose") or (body.input.get("stage") if isinstance(body.input, dict) else None),

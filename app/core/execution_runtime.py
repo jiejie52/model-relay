@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from ..providers.gemini_physical import (
     build_gemini_physical_cache_plan,
     uses_cache_material_projection_layout,
     uses_inline_cache_transport_layout,
+    uses_request_material_cache_candidates_layout,
     uses_supported_physical_layout,
 )
 from ..providers.base import ProviderHTTPError, ProviderRequestError
@@ -142,6 +144,8 @@ class SharedExecutionRuntime:
             gemini_session_material_ids=(
                 [str(x) for x in (session.get("material_manifest") or []) if str(x)]
                 if session.get("context_policy") == "conversation"
+                else [str(x) for x in material_ids if str(x)]
+                if uses_request_material_cache_candidates_layout(session)
                 else []
             ),
         )
@@ -223,6 +227,32 @@ class SharedExecutionRuntime:
                 cache_material_ids=(provider_physical_plan.get("dependencies") or {}).get("cache_material_ids"),
                 inference_only_session_material_ids=(provider_physical_plan.get("dependencies") or {}).get("inference_only_session_material_ids"),
                 cacheable=provider_physical_plan.get("cacheable"),
+                cache_layout_version=provider_physical_plan.get("layout_version"),
+                instruction_source=(
+                    "request" if snapshot.get("instructions") else
+                    "session" if (provider_physical_plan.get("cached_prefix") or {}).get("systemInstruction") else
+                    "none"
+                ),
+                request_instruction_fingerprint=provider_physical_plan.get("request_instruction_fingerprint"),
+                canonical_request_instruction_fingerprint=(context_plan or {}).get("canonical_request_instruction_fingerprint"),
+                cached_instruction_fingerprint=provider_physical_plan.get("cached_instruction_fingerprint"),
+                suffix_instruction_fingerprint=(
+                    stable_hash((provider_physical_plan.get("uncached_suffix") or {}).get("systemInstruction"))
+                    if (provider_physical_plan.get("uncached_suffix") or {}).get("systemInstruction") is not None else None
+                ),
+                stable_prefix_fingerprint=(context_plan or {}).get("stable_prefix_fingerprint"),
+                session_stable_material_fingerprint=(context_plan or {}).get("session_stable_material_fingerprint"),
+                stable_material_projection_fingerprint=provider_physical_plan.get("stable_material_projection_fingerprint"),
+                content_fingerprint=provider_physical_plan.get("content_fingerprint"),
+                cache_identity_fingerprint=provider_physical_plan.get("cache_identity_fingerprint"),
+                cache_identity_components=provider_physical_plan.get("cache_identity_components"),
+                cache_identity_policy=provider_physical_plan.get("cache_identity_policy"),
+                reuse_key_hash=(stable_hash(provider_physical_plan.get("reuse_key")) if provider_physical_plan.get("reuse_key") else None),
+                cache_material_representation_digests=(provider_physical_plan.get("dependencies") or {}).get("session_material_representation_digests"),
+                cache_material_projection_hash=(provider_physical_plan.get("dependencies") or {}).get("cache_material_projection_hash"),
+                cache_identity_diff_reasons=provider_physical_plan.get("cache_identity_diff_reasons") or [],
+                request_instruction_is_cached=provider_physical_plan.get("request_instruction_is_cached"),
+                request_material_split_suppressed=(provider_physical_plan.get("dependencies") or {}).get("request_material_split_suppressed"),
             )
 
         cache_binding = None
@@ -489,15 +519,248 @@ class SharedExecutionRuntime:
                 requested_mode=str(snapshot.get("requested_cache_mode") or "auto"),
             )
             cache_usage = usage_observation.canonical()
+            cache_prefix = (cache_binding or {}).get("prefix") if isinstance((cache_binding or {}).get("prefix"), dict) else {}
+            cache_metadata = (cache_binding or {}).get("metadata") if isinstance((cache_binding or {}).get("metadata"), dict) else {}
+            cache_mechanism = (cache_binding or {}).get("mechanism")
+            cache_decision_reason = (cache_binding or {}).get("decision_reason") or plan.get("decision_reason")
+            if cache_mechanism == "stateful_resource":
+                if str(cache_decision_reason or "").startswith("resource_created"):
+                    cache_resource_action = "created"
+                elif "reused" in str(cache_decision_reason or ""):
+                    cache_resource_action = "reused"
+                else:
+                    cache_resource_action = str(cache_decision_reason or "stateful_resource")
+            elif cache_mechanism == "implicit_prefix":
+                cache_resource_action = "implicit_prefix_projected"
+            else:
+                cache_resource_action = "none"
+            selection_evidence = plan.get("selection_evidence") if isinstance(plan.get("selection_evidence"), dict) else {}
+            planned_mechanism = str(plan.get("planned_mechanism") or "")
+            effective_mechanism = str(cache_mechanism or "")
+            explicit_action = cache_metadata.get("explicit_cache_action")
+            explicit_skip_reason = cache_metadata.get("explicit_cache_skip_reason")
+            if explicit_action is None:
+                if effective_mechanism == "stateful_resource":
+                    explicit_action = (
+                        "created" if cache_resource_action == "created"
+                        else "reused" if cache_resource_action == "reused"
+                        else "attached"
+                    )
+                elif planned_mechanism == "stateful_resource":
+                    decision = cache_metadata.get("cache_cost_decision") if isinstance(cache_metadata.get("cache_cost_decision"), dict) else {}
+                    reason = str(decision.get("reason") or cache_decision_reason or "")
+                    if reason in {
+                        "cache_create_unknown", "cache_create_verify_failed", "cache_handle_unavailable",
+                        "cache_create_not_claimed", "cache_operation_fence_rejected",
+                    }:
+                        explicit_action = "unknown"
+                    elif reason in {
+                        "cache_create_rejected", "cache_resource_probe_failed", "cache_measurement_failed",
+                    }:
+                        explicit_action = "failed"
+                    else:
+                        explicit_action = "skipped"
+                    explicit_skip_reason = explicit_skip_reason or reason or None
+                else:
+                    explicit_action = (
+                        "not_selected"
+                        if planned_mechanism or plan.get("requested_mode") in {"auto", "on"}
+                        else "not_requested"
+                    )
+                    explicit_skip_reason = explicit_skip_reason or (
+                        "implicit_prefix_selected_by_policy" if planned_mechanism == "implicit_prefix"
+                        else str(cache_decision_reason or "cache_mechanism_not_selected")
+                        if explicit_action == "not_selected" else None
+                    )
+            implicit_capability = (
+                "certified" if effective_mechanism == "implicit_prefix" else
+                cache_metadata.get("implicit_prefix_capability")
+                or selection_evidence.get("implicit_prefix_capability")
+                or "unknown"
+            )
+            implicit_eligible = bool(
+                effective_mechanism == "implicit_prefix"
+                or cache_metadata.get("implicit_prefix_eligible") is True
+                or selection_evidence.get("implicit_prefix_eligible") is True
+            )
+            implicit_attempted = bool(
+                cache_metadata.get("implicit_prefix_attempted") is True
+                or effective_mechanism == "implicit_prefix"
+            )
+            cache_usage.update(
+                {
+                    "explicit_cache_action": explicit_action,
+                    "explicit_cache_skip_reason": explicit_skip_reason,
+                    "cache_cost_decision": cache_metadata.get("cache_cost_decision"),
+                    "docx_explicit_cache_policy": cache_metadata.get("docx_explicit_cache_policy"),
+                    "implicit_prefix_capability": implicit_capability,
+                    "implicit_prefix_eligible": implicit_eligible,
+                    "implicit_prefix_attempted": implicit_attempted,
+                    "cache_resource_create_tokens": cache_metadata.get("cache_resource_create_tokens"),
+                    "cache_resource_create_token_source": cache_metadata.get("cache_resource_create_token_source"),
+                    "stable_material_projection_fingerprint": (provider_physical_plan or {}).get("stable_material_projection_fingerprint"),
+                    "session_stable_material_fingerprint": (context_plan or {}).get("session_stable_material_fingerprint"),
+                    "request_instruction_fingerprint": (provider_physical_plan or {}).get("request_instruction_fingerprint"),
+                    "cached_instruction_fingerprint": (provider_physical_plan or {}).get("cached_instruction_fingerprint"),
+                    "request_instruction_is_cached": (provider_physical_plan or {}).get("request_instruction_is_cached"),
+                    "cache_identity_components": (provider_physical_plan or {}).get("cache_identity_components"),
+                    "cache_identity_fingerprint": (provider_physical_plan or {}).get("cache_identity_fingerprint"),
+                    "cache_identity_policy": (provider_physical_plan or {}).get("cache_identity_policy"),
+                    "cache_identity_diff_reasons": (provider_physical_plan or {}).get("cache_identity_diff_reasons") or [],
+                    "request_material_split_suppressed": ((provider_physical_plan or {}).get("dependencies") or {}).get("request_material_split_suppressed"),
+                    "cache_material_projection_hash": ((provider_physical_plan or {}).get("dependencies") or {}).get("cache_material_projection_hash"),
+                }
+            )
+            cache_cost_observation: dict[str, Any] = {
+                "status": "unavailable",
+                "reason": "provider_usage_or_frozen_price_schedule_incomplete",
+            }
+            cache_plan_config = plan.get("mechanism_config") if isinstance(plan.get("mechanism_config"), dict) else {}
+            price_schedule = cache_plan_config.get("prefix_growth") if isinstance(cache_plan_config.get("prefix_growth"), dict) else {}
+            economics_for_observation = cache_plan_config.get("auto_economics") if isinstance(cache_plan_config.get("auto_economics"), dict) else {}
+            resolver_version = str(plan.get("resolver_version") or "")
+            relative_cache_policy = (
+                resolver_version in {"relay-cache-resolver/6", "relay-cache-resolver/7"}
+                and economics_for_observation.get("new_economics_policy") == "relative_cache/2"
+            )
+            new_cost_observation = (
+                (resolver_version == "relay-cache-resolver/5"
+                 and economics_for_observation.get("new_economics_policy") == "current_read/1")
+                or relative_cache_policy
+            )
+            if new_cost_observation:
+                price_schedule = (
+                    economics_for_observation.get("price_schedule")
+                    if isinstance(economics_for_observation.get("price_schedule"), dict)
+                    else {}
+                )
+            price_currency = str(price_schedule.get("currency") or "").strip().upper()
+            price_revision = str(price_schedule.get("price_revision") or "").strip()
+            prompt_total = cache_usage.get("prompt_tokens_total")
+            cache_read_tokens = cache_usage.get("cache_read_tokens")
+            uncached_input_tokens = cache_usage.get("uncached_input_tokens")
+            try:
+                input_rate = float(price_schedule.get("input_cost_per_million_tokens"))
+                if relative_cache_policy:
+                    read_rate = input_rate * float(economics_for_observation.get("cache_read_input_ratio", 0.1))
+                else:
+                    read_rate = float(price_schedule.get("cache_read_cost_per_million_tokens"))
+                if (
+                    price_currency
+                    and price_revision
+                    and prompt_total is not None
+                    and cache_read_tokens is not None
+                    and uncached_input_tokens is not None
+                    and math.isfinite(input_rate)
+                    and math.isfinite(read_rate)
+                    and input_rate >= 0
+                    and read_rate >= 0
+                ):
+                    input_cost = float(uncached_input_tokens) * input_rate / 1_000_000.0
+                    read_cost = float(cache_read_tokens) * read_rate / 1_000_000.0
+                    write_cost = 0.0
+                    storage_cost = 0.0
+                    complete = True
+                    if cache_resource_action == "created":
+                        write_rate = price_schedule.get("cache_write_cost_per_million_tokens")
+                        storage_rate = price_schedule.get("storage_cost_per_million_tokens_minute")
+                        prefix_tokens = cache_metadata.get("prefix_token_count")
+                        ttl_seconds = cache_metadata.get("ttl_seconds") or cache_plan_config.get("ttl_seconds")
+                        if relative_cache_policy:
+                            write_rate = input_rate * float(economics_for_observation.get("explicit_create_input_ratio", 1.0))
+                        elif (new_cost_observation and write_rate is None
+                            and economics_for_observation.get("no_separate_creation_fee_verified") is True):
+                            write_rate = 0.0
+                        if (write_rate is None or prefix_tokens is None
+                            or (not new_cost_observation and (storage_rate is None or ttl_seconds is None))):
+                            complete = False
+                        else:
+                            write_rate_value = float(write_rate)
+                            storage_rate_value = float(storage_rate) if storage_rate is not None else None
+                            if (
+                                not math.isfinite(write_rate_value) or write_rate_value < 0
+                                or (storage_rate_value is not None and
+                                    (not math.isfinite(storage_rate_value) or storage_rate_value < 0))
+                            ):
+                                complete = False
+                            else:
+                                write_cost = float(prefix_tokens) * write_rate_value / 1_000_000.0
+                                storage_cost = (
+                                    float(prefix_tokens) * (float(ttl_seconds) / 60.0)
+                                    * storage_rate_value / 1_000_000.0
+                                    if storage_rate_value is not None and ttl_seconds is not None
+                                    else None
+                                )
+                    if complete:
+                        cache_cost_observation = {
+                            "status": "estimated_from_frozen_price_schedule",
+                            "currency": price_currency,
+                            "price_revision": price_revision,
+                            "scope": "input_and_cache_only_excludes_output_tokens",
+                            "uncached_input_cost": round(input_cost, 10),
+                            "cache_read_cost": round(read_cost, 10),
+                            "cache_write_cost": round(write_cost, 10),
+                            "ttl_storage_cost": round(storage_cost, 10) if storage_cost is not None else None,
+                            "total_estimated_cost": (
+                                None if new_cost_observation else
+                                round(input_cost + read_cost + write_cost + storage_cost, 10)
+                            ),
+                            "total_estimated_cost_excluding_storage": (
+                                round(input_cost + read_cost + write_cost, 10)
+                                if new_cost_observation else None
+                            ),
+                            "storage_excluded_from_optimization": new_cost_observation,
+                            "pricing_basis": (
+                                "relative_input_equivalent_policy"
+                                if relative_cache_policy
+                                else "frozen_price_schedule"
+                            ),
+                            "cache_read_input_ratio": (
+                                economics_for_observation.get("cache_read_input_ratio", 0.1)
+                                if relative_cache_policy
+                                else None
+                            ),
+                            "explicit_create_input_ratio": (
+                                economics_for_observation.get("explicit_create_input_ratio", 1.0)
+                                if relative_cache_policy
+                                else None
+                            ),
+                        }
+            except (TypeError, ValueError, OverflowError):
+                pass
+            if str(snapshot.get("provider") or "").lower() == "gemini":
+                binding_prefix_token_count = cache_metadata.get("prefix_token_count")
+                if binding_prefix_token_count is None and isinstance(cache_binding_obj.prefix, dict):
+                    binding_prefix_token_count = cache_binding_obj.prefix.get("prefix_token_count")
+                cache_usage.update(
+                    {
+                        "cache_resource_action": cache_resource_action,
+                        "effective_cache_mechanism": cache_mechanism,
+                        "reuse_evidence_key": snapshot.get("reuse_evidence_key"),
+                        "cache_prefix_token_count": binding_prefix_token_count,
+                        "cache_ttl_seconds": cache_metadata.get("ttl_seconds") or cache_plan_config.get("ttl_seconds"),
+                        "cache_prefix_version": cache_prefix.get("prefix_version"),
+                        "cache_resource_generation": (cache_binding or {}).get("resource_generation"),
+                        "cache_content_fingerprint": cache_prefix.get("content_fingerprint") or cache_prefix.get("prefix_fingerprint"),
+                        "cache_cost_observation": cache_cost_observation,
+                    }
+                )
+                if cache_metadata.get("prefix_growth_decision") is not None:
+                    cache_usage["prefix_growth_decision"] = cache_metadata.get("prefix_growth_decision")
             compact_result["cache"] = {
                 "requested_cache_mode": snapshot.get("requested_cache_mode"),
+                "requested_cache_mechanism": snapshot.get("requested_cache_mechanism", "auto"),
+                "estimated_future_reuses": (plan.get("reuse_prediction") or {}).get("expected_future_reuses"),
+                "reuse_evidence_source": (plan.get("reuse_prediction") or {}).get("source"),
+                "selection_evidence": plan.get("selection_evidence") or {},
+                "cache_cost_decision": cache_metadata.get("cache_cost_decision"),
                 "planned_mechanism": plan.get("planned_mechanism"),
-                "effective_cache_mechanism": (cache_binding or {}).get("mechanism"),
-                "execution_mechanism": (cache_binding or {}).get("mechanism"),
+                "effective_cache_mechanism": cache_mechanism,
+                "execution_mechanism": cache_mechanism,
                 # At this point the physical CacheExecutionBinding has been
                 # installed and sealed, so any final-threshold guard is resolved.
                 "resolution_status": "finalized",
-                "decision_reason": (cache_binding or {}).get("decision_reason") or plan.get("decision_reason"),
+                "decision_reason": cache_decision_reason,
                 **cache_usage,
             }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
