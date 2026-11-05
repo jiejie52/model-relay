@@ -556,3 +556,50 @@ def evaluate_relative_cache_strategy(
         "allow": net > 0,
         "reason": "explicit_expected_cost_lower_than_implicit" if net > 0 else "explicit_not_economical_vs_implicit",
     }
+
+def evaluate_v65_snapshot_cost(
+    *, tokens: int, ttl_seconds: int, config: dict[str, Any], forced: bool,
+    already_cached_tokens: int = 0,
+) -> dict[str, Any]:
+    """Compare a new immutable snapshot with the current cache/uncached baseline."""
+    prices = config.get("price_schedule") or {}
+    input_rate = _nonnegative(prices.get("input_cost_per_million_tokens"))
+    read_rate = _nonnegative(prices.get("cache_read_cost_per_million_tokens"))
+    write_rate = _nonnegative(prices.get("cache_write_cost_per_million_tokens"))
+    storage_rate = _nonnegative(prices.get("storage_cost_per_million_tokens_minute"))
+    cap = _nonnegative(config.get("max_new_resource_cost"))
+    if (not prices.get("currency") or not prices.get("price_revision")
+            or None in (input_rate, read_rate, write_rate, storage_rate)):
+        return {"allow": forced and cap is None, "reason": "current_read_price_or_creation_fee_unverified"}
+    if not 0 <= already_cached_tokens < tokens or ttl_seconds <= 0:
+        return {"allow": False, "reason": "resource_measurement_invalid"}
+    hit_rate = _nonnegative(config.get("observed_implicit_hit_rate"))
+    if hit_rate is None and config.get("cold_start_forecast"):
+        hit_rate = _nonnegative(config.get("cold_start_implicit_hit_rate"))
+    implicit_available = (
+        config.get("certified_implicit_alternative") is True or config.get("trial_implicit_alternative") is True
+    )
+    if already_cached_tokens == 0 and implicit_available and not forced and (hit_rate is None or hit_rate > 1):
+        return {"allow": False, "reason": "implicit_hit_rate_unverified"}
+    effective_rate = input_rate if already_cached_tokens or not implicit_available else (
+        input_rate - (input_rate - read_rate) * min(hit_rate or 0.0, 1.0)
+    )
+    future = config.get("expected_future_reuses", 0)
+    expected_reads = 1 + min(10000, max(0, future)) if type(future) is int else 1
+    write = tokens * write_rate / 1_000_000
+    storage = tokens * (ttl_seconds / 60.0) * storage_rate / 1_000_000
+    margin = _nonnegative(config.get("safety_margin_ratio")) or 0.0
+    gain = expected_reads * (tokens - already_cached_tokens) * (effective_rate - read_rate) / 1_000_000
+    net = gain - (write + storage) * (1 + min(margin, 5.0))
+    allowed = (forced or net > 0) and (cap is None or write + storage <= cap)
+    return {
+        "allow": allowed, "reason": (
+            "new_resource_budget_exceeded" if cap is not None and write + storage > cap
+            else "positive_snapshot_net_savings" if allowed
+            else "explicit_not_economical_vs_implicit"
+        ),
+        "currency": prices["currency"], "price_revision": prices["price_revision"],
+        "expected_total_reads": expected_reads, "prefix_token_count": tokens,
+        "estimated_creation_cost": write, "estimated_storage_cost": storage,
+        "estimated_net_savings": net,
+    }

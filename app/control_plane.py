@@ -926,6 +926,7 @@ def _builtin_cache_policies() -> list[CachePolicySpec]:
             metadata={
                 "below_minimum": "none",
                 "assessment_uncertain": "none",
+                "auto_economics": {"cold_start_max_tokens": 131072},
             },
         )
     ]

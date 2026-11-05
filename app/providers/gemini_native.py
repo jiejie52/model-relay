@@ -2,19 +2,15 @@ from __future__ import annotations
 
 import copy
 import json
-import logging
 from typing import Any
 
 import httpx
 
-from .gemini_cache_diagnostics import log_unproven_cache_response, request_facts, response_facts
 from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
+from ..observability.http_wire_logger import normalization_active, provider_transport
 from ..config import Settings
-from ..core.idempotency import stable_hash
-from ..cache.usage import normalize_cache_usage
-from ..observability import info as log_info
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
 from .gemini_physical import (
@@ -31,7 +27,6 @@ from .gemini_wire import (
 )
 
 
-logger = logging.getLogger("model-relay-gemini")
 
 
 class GeminiNativeAdapter:
@@ -57,7 +52,7 @@ class GeminiNativeAdapter:
 
         spec = resolve_structured_output(
             context.snapshot,
-            fallback_name=str(context.snapshot.get("metadata", {}).get("stage") or "structured_output"),
+            fallback_name="structured_output" if normalization_active() else str(context.snapshot.get("metadata", {}).get("stage") or "structured_output"),
         )
         if spec is not None:
             generation = payload.get("generationConfig")
@@ -82,21 +77,7 @@ class GeminiNativeAdapter:
         # provider_payload field can re-introduce a forbidden top-level key.
         self._enforce_cached_inference_wire(payload, context)
 
-        payload_hash = stable_hash(payload)
         model = str(context.snapshot["model"])
-        # Observe final wire after all options/schema/cached-content enforcement.
-        # Fail-open diagnostics must never change an otherwise valid inference.
-        wire_diagnostics = {}
-        try:
-            wire_diagnostics = request_facts(
-                payload, snapshot=context.snapshot, physical=context.provider_physical_plan,
-                session=context.session,
-            )
-            log_info(logger, "gemini_cache_request_diagnostics", request_id=context.request_id,
-                     session_id=context.session_id, model=model, **wire_diagnostics)
-        except Exception as exc:
-            log_info(logger, "gemini_cache_diagnostics_unavailable", request_id=context.request_id,
-                     phase="request", error_type=type(exc).__name__)
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
         headers = {
             "x-goog-api-key": self.settings.aihubmix_api_key.get_secret_value(),
@@ -110,14 +91,12 @@ class GeminiNativeAdapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=self._transport) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 status = response.status_code
                 response_headers = dict(response.headers)
         if not 200 <= status < 300:
-            self._log_unproven_response(context, model, status, response_headers, raw,
-                                        "upstream_error")
             raise ProviderHTTPError(
                 status,
                 raw,
@@ -131,8 +110,6 @@ class GeminiNativeAdapter:
             decoded = decode_entity(raw, response_headers.get("content-encoding"))
             data = json.loads(decoded.decode("utf-8"))
         except Exception as exc:
-            self._log_unproven_response(context, model, status, response_headers, raw,
-                                        "unknown")
             raise ProviderHTTPError(
                 status,
                 raw,
@@ -148,8 +125,6 @@ class GeminiNativeAdapter:
         first = candidates[0] if isinstance(candidates, list) and candidates else None
         model_content = first.get("content") if isinstance(first, dict) else None
         if not isinstance(model_content, dict):
-            self._log_unproven_response(context, model, status, response_headers, raw,
-                                        "unknown")
             raise ProviderHTTPError(
                 status,
                 raw,
@@ -164,43 +139,14 @@ class GeminiNativeAdapter:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 text_parts.append(part["text"])
         text = "\n".join(text_parts)
-        usage_meta = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
+        usage_meta = data.get("usageMetadata") or data.get("usage_metadata")
+        usage_meta = usage_meta if isinstance(usage_meta, dict) else {}
         usage = {
             "prompt_tokens": usage_meta.get("promptTokenCount"),
             "completion_tokens": usage_meta.get("candidatesTokenCount"),
             "total_tokens": usage_meta.get("totalTokenCount"),
             "raw": usage_meta,
         }
-        binding = context.cache_execution_binding or {}
-        plan = context.snapshot.get("cache_plan") or {}
-        physical = context.provider_physical_plan or {}
-        cache_observation = normalize_cache_usage(
-            protocol="gemini_native", usage=usage,
-            effective_mechanism=binding.get("mechanism"),
-            requested_mode=str(context.snapshot.get("requested_cache_mode") or "auto"),
-        )
-        response_diagnostics = {}
-        try:
-            response_diagnostics = response_facts(data, response_headers)
-        except Exception as exc:
-            log_info(logger, "gemini_cache_diagnostics_unavailable", request_id=context.request_id,
-                     phase="response", error_type=type(exc).__name__)
-        cache_diagnostics = {
-            "request_facts": wire_diagnostics,
-            "response_facts": response_diagnostics,
-            "planned_mechanism": plan.get("planned_mechanism"),
-            "effective_cache_mechanism": binding.get("mechanism"),
-            "implicit_prefix_fingerprint": physical.get("implicit_prefix_fingerprint"),
-            "payload_hash": payload_hash,
-            "cache_read_tokens": cache_observation.cache_read_tokens,
-            "actual_cache_hit_status": cache_observation.actual_cache_hit_status,
-            "cached_content_token_count_present": "cachedContentTokenCount" in usage_meta,
-            "admission_status": (binding.get("metadata") or {}).get("admission_status"),
-        }
-        log_info(logger, "gemini_cache_usage_observed", request_id=context.request_id,
-                 session_id=context.session_id, model=model, **cache_diagnostics)
-        self._log_unproven_response(context, model, status, response_headers, raw,
-                                    cache_observation.actual_cache_hit_status)
         response_id = str(data.get("responseId") or data.get("id") or "") or None
         transport_history: dict[str, Any] = {
             "kind": "gemini_native",
@@ -224,7 +170,7 @@ class GeminiNativeAdapter:
             text=text,
             response_id=response_id,
             usage=usage,
-            cached_tokens=usage_meta.get("cachedContentTokenCount"),
+            cached_tokens=usage_meta.get("cachedContentTokenCount", usage_meta.get("cached_content_token_count")),
             response_output=model_content,
             history_entry={"transport_history": transport_history},
             http_status=status,
@@ -234,7 +180,7 @@ class GeminiNativeAdapter:
                 body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
                 protocol="gemini_native",
                 channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
-            ) | {"cache_diagnostics": cache_diagnostics},
+            ) | {"cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details"))},
         )
 
     @classmethod
@@ -500,19 +446,3 @@ class GeminiNativeAdapter:
             if value:
                 return str(value)
         return None
-
-    @classmethod
-    def _log_unproven_response(cls, context: V2ExecutionContext, model: str, status: int,
-                               headers: dict, raw: bytes, hit_status: str) -> None:
-        try:
-            log_unproven_cache_response(
-                logger, request_id=context.request_id, session_id=context.session_id,
-                model=model, status=status, headers=headers, raw=raw,
-                planned_mechanism=(context.snapshot.get("cache_plan") or {}).get("planned_mechanism"),
-                effective_mechanism=(context.cache_execution_binding or {}).get("mechanism"),
-                hit_status=hit_status, upstream_request_id=cls._request_id(headers),
-            )
-        except Exception as exc:
-            log_info(logger, "gemini_cache_diagnostics_unavailable",
-                     request_id=context.request_id, phase="upstream_response_log",
-                     error_type=type(exc).__name__)

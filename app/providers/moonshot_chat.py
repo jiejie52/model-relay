@@ -8,6 +8,8 @@ import httpx
 from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import read_raw_response, decode_entity
 from .v2_base import V2ExecutionContext, V2ProviderResult
+from ..observability.http_wire_logger import normalization_active, provider_transport
+from ..core.context_normalizer import source_markers
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..materials.resolver import MaterialResolver
@@ -74,7 +76,7 @@ class MoonshotChatAdapter:
 
         spec = resolve_structured_output(
             context.snapshot,
-            fallback_name=str(context.snapshot.get("metadata", {}).get("stage") or "structured_output"),
+            fallback_name="structured_output" if normalization_active() else str(context.snapshot.get("metadata", {}).get("stage") or "structured_output"),
         )
         if spec is not None:
             if spec.mode == "json_object":
@@ -97,7 +99,7 @@ class MoonshotChatAdapter:
             pool=self.settings.upstream_pool_timeout_seconds,
         )
         headers = self._headers()
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot", url=url)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "kimi", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 response_status = response.status_code
@@ -196,10 +198,11 @@ class MoonshotChatAdapter:
                     )
                 raw = await self.materials.read_object_id(str(extraction_object_id))
                 text = raw.decode("utf-8", errors="strict")
+                begin, end = source_markers(material_id, filename, upgraded=normalization_active())
                 system_messages.append(
                     {
                         "role": "system",
-                        "content": f"[SOURCE_FILE:{filename}]\n{text}\n[END_SOURCE_FILE:{filename}]",
+                        "content": f"{begin}\n{text}\n{end}",
                     }
                 )
                 continue

@@ -36,6 +36,34 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0] if rows else None
 
+    async def recent_affinity_observations(self, request_row: dict[str, Any]) -> list[dict[str, Any]]:
+        return await self.backend.select(
+            "relay_requests",
+            filters={
+                "session_id": f"eq.{request_row['session_id']}",
+                "tenant_id": f"eq.{request_row['tenant_id']}",
+                "conversation_hash": f"eq.{request_row['conversation_hash']}",
+                "status": "in.(succeeded,failed,indeterminate)",
+                "completed_at": "not.is.null",
+            },
+            select="id,cache_usage,completed_at",
+            order="completed_at.desc,id.desc",
+            limit=3,
+        )
+
+    async def rotate_cache_affinity(self, request_id: str, epoch: int, token: str,
+                                    reason: str, fence: Any) -> bool:
+        return bool(await self.backend.rpc("rotate_cache_affinity_v65", {
+            "p_request_id": request_id, "p_epoch": epoch, "p_token": token,
+            "p_reason": reason, "p_fence_owner": fence.owner, "p_fence_epoch": fence.epoch,
+        }))
+
+    async def record_cache_affinity_event(self, request_id: str, audit: dict[str, Any], fence: Any) -> None:
+        await self.backend.rpc("record_cache_affinity_event_v65", {
+            "p_request_id": request_id, "p_audit": audit,
+            "p_fence_owner": fence.owner, "p_fence_epoch": fence.epoch,
+        })
+
     async def recent_session_cache_reuse_evidence(
         self, *, session_id: str, tenant_id: str,
         conversation_hash: str, reuse_evidence_key: str,
@@ -469,6 +497,7 @@ class RelayV2Repository(RelayRepository):
         offering_id: str,
         account_scope_hash: str,
         protocol_profile_hash: str,
+        affinity_epoch: int = 0,
     ) -> str:
         raw = json.dumps(
             {
@@ -478,6 +507,7 @@ class RelayV2Repository(RelayRepository):
                 "offering_id": offering_id,
                 "account_scope_hash": account_scope_hash,
                 "protocol_profile_hash": protocol_profile_hash,
+                **({"affinity_epoch": affinity_epoch} if affinity_epoch else {}),
             },
             sort_keys=True,
             separators=(",", ":"),

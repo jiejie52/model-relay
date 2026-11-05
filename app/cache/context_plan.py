@@ -151,6 +151,15 @@ def build_context_plan(
         "identity_complete": bool(materials) and all(x["content_sha256"] for x in materials),
         "scope": "session", "projection_reuse_enabled": True,
     }
+    if isinstance(snapshot.get("cache_upgrade"), dict):
+        plan["cache_upgrade"] = snapshot["cache_upgrade"]
+        plan["semantic_fingerprint"] = stable_hash({
+            "segments": [{k: v for k, v in segment.items() if k != "source_ref"} for segment in segments],
+            "materials": [segment["source_ref"] for segment in segments if segment["domain"] == "material"],
+            "structured_output": snapshot.get("structured_output"),
+            "options": snapshot.get("effective_options"),
+            "think_level": snapshot.get("think_level"),
+        })
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 

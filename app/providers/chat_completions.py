@@ -8,6 +8,8 @@ import httpx
 from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
+from ..observability.http_wire_logger import normalization_active, provider_transport
+from ..core.context_normalizer import source_markers
 from ..config import Settings
 from ..materials.resolver import MaterialResolver
 from ..structured_output import StructuredOutputError, resolve_structured_output
@@ -89,7 +91,7 @@ class ChatCompletionsV2Adapter:
             "Accept": "application/json",
             "Accept-Encoding": "identity",
         }
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "chat_completions", url=url)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(
                     response,
@@ -190,7 +192,8 @@ class ChatCompletionsV2Adapter:
                 )
             data = resolved.data or b""
             text = data.decode("utf-8", errors="strict")
-            blocks.append(f"[SOURCE_FILE:{filename}]\n{text}\n[END_SOURCE_FILE:{filename}]")
+            begin, end = source_markers(material_id, filename, upgraded=normalization_active())
+            blocks.append(f"{begin}\n{text}\n{end}")
         return "\n\n".join(blocks)
 
     @staticmethod
@@ -228,7 +231,7 @@ class ChatCompletionsV2Adapter:
         try:
             spec = resolve_structured_output(
                 snapshot,
-                fallback_name=str((snapshot.get("metadata") or {}).get("stage") or "structured_output"),
+                fallback_name="structured_output" if normalization_active() else str((snapshot.get("metadata") or {}).get("stage") or "structured_output"),
             )
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc

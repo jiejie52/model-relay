@@ -257,6 +257,7 @@ class BindingResolver:
         request_id: str | None = None,
         session_id: str | None = None,
         enable_projection_reuse: bool = False,
+        cache_budget_bytes: int | None = None,
     ) -> dict[str, Any]:
         """Build the cache-only Gemini material projection.
 
@@ -322,7 +323,8 @@ class BindingResolver:
                     material_rows=rows,
                     material_bindings=material_bindings,
                     session_material_ids=cache_candidate_material_ids,
-                    inline_limit_bytes=inline_limit,
+                    inline_limit_bytes=cache_budget_bytes or inline_limit,
+                    density_selection=cache_budget_bytes is not None,
                     projection_version=(
                         GEMINI_CACHE_PROJECTION_VERSION_V3
                         if is_layout_v9

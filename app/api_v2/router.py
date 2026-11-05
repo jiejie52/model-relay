@@ -13,6 +13,9 @@ from pydantic import ValidationError
 
 from ..core.idempotency import caller_intent_hash, request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
+from ..cache.affinity import session_affinity_token
+from ..cache.planner import freeze_dual_track_plan
+from ..core.context_normalizer import canonical_structure, normalize_structured_output
 from ..cache.context_plan import build_context_plan
 from ..cache.intent_resolver import CacheIntentResolver
 from ..cache.contracts import CacheDecisionError
@@ -926,6 +929,9 @@ async def create_session(
         # Physical provider layout is frozen at Session creation. Existing
         # Sessions created before this version keep their prior wire semantics.
         session_metadata[GEMINI_SESSION_PROJECTION_METADATA_KEY] = frozen_session_projection_metadata_v9()
+    affinity_token = session_affinity_token(settings, {
+        "tenant_id": body.tenant_id, "id": str(session_id), "connection_id": route.connection_id,
+    }, 1)
     row = await repo.create_session(
         {
             "id": str(session_id),
@@ -945,6 +951,7 @@ async def create_session(
             "active_request_id": None,
             "execution_pool": route.execution_pool,
             "protocol_version": "v3.0",
+            "session_affinity_token": affinity_token,
             "idempotency_key": idempotency_key,
             "session_hash": session_hash,
             "metadata": session_metadata,
@@ -1370,6 +1377,22 @@ async def create_request(
                 }
         plan_seed = dict(base_snapshot)
         plan_seed["schema_version"] = "relay-request/2.3"
+        supply_cache = frozen_route.get("cache_contract") or {}
+        grok_mode = None
+        if provider in {"grok", "xai"} or model.lower().startswith("grok-"):
+            grok_mode = supply_cache.get("grok_cache_mode", settings.relay_grok_cache_mode)
+            if grok_mode not in {"unified_v2", "legacy_v1"}:
+                raise HTTPException(status_code=409, detail={"code": "CACHE_GROK_MODE_INVALID"})
+        cache_upgrade = {
+            "version": 1, "grok_mode": grok_mode,
+            "material_budget": settings.relay_inline_cache_budget_bytes,
+            "roll_alpha": settings.relay_cache_roll_alpha,
+        }
+        if body.requested_cache_mode != "off" and grok_mode != "legacy_v1":
+            base_snapshot["input"] = canonical_structure(base_snapshot["input"])
+            base_snapshot["structured_output"] = normalize_structured_output(base_snapshot["structured_output"])
+            plan_seed.update(base_snapshot)
+        plan_seed["cache_upgrade"] = cache_upgrade
         context_plan = build_context_plan(
             snapshot=plan_seed,
             session=session,
@@ -1419,6 +1442,8 @@ async def create_request(
                         offering_id=str(frozen_route.get("offering_id") or ""),
                         account_scope_hash=str(frozen_route.get("account_scope_hash") or ""),
                         protocol_profile_hash=str(frozen_route.get("protocol_profile_hash") or ""),
+                        affinity_epoch=(int(session.get("affinity_epoch") or 1) if frozen_route.get("channel_id") == "aihubmix"
+                                        or (frozen_route.get("protocol_profile", {}).get("cache") or {}).get("affinity_header") else 0),
                     )
                     observed_reuse["existing_resource_candidate"] = (
                         await repo.ready_session_cache_resource_hint(
@@ -1448,8 +1473,11 @@ async def create_request(
             )
         except CacheDecisionError as exc:
             raise HTTPException(status_code=409, detail=exc.public_detail()) from exc
-        cache_plan = cache_intent.canonical()
-        cache_plan["plan_hash"] = cache_intent.plan_hash
+        cache_plan = freeze_dual_track_plan(
+            cache_intent, snapshot=plan_seed,
+            protocol_profile=frozen_route.get("protocol_profile") or {},
+            contract=supply_cache, cache_policy=frozen_cache_policy,
+        )
         snapshot = {
             "schema_version": "relay-request/2.3",
             **base_snapshot,
@@ -1472,7 +1500,8 @@ async def create_request(
             "context_plan": context_plan,
             "context_plan_hash": context_plan["context_plan_hash"],
             "cache_plan": cache_plan,
-            "cache_plan_hash": cache_intent.plan_hash,
+            "cache_plan_hash": cache_plan["plan_hash"],
+            "cache_upgrade": cache_upgrade,
         }
     else:
         snapshot = {"schema_version": "relay-request/2.2", **base_snapshot}

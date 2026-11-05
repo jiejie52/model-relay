@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from .cache_selector import select_materials_for_cache
 from .gemini_transport import GEMINI_EXTERNAL_URL_REPRESENTATION, GEMINI_FILES_REPRESENTATION
 
 
@@ -101,6 +102,7 @@ def plan_gemini_cache_materials(
     material_bindings: Iterable[dict[str, Any]],
     session_material_ids: Iterable[str],
     inline_limit_bytes: int = GEMINI_CACHE_INLINE_FALLBACK_LIMIT_BYTES,
+    density_selection: bool = False,
     projection_version: str = GEMINI_CACHE_PROJECTION_VERSION,
     schema_version: str = "relay-gemini-cache-material-plan/2",
 ) -> GeminiCacheMaterialPlan:
@@ -128,10 +130,9 @@ def plan_gemini_cache_materials(
 
     total_bytes = sum(sizes.values())
     inline_ids = list(
-        select_gemini_inline_cache_material_ids(
-            material_rows=rows.values(),
-            session_material_ids=session_ids,
-            inline_limit_bytes=limit,
+        select_materials_for_cache(rows, sizes, session_ids, limit)
+        if density_selection else select_gemini_inline_cache_material_ids(
+            material_rows=rows.values(), session_material_ids=session_ids, inline_limit_bytes=limit,
         )
     )
     inline_set = set(inline_ids)

@@ -102,6 +102,8 @@ class SessionRequestCreate(BaseModel):
 
 class CacheSummary(BaseModel):
     gemini_diagnostics: dict[str, Any] | None = None
+    cache_tracks: dict[str, Any] | None = None
+    prefix_diff: dict[str, Any] | None = None
     material_reuse: dict[str, Any] | None = None
     material_fingerprint: str | None = None
     requested_cache_mode: str | None = None

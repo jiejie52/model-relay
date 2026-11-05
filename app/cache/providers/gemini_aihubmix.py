@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from ...observability.http_wire_logger import provider_transport
 from ...config import Settings
 from ...core.idempotency import stable_hash
 from ...providers.base import ProviderHTTPError, ProviderRequestError
@@ -440,7 +441,7 @@ class GeminiAIHubMixCacheResourceAdapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=self._transport) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url)) as client:
             response = await client.request(
                 method,
                 url,

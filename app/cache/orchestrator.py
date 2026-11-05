@@ -294,7 +294,8 @@ class CacheOrchestrator:
             }
             if measured_tokens < minimum:
                 if (plan.get("requested_mode") == "on"
-                    and plan.get("requested_mechanism") == "implicit_prefix"):
+                    and plan.get("requested_mechanism") == "implicit_prefix"
+                    and not snapshot.get("cache_upgrade")):
                     raise CacheDecisionError(
                         "CACHE_THRESHOLD_NOT_MET",
                         "Forced implicit-prefix projection is below the certified minimum",

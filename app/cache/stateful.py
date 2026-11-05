@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import math
+import json
 import logging
+import math
+import re
 from typing import Any, Protocol
 
 import httpx
@@ -15,11 +17,14 @@ from ..core.provider_error_observation import (
 )
 from ..observability import error as log_error, info as log_info, warning as log_warning
 from ..providers.base import ProviderHTTPError
+from .affinity import AffinityDriftDetected
+from ..observability.http_wire_logger import affinity_hint
 from .contracts import CacheDecisionError, ExecutionFence
 from .economics import (
     evaluate_new_resource,
     evaluate_current_read_resource,
     evaluate_relative_cache_strategy,
+    evaluate_v65_snapshot_cost,
 )
 
 
@@ -83,6 +88,7 @@ class StatefulResourceManager:
             offering_id=str(snapshot.get("offering_id") or ""),
             account_scope_hash=str((session.get("metadata") or {}).get("_relay_route", {}).get("account_scope_hash") or ""),
             protocol_profile_hash=str(plan.get("profile_hash") or ""),
+            affinity_epoch=(int(session.get("affinity_epoch") or 1) if affinity_hint() else 0),
         )
         build_kwargs: dict[str, Any] = {
             "snapshot": snapshot,
@@ -98,7 +104,8 @@ class StatefulResourceManager:
         if not bool(spec.get("cacheable")):
             cacheability_reason = str(spec.get("cacheability_reason") or "no_cacheable_contents")
             if (plan.get("requested_mode") == "on"
-                and plan.get("requested_mechanism") == "stateful_resource"):
+                and plan.get("requested_mechanism") == "stateful_resource"
+                and not (snapshot.get("cache_upgrade") and cacheability_reason == "no_cacheable_contents")):
                 raise CacheDecisionError(
                     "CACHE_PREFIX_INELIGIBLE",
                     f"Forced explicit cache cannot preserve the complete context: {cacheability_reason}",
@@ -191,6 +198,9 @@ class StatefulResourceManager:
                     resource_id=existing.get("id"),
                     provider_error=error_observation,
                 )
+                if (exc.status_code in {403, 404} and affinity_hint() and existing.get("expire_time")
+                        and not self._observation_expiring({"expire_time": existing["expire_time"]})):
+                    raise AffinityDriftDetected("Unexpired cache resource is inaccessible") from exc
                 if exc.status_code in {404, 410}:
                     await self.repo.invalidate_cache_resource(
                         resource_id=str(existing["id"]),
@@ -313,6 +323,15 @@ class StatefulResourceManager:
             )
 
         if needs_economic_gate:
+            if economics_cfg.get("cold_start_candidate") and not candidates:
+                prediction = economics_cfg.get("reuse_prediction") or {}
+                # One subsequent business stage is a planning assumption for
+                # stable large material, never treated as an observed reuse.
+                economics_cfg = {
+                    **economics_cfg,
+                    "expected_future_reuses": max(1, int(prediction.get("expected_future_reuses") or 0)),
+                    "cold_start_forecast": True,
+                }
             if token_count is None:
                 try:
                     token_count = int(await adapter.measure(spec=spec))
@@ -336,13 +355,35 @@ class StatefulResourceManager:
                         "CACHE_COST_UNVERIFIED",
                         "Forced resource would exceed an unverifiable frozen cost budget",
                     ) from exc
+            minimum = cfg.get("minimum_cacheable_tokens")
+            if type(minimum) is int and token_count < minimum:
+                return {"mechanism": None, "decision_reason": "below_minimum"}
             if prefix_growth_decision is not None and prefix_growth_decision.get("decision") == "grow":
                 # A previously authorized, measured growth decision may still
                 # be checked against any separately frozen hard budget.
                 frozen_growth = cfg.get("prefix_growth") if isinstance(cfg.get("prefix_growth"), dict) else {}
                 if not economics_cfg.get("price_schedule") and frozen_growth:
                     economics_cfg = {**economics_cfg, "price_schedule": frozen_growth}
-            if (resolver_version in {"relay-cache-resolver/6", "relay-cache-resolver/7"} and
+            cold_limit = economics_cfg.get("cold_start_max_tokens")
+            cold_trial = (
+                economics_cfg.get("cold_start_forecast")
+                and type(cold_limit) is int and 0 < token_count <= cold_limit
+                and not economics_cfg.get("price_schedule") and economics_cfg.get("max_new_resource_cost") is None
+            )
+            if cold_trial:
+                cache_creation_decision = {
+                    "allow": True, "reason": "bounded_cold_start_trial",
+                    "prefix_token_count": token_count, "max_tokens": cold_limit,
+                    "cost_status": "unpriced_trial",
+                }
+            elif economics_cfg.get("use_snapshot_cost"):
+                baseline = int(growth_fallback[0].get("token_count") or 0) if growth_fallback else 0
+                cache_creation_decision = evaluate_v65_snapshot_cost(
+                    tokens=token_count, ttl_seconds=int(spec.get("ttl_seconds") or 3600),
+                    config=economics_cfg, forced=plan.get("requested_mode") == "on",
+                    already_cached_tokens=baseline,
+                )
+            elif (resolver_version in {"relay-cache-resolver/6", "relay-cache-resolver/7"} and
                 economics_cfg.get("new_economics_policy") == "relative_cache/2"):
                 baseline_tokens = 0
                 if growth_fallback is not None:
@@ -499,6 +540,8 @@ class StatefulResourceManager:
                 provider_error=error_observation,
                 recreate_attempted=False,
             )
+            if provider_create_threshold and snapshot.get("cache_upgrade") and _known_short_gemini_prefix(exc):
+                return {"mechanism": None, "decision_reason": "below_minimum"}
             return self._provider_prepare_failure(
                 plan,
                 exc,
@@ -901,6 +944,9 @@ class StatefulResourceManager:
         minimum = policy.get("minimum_additional_tokens", 4096)
         if type(minimum) is not int or minimum <= 0:
             minimum = 4096
+        alpha = economics.get("roll_alpha")
+        if isinstance(alpha, (int, float)) and alpha > 0:
+            minimum = max(minimum, math.ceil(existing_tokens * alpha))
         if target_tokens - existing_tokens < minimum:
             return False, {
                 "decision": "reuse", "reason": "additional_prefix_too_small",
@@ -908,7 +954,12 @@ class StatefulResourceManager:
                 "target_prefix_tokens": target_tokens,
                 "minimum_additional_tokens": minimum,
             }
-        if str(economics.get("new_economics_policy") or "") == "relative_cache/2":
+        if economics.get("use_snapshot_cost"):
+            economic = evaluate_v65_snapshot_cost(
+                tokens=target_tokens, ttl_seconds=int(spec.get("ttl_seconds") or 3600),
+                config=economics, forced=False, already_cached_tokens=existing_tokens,
+            )
+        elif str(economics.get("new_economics_policy") or "") == "relative_cache/2":
             economic = evaluate_relative_cache_strategy(
                 tokens=target_tokens,
                 ttl_seconds=int(spec.get("ttl_seconds") or 3600),
@@ -1142,3 +1193,18 @@ class StatefulResourceManager:
             f"Stateful cache preparation failed before model dispatch: {type(exc).__name__}",
             reason=reason,
         ) from exc
+
+def _known_short_gemini_prefix(exc: ProviderHTTPError) -> bool:
+    if exc.status_code != 400:
+        return False
+    try:
+        error = json.loads(exc.body).get("error") or {}
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(error, dict) or error.get("status") != "INVALID_ARGUMENT":
+        return False
+    match = re.search(
+        r"cached content is too small[. :]\s*total_token_count\s*=\s*(\d+)\s*,\s*min_total_token_count\s*=\s*(\d+)",
+        str(error.get("message") or ""), re.IGNORECASE,
+    )
+    return bool(match and int(match[1]) < int(match[2]))

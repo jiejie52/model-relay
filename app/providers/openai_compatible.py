@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 
+from ..observability.http_wire_logger import affinity_hint, normalization_active, provider_transport
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from .base import ProviderHTTPError, ProviderRequestError, ProviderResult
@@ -110,7 +111,7 @@ class OpenAICompatibleResponsesProvider:
             apply_openai_responses_structured_output(
                 payload,
                 request_snapshot,
-                fallback_name=str(request_snapshot.get("stage") or "structured_output"),
+                fallback_name="structured_output" if normalization_active() else str(request_snapshot.get("stage") or "structured_output"),
             )
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
@@ -144,7 +145,7 @@ class OpenAICompatibleResponsesProvider:
             "Accept-Encoding": "identity",
         }
 
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "responses", url=url)) as client:
             if hasattr(client, "stream"):
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     raw = await read_raw_response(response, log_context=request_snapshot.get("_relay_log_context"))
@@ -254,6 +255,18 @@ class OpenAICompatibleResponsesProvider:
         if not isinstance(binding, dict):
             return
         mechanism = binding.get("mechanism")
+        upgrade = snapshot.get("cache_upgrade") or {}
+        if (upgrade.get("grok_mode") == "legacy_v1" and snapshot.get("requested_cache_mode") != "off"
+                and (snapshot.get("cache_plan") or {}).get("tracks", {}).get("implicit", {}).get("legacy_allowed") is True):
+            return
+        profile = (snapshot.get("protocol_profile") or {}).get("cache") or {}
+        affinity = affinity_hint()
+        tracks = (binding.get("metadata") or {}).get("tracks") or {}
+        if (upgrade and affinity and profile.get("prompt_cache_key_field") == "prompt_cache_key"
+                and (mechanism == "implicit_prefix" or (tracks.get("implicit_base")
+                     and profile.get("certified_implicit_hint") is True))):
+            payload["prompt_cache_key"] = affinity
+            return
         if mechanism is None:
             if cls._is_grok(provider, model):
                 payload.pop("prompt_cache_key", None)

@@ -5,6 +5,7 @@ import io
 import json
 from typing import Any
 
+from ..observability.http_wire_logger import provider_transport
 from ..config import Settings
 from .base import ProviderHTTPError, ProviderRequestError
 
@@ -88,6 +89,7 @@ class GeminiAIHubMixGenAIClient:
             base_url=self.base_url,
             api_version="v1beta",
             retry_options=types.HttpRetryOptions(attempts=1),
+            async_client_args={"transport": provider_transport(self.settings, "gemini", url=self.base_url, always=True)},
         )
         self._client = genai.Client(
             api_key=self.settings.aihubmix_api_key.get_secret_value(),

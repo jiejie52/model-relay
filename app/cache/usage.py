@@ -38,8 +38,9 @@ def normalize_cache_usage(
         evidence = "provider_usage" if read is not None or write is not None else "unknown"
     elif protocol_n == "gemini_native":
         gemini_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else raw
-        read = _int_or_none(gemini_raw.get("cachedContentTokenCount"))
-        prompt_total = _int_or_none(gemini_raw.get("promptTokenCount"))
+        counter = gemini_raw.get("cachedContentTokenCount", gemini_raw.get("cached_content_token_count"))
+        read = counter if type(counter) is int and counter >= 0 else None
+        prompt_total = _int_or_none(gemini_raw.get("promptTokenCount", gemini_raw.get("prompt_token_count")))
         if prompt_total is None:
             prompt_total = _int_or_none(raw.get("prompt_tokens"))
         if prompt_total is not None and read is not None:

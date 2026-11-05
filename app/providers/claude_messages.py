@@ -9,6 +9,8 @@ import httpx
 from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
+from ..observability.http_wire_logger import normalization_active, provider_transport
+from ..core.context_normalizer import source_markers
 from ..config import Settings
 from ..materials.resolver import MaterialResolver
 from ..structured_output import StructuredOutputError, resolve_structured_output
@@ -69,6 +71,7 @@ class ClaudeMessagesV2Adapter:
         if instructions:
             payload["system"] = str(instructions)
         self._apply_thinking_and_output(payload, context.snapshot)
+        self._apply_cache_binding(payload, context.cache_execution_binding or {})
 
         url = f"{self.base_url}/v1/messages"
         headers = {
@@ -84,7 +87,7 @@ class ClaudeMessagesV2Adapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "claude", url=url)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(
                     response,
@@ -166,6 +169,38 @@ class ClaudeMessagesV2Adapter:
             ),
         )
 
+    @staticmethod
+    def _apply_cache_binding(payload: dict[str, Any], binding: dict[str, Any]) -> None:
+        if binding.get("mechanism") != "breakpoint":
+            return
+        anchors = [item for item in binding.get("breakpoint_anchors", []) if item.get("native") is True]
+        if not anchors:
+            return
+        projected = 0
+        for anchor in anchors:
+            if anchor.get("domain") == "instructions" and isinstance(payload.get("system"), str):
+                payload["system"] = [{
+                    "type": "text", "text": payload["system"], "cache_control": {"type": "ephemeral"},
+                }]
+                projected += 1
+            elif anchor.get("domain") == "history" and len(payload["messages"]) > 1:
+                index = len(payload["messages"]) - 2
+                previous = payload["messages"][index]
+                parts = previous.get("content")
+                if isinstance(parts, str):
+                    parts = [{"type": "text", "text": parts}]
+                if isinstance(parts, list) and parts and isinstance(parts[-1], dict):
+                    if parts[-1].get("type") not in {"text", "image", "document", "tool_use", "tool_result"}:
+                        continue
+                    payload["messages"][index] = {**previous, "content": [
+                        *parts[:-1], {**parts[-1], "cache_control": {"type": "ephemeral"}},
+                    ]}
+                    projected += 1
+        if projected == 0:
+            raise ProviderRequestError("CACHE_BREAKPOINT_INVALID", "No certified Claude breakpoint matches the frozen context")
+        if ((binding.get("metadata") or {}).get("tracks") or {}).get("implicit_effective"):
+            payload["cache_control"] = {"type": "ephemeral"}
+
     async def _user_content(self, context: V2ExecutionContext) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
         for material_id in context.material_ids:
@@ -180,7 +215,8 @@ class ClaudeMessagesV2Adapter:
             filename = str(resolved.material.get("filename") or material_id)
             if mime.startswith("text/") or mime in {"application/json", "application/xml"}:
                 text = data.decode("utf-8", errors="strict")
-                parts.append({"type": "text", "text": f"[SOURCE_FILE:{filename}]\n{text}\n[END_SOURCE_FILE:{filename}]"})
+                begin, end = source_markers(material_id, filename, upgraded=normalization_active())
+                parts.append({"type": "text", "text": f"{begin}\n{text}\n{end}"})
             elif mime.startswith("image/"):
                 parts.append(
                     {
@@ -231,7 +267,7 @@ class ClaudeMessagesV2Adapter:
         try:
             spec = resolve_structured_output(
                 snapshot,
-                fallback_name=str((snapshot.get("metadata") or {}).get("stage") or "structured_output"),
+                fallback_name="structured_output" if normalization_active() else str((snapshot.get("metadata") or {}).get("stage") or "structured_output"),
             )
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc

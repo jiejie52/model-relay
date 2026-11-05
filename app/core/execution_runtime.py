@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import logging
 import math
@@ -7,6 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 from ..config import Settings
+from ..cache.affinity import AffinityDriftDetected, build_wire_context, drift_reason, rotate_affinity
+from ..cache.planner import final_track_facts
+from ..observability.http_wire_logger import wire_context
+from .context_normalizer import canonical_structure
 from ..cache.contracts import CacheDecisionError, ExecutionFence
 from ..cache.orchestrator import CacheOrchestrator
 from ..cache.usage import normalize_cache_usage
@@ -25,7 +31,7 @@ from ..providers.gemini_physical import (
 )
 from ..providers.base import ProviderHTTPError, ProviderRequestError
 from ..providers.v2_base import V2ExecutionContext
-from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class
+from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class, warning as log_warning
 from ..storage_paths import request_object_path_v2, session_history_request_path
 from ..structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
 from ..utils import json_bytes, truncate_utf8, utcnow
@@ -125,6 +131,27 @@ class SharedExecutionRuntime:
                 kind="async_job" if request_row.get("job_id") else "sync_request",
             )
 
+        upgrade = snapshot.get("cache_upgrade") or {}
+        affinity_rows = []
+        wire = {}
+        rotated_affinity = False
+        if upgrade and fence is not None:
+            wire = build_wire_context(self.settings, snapshot, session, request_id, [])
+            if wire["normalize"]:
+                affinity_rows = await self.repo.recent_affinity_observations(request_row)
+            if affinity_rows and wire.get("affinity_token"):
+                reason = drift_reason(affinity_rows, epoch=wire["affinity_epoch"])
+                if reason and str(session.get("affinity_eviction_request_id")) != request_id:
+                    session = await rotate_affinity(self.repo, request_row, session, fence, reason)
+                    rotated_affinity = True
+                    wire = build_wire_context(self.settings, snapshot, session, request_id, [])
+            if affinity_rows:
+                previous = (affinity_rows[0].get("cache_usage") or {}).get("affinity_audit") or {}
+                if previous.get("affinity_epoch") == wire["affinity_epoch"]:
+                    wire["previous_chain"] = previous.get("physical_chain") or []
+                    wire["previous_semantic_fingerprint"] = previous.get("semantic_fingerprint")
+                    wire["compared_request_id"] = str(affinity_rows[0]["id"])
+
         existing_binding_snapshot = request_row.get("material_binding_snapshot")
         if not isinstance(existing_binding_snapshot, list):
             existing_binding_snapshot = None
@@ -203,6 +230,7 @@ class SharedExecutionRuntime:
                     request_id=request_id,
                     session_id=session_id,
                     enable_projection_reuse=bool((context_plan or {}).get("material_reuse", {}).get("projection_reuse_enabled")),
+                    cache_budget_bytes=(upgrade.get("material_budget") if wire.get("normalize") else None),
                 )
             if cache_material_projection is not None:
                 material_reuse_observation = cache_material_projection.pop("_material_reuse_observation", None)
@@ -272,19 +300,37 @@ class SharedExecutionRuntime:
                     "CACHE_CONTEXT_MISMATCH",
                     "Cache-aware Request is missing its frozen ContextPlan",
                 )
+            async def prepare_binding():
+                with wire_context(wire):
+                    return await self.cache.prepare(
+                        request_row=request_row,
+                        snapshot=snapshot,
+                        session=session,
+                        context_plan=context_plan,
+                        material_bindings=material_bindings,
+                        fence=fence,
+                        history=history,
+                        provider_physical_plan=provider_physical_plan,
+                    )
             try:
-                cache_binding_obj = await self.cache.prepare(
-                    request_row=request_row,
-                    snapshot=snapshot,
-                    session=session,
-                    context_plan=context_plan,
-                    material_bindings=material_bindings,
-                    fence=fence,
-                    history=history,
-                    provider_physical_plan=provider_physical_plan,
-                )
+                try:
+                    cache_binding_obj = await prepare_binding()
+                except AffinityDriftDetected:
+                    if rotated_affinity or str(session.get("affinity_eviction_request_id")) == request_id:
+                        raise CacheDecisionError("CACHE_AFFINITY_UNSTABLE", "Affinity changed during the preparation window")
+                    session = await rotate_affinity(self.repo, request_row, session, fence, "unexpired_handle_inaccessible")
+                    wire = build_wire_context(self.settings, snapshot, session, request_id, [])
+                    cache_binding_obj = await prepare_binding()
             except CacheDecisionError as exc:
                 raise ProviderRequestError(exc.code, exc.message) from exc
+            if upgrade:
+                plan = snapshot.get("cache_plan") or {}
+                cache_binding_obj = replace(cache_binding_obj, metadata={
+                    **cache_binding_obj.metadata,
+                    "tracks": final_track_facts(plan, cache_binding_obj.mechanism),
+                    "affinity_epoch": wire.get("affinity_epoch"),
+                    "affinity_token_hash": stable_hash(wire.get("affinity_token")) if wire.get("affinity_token") else None,
+                })
             cache_binding = cache_binding_obj.canonical(include_provider_handle=True)
             if cache_binding_obj.mechanism == "stateful_resource" and not str(cache_binding_obj.provider_handle or "").strip():
                 log_error(
@@ -377,24 +423,43 @@ class SharedExecutionRuntime:
             cache_mechanism=(cache_binding or {}).get("mechanism"),
         )
         try:
-            result = await adapter.execute(
-                V2ExecutionContext(
-                    snapshot=execution_snapshot,
-                    session=session,
-                    history=history,
-                    material_ids=material_ids,
-                    material_bindings=material_bindings,
-                    tenant_id=request_row["tenant_id"],
-                    conversation_hash=request_row["conversation_hash"],
-                    request_id=request_id,
-                    session_id=session_id,
-                    context_plan=context_plan,
-                    cache_execution_binding=cache_binding,
-                    execution_fence=(fence.canonical() if fence is not None else None),
-                    provider_physical_plan=provider_physical_plan,
+            wire["phase"] = "inference"
+            with wire_context(wire):
+                result = await adapter.execute(
+                    V2ExecutionContext(
+                        snapshot=execution_snapshot,
+                        session=session,
+                        history=history,
+                        material_ids=material_ids,
+                        material_bindings=material_bindings,
+                        tenant_id=request_row["tenant_id"],
+                        conversation_hash=request_row["conversation_hash"],
+                        request_id=request_id,
+                        session_id=session_id,
+                        context_plan=context_plan,
+                        cache_execution_binding=cache_binding,
+                        execution_fence=(fence.canonical() if fence is not None else None),
+                        provider_physical_plan=provider_physical_plan,
+                    )
                 )
-            )
         except Exception as exc:
+            if wire.get("affinity_token") and fence is not None and isinstance(exc, ProviderHTTPError):
+                route_observation = wire.get("route_observation") or {}
+                expires = cache_binding_obj.expires_at if cache_binding else None
+                handle_rejected = (
+                    (cache_binding or {}).get("mechanism") == "stateful_resource"
+                    and exc.status_code in {403, 404}
+                    and bool(expires) and not self.cache.stateful._observation_expiring({"expire_time": expires})
+                )
+                if route_observation or handle_rejected:
+                    try:
+                        await self.repo.record_cache_affinity_event(request_id, {
+                            "affinity_epoch": wire["affinity_epoch"], "route": route_observation,
+                            "handle_rejected_before_expiry": bool(handle_rejected),
+                        }, fence)
+                    except Exception as audit_exc:
+                        log_warning(logger, "cache_affinity_audit_failed", request_id=request_id,
+                                    error_type=type(audit_exc).__name__)
             provider_error = (
                 provider_http_error_observation(exc)
                 if isinstance(exc, ProviderHTTPError)
@@ -446,13 +511,6 @@ class SharedExecutionRuntime:
             result.raw_bytes,
             "application/json",
         )
-        if (str(snapshot.get("provider") or "").lower() == "gemini"
-                and ((result.observed or {}).get("cache_diagnostics") or {}).get("effective_cache_mechanism")
-                and ((result.observed or {}).get("cache_diagnostics") or {}).get("actual_cache_hit_status") != "hit"):
-            log_info(logger, "gemini_cache_unproven_response_stored",
-                     request_id=request_id, session_id=session_id,
-                     raw_response_object_id=raw_object_id,
-                     upstream_request_id=result.provider_request_id)
         output_object_id = await self._store_object(
             request_row,
             "response-output.json",
@@ -674,12 +732,11 @@ class SharedExecutionRuntime:
                     binding_prefix_token_count = cache_binding_obj.prefix.get("prefix_token_count")
                 cache_usage.update(
                     {
-                        "gemini_diagnostics": (result.observed or {}).get("cache_diagnostics"),
                         "material_reuse": material_reuse_observation,
                         "material_fingerprint": ((context_plan or {}).get("material_reuse") or {}).get("ordered_material_fingerprint"),
                         "planned_mechanism": plan.get("planned_mechanism"),
                         "implicit_prefix_fingerprint": (provider_physical_plan or {}).get("implicit_prefix_fingerprint"),
-                        "payload_hash": ((result.observed or {}).get("cache_diagnostics") or {}).get("payload_hash"),
+                        "payload_hash": wire.get("payload_sha256"),
                         "admission_status": cache_metadata.get("admission_status"),
                         "cache_resource_action": cache_resource_action,
                         "effective_cache_mechanism": cache_mechanism,
@@ -694,8 +751,20 @@ class SharedExecutionRuntime:
                 )
                 if cache_metadata.get("prefix_growth_decision") is not None:
                     cache_usage["prefix_growth_decision"] = cache_metadata.get("prefix_growth_decision")
+            if upgrade and wire.get("normalize"):
+                cache_usage["affinity_audit"] = {
+                    "affinity_epoch": wire.get("affinity_epoch"),
+                    "route": wire.get("route_observation") or {},
+                    "physical_chain": wire.get("physical_chain") or [],
+                    "semantic_fingerprint": wire.get("semantic_fingerprint"),
+                    "prefix_diff": wire.get("prefix_diff"),
+                    "compared_request_id": wire.get("compared_request_id"),
+                    "read_tokens": cache_usage.get("cache_read_tokens"),
+                    "implicit_active": bool((cache_metadata.get("tracks") or {}).get("implicit_base")),
+                    "payload_sha256": wire.get("payload_sha256"),
+                }
+                cache_usage["cache_tracks"] = cache_metadata.get("tracks")
             compact_result["cache"] = {
-                "gemini_diagnostics": ((result.observed or {}).get("cache_diagnostics") if str(snapshot.get("provider") or "").lower() == "gemini" else None),
                 "material_reuse": material_reuse_observation if str(snapshot.get("provider") or "").lower() == "gemini" else None,
                 "material_fingerprint": ((context_plan or {}).get("material_reuse") or {}).get("ordered_material_fingerprint"),
                 "requested_cache_mode": snapshot.get("requested_cache_mode"),
@@ -706,12 +775,14 @@ class SharedExecutionRuntime:
                 "cache_cost_decision": cache_metadata.get("cache_cost_decision"),
                 "planned_mechanism": plan.get("planned_mechanism"),
                 "effective_cache_mechanism": cache_mechanism,
+                "cache_tracks": cache_metadata.get("tracks"),
+                "prefix_diff": wire.get("prefix_diff"),
                 "execution_mechanism": cache_mechanism,
                 # At this point the physical CacheExecutionBinding has been
                 # installed and sealed, so any final-threshold guard is resolved.
                 "resolution_status": "finalized",
                 "decision_reason": cache_decision_reason,
-                **cache_usage,
+                **{k: v for k, v in cache_usage.items() if k != "affinity_audit"},
             }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
@@ -727,7 +798,9 @@ class SharedExecutionRuntime:
                 "request_id": request_row["id"],
                 "created_at": utcnow().isoformat(),
             }
-            entry.update(result.history_entry)
+            entry.update(
+                canonical_structure(result.history_entry) if wire.get("normalize") else result.history_entry
+            )
             new_history.append(entry)
             history_object_id = await self._store_history(
                 request_row,

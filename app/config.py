@@ -1,8 +1,9 @@
 from functools import lru_cache
 import hashlib
 import os
+from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +19,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     dependency_http_log_level: str = "WARNING"
     uvicorn_access_log: bool = False
+
+    relay_http_wire_log_enabled: bool = False
+    relay_http_wire_log_providers: str = "*"
+    relay_http_wire_log_max_body_bytes: int = Field(262144, ge=1)
+    relay_http_wire_log_redact_auth: bool = True
+    relay_http_wire_log_directory: str = "/tmp/relay-http-wire"
+    relay_inline_cache_budget_bytes: int = Field(60 * 1024 * 1024, gt=0, le=60 * 1024 * 1024)
+    relay_cache_roll_alpha: float = Field(0.5, gt=0, allow_inf_nan=False)
+    relay_grok_cache_mode: Literal["unified_v2", "legacy_v1"] = "unified_v2"
 
     relay_api_token: SecretStr
 

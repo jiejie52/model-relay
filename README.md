@@ -1,6 +1,6 @@
-# Model Relay 6.4.2 — Gemini 缓存未证实命中的完整上游响应日志
+# Model Relay 6.5.0
 
-在 6.4.1 基础上，对已启用缓存但没有 Provider 命中证据的 Gemini 请求，记录 AIHubMix 响应头及完整原始响应实体。正文按片段写入日志，可依据请求 ID、片段序号及 SHA256 还原；敏感响应头隐去。API/Worker 均升级为 6.4.2；无需数据库迁移、额外模型调用或调用方改动。见 [RELEASE_NOTES_6.4.2.md](RELEASE_NOTES_6.4.2.md)。
+本版升级缓存执行控制面，增加分段指纹、双轨计划、会话粘性与派发前淘汰、60 MiB 附件缓存筛选和 HTTP 传输诊断。升级前应用 `sql/008_cache_v65_upgrade.sql`，然后同时替换 API 和 Worker。部署与验证说明见 [RELEASE_NOTES_6.5.0.md](RELEASE_NOTES_6.5.0.md)。
 
 # Model Relay 6.4.1 — Gemini 业务链内缓存诊断
 

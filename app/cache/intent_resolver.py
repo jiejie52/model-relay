@@ -35,6 +35,7 @@ class CacheIntentResolver:
         reuse_evidence: dict[str, Any] | None = None,
         attachment_evidence: dict[str, Any] | None = None,
     ) -> CacheIntentPlan:
+        upgrade = context_plan.get("cache_upgrade") or {}
         mode = str(requested_mode or "auto").strip().lower()
         preference = str(requested_mechanism or "auto").strip().lower()
         if mode not in {"off", "auto", "on"}:
@@ -68,7 +69,7 @@ class CacheIntentResolver:
         # that never supplied a mechanism preference. It does not certify a
         # mechanism on the caller's behalf or authorize a new forced preference.
         legacy_gemini_attempt = (
-            not mechanism_explicit and str(provider or "").lower() == "gemini"
+            not upgrade and not mechanism_explicit and str(provider or "").lower() == "gemini"
             and str(model or "").lower().startswith("gemini-")
         )
         profiles = contract.get("mechanism_profiles") if isinstance(contract.get("mechanism_profiles"), dict) else {}
@@ -172,6 +173,12 @@ class CacheIntentResolver:
             and bool(str(provider or "").lower() == "gemini")
         )
         stable_prefix_ids = context_plan.get("stable_prefix_segment_ids") or []
+        cold_start = bool(
+            upgrade and str(provider or "").lower() == "gemini"
+            and stable_prefix_ids and stable_large_attachment
+            and (int(context_plan.get("history_version") or 0) == 0
+                 or use_stats.get("observed_compatible_uses", 0) == 0)
+        )
         minimum_observations = economics.get("minimum_observations", 3)
         if type(minimum_observations) is not int or minimum_observations < 2:
             minimum_observations = 3
@@ -216,6 +223,7 @@ class CacheIntentResolver:
             if mode == "auto" and str(provider or "").lower() == "gemini":
                 select_explicit = resource_hint or (
                     explicit_assessment_candidate and explicit_first_read_advantage
+                    or cold_start
                 )
                 preferred = (
                     ["stateful_resource", "implicit_prefix", "breakpoint"] if select_explicit
@@ -252,6 +260,11 @@ class CacheIntentResolver:
                     cfg["threshold_mode"] = "provider_create"
                     cfg["threshold_admission_override"] = "provider_create"
             threshold = str(cfg.get("threshold_mode") or "unknown").lower()
+            if (upgrade and mechanism == "breakpoint" and threshold == "provider_enforced"
+                    and (protocol_profile or {}).get("protocol") == "claude_messages"):
+                # Certified native thresholds are enforced by Claude. The
+                # projection validates the anchor and preserves message order.
+                cfg["native_breakpoints"] = True
             minimum = cfg.get("minimum_cacheable_tokens")
             below = not stable_prefix_ids
             uncertain = False
@@ -301,7 +314,14 @@ class CacheIntentResolver:
                     "observed_implicit_samples": use_stats.get("observed_implicit_samples", 0),
                     "certified_implicit_alternative": "implicit_prefix" in certified,
                     "trial_implicit_alternative": "implicit_prefix" in trials,
-                    "enable_history_growth": economics.get("enable_history_growth") is True,
+                    "enable_history_growth": economics.get("enable_history_growth") is True or bool(upgrade),
+                    **({"roll_alpha": upgrade["roll_alpha"]} if upgrade.get("roll_alpha") is not None else {}),
+                    **({
+                        "cold_start_candidate": cold_start,
+                        "cold_start_implicit_hit_rate": economics.get("cold_start_implicit_hit_rate"),
+                        "cold_start_max_tokens": economics.get("cold_start_max_tokens"),
+                        "use_snapshot_cost": True,
+                    } if upgrade else {}),
                     "minimum_additional_tokens": economics.get("minimum_additional_tokens", 4096),
                     "new_economics_policy": "relative_cache/2" if str(provider or "").lower() == "gemini" else "legacy_forecast/1",
                     "attachment_evidence": dict(attachment),
@@ -327,6 +347,7 @@ class CacheIntentResolver:
                     break
 
             selection_evidence = {
+                **({"controlled_candidate": next((name for name, _, _ in eligible if name in {"stateful_resource", "breakpoint"}), None)} if upgrade else {}),
                 "existing_resource_candidate": resource_hint,
                 "resource_hint_is_compatibility_proof": False,
                 "stable_attachment_bytes": attachment.get("stable_attachment_bytes", 0),
@@ -370,9 +391,12 @@ class CacheIntentResolver:
         # on+omitted-mechanism preserves the documented 'below minimum -> None'
         # behavior of previously frozen v3 Sessions.
         reason = rejections[0]["reason"] if rejections else "mechanism_unavailable"
-        if mode == "on" and mechanism_explicit:
+        if mode == "on" and mechanism_explicit and not (upgrade and reason == "below_minimum"):
             raise CacheDecisionError("CACHE_MECHANISM_INELIGIBLE", "Requested forced cache mechanism is ineligible", reason=reason)
-        if mode == "on" and reason not in {"below_minimum", "context_assessment_uncertain"}:
+        if mode == "on" and (
+            reason not in {"below_minimum", "context_assessment_uncertain"}
+            or (upgrade and reason == "context_assessment_uncertain")
+        ):
             raise CacheDecisionError("CACHE_THRESHOLD_UNVERIFIED", "Forced cache eligibility cannot be proved", reason=reason)
         if (mode == "on" and reason == "context_assessment_uncertain"
             and str(provider or "").lower() == "gemini"
