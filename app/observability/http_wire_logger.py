@@ -81,6 +81,14 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if isinstance(payload, dict):
                 payload = normalize_native_payload(payload, unordered_tools=ctx.get("unordered_tools") is True)
                 body = serialize_wire(payload)
+                if self.provider == "gemini" and "systemInstruction" in payload and "contents" in payload:
+                    # Canonical serialization sorts keys, placing "contents"
+                    # first. Move only the top-level systemInstruction field;
+                    # retain canonical bytes for every nested value and other key.
+                    instruction = serialize_wire({"systemInstruction": payload["systemInstruction"]})
+                    remainder = serialize_wire({key: value for key, value in payload.items()
+                                                if key != "systemInstruction"})
+                    body = instruction[:-1] + b"," + remainder[1:]
                 request.headers.pop("transfer-encoding", None)
                 request.headers["content-length"] = str(len(body))
                 request = httpx.Request(request.method, request.url, headers=request.headers,

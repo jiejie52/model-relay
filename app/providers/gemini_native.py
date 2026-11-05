@@ -77,6 +77,15 @@ class GeminiNativeAdapter:
         # provider_payload field can re-introduce a forbidden top-level key.
         self._enforce_cached_inference_wire(payload, context)
 
+        # Preserve the native Gemini JSON field values and frozen physical plan;
+        # only put the stable instruction before the dynamic contents on the
+        # final outbound payload (also when wire normalization is disabled).
+        if "systemInstruction" in payload and "contents" in payload:
+            payload = {
+                "systemInstruction": payload["systemInstruction"],
+                **{key: value for key, value in payload.items() if key != "systemInstruction"},
+            }
+
         model = str(context.snapshot["model"])
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
         headers = {
