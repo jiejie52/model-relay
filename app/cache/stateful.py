@@ -947,6 +947,10 @@ class StatefulResourceManager:
         alpha = economics.get("roll_alpha")
         if isinstance(alpha, (int, float)) and alpha > 0:
             minimum = max(minimum, math.ceil(existing_tokens * alpha))
+        cap = economics.get("max_uncached_tokens")
+        if type(cap) is int and cap > 0:
+            proportional = math.ceil(existing_tokens * float(alpha or .5))
+            minimum = max(int(economics.get("minimum_roll_delta") or 2048), min(proportional, cap))
         if target_tokens - existing_tokens < minimum:
             return False, {
                 "decision": "reuse", "reason": "additional_prefix_too_small",
@@ -978,7 +982,8 @@ class StatefulResourceManager:
         should_grow = economic.get("allow") is True
         return should_grow, {
             "decision": "grow" if should_grow else "reuse",
-            "reason": str(economic.get("reason") or "growth_economics_unavailable"),
+            "reason": ("hysteresis_or_cap_triggered_roll" if should_grow and type(cap) is int
+                       else str(economic.get("reason") or "growth_economics_unavailable")),
             "existing_prefix_tokens": existing_tokens,
             "target_prefix_tokens": target_tokens,
             "additional_prefix_tokens": target_tokens - existing_tokens,

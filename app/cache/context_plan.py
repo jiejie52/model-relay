@@ -75,7 +75,8 @@ def build_context_plan(
         )
         ordinal += 1
 
-    if session.get("context_policy") == "conversation" and history_identity:
+    if (session.get("context_policy") == "conversation"
+            and session.get("history_mode", "cumulative") != "ephemeral_turn" and history_identity):
         segments.append(
             {
                 "segment_id": f"seg-{ordinal}",
@@ -153,6 +154,12 @@ def build_context_plan(
     }
     if isinstance(snapshot.get("cache_upgrade"), dict):
         plan["cache_upgrade"] = snapshot["cache_upgrade"]
+        if int(snapshot["cache_upgrade"].get("version") or 0) >= 2:
+            plan["session_context"] = {
+                "history_mode": snapshot.get("history_mode", "cumulative"),
+                "sticky_scope": snapshot.get("sticky_scope", "session"),
+                "supply_group_id": snapshot.get("supply_group_id"),
+            }
         plan["semantic_fingerprint"] = stable_hash({
             "segments": [{k: v for k, v in segment.items() if k != "source_ref"} for segment in segments],
             "materials": [segment["source_ref"] for segment in segments if segment["domain"] == "material"],

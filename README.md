@@ -1,6 +1,6 @@
-# Model Relay 6.5.0
+# Model Relay 6.6.0
 
-本版升级缓存执行控制面，增加分段指纹、双轨计划、会话粘性与派发前淘汰、60 MiB 附件缓存筛选和 HTTP 传输诊断。升级前应用 `sql/008_cache_v65_upgrade.sql`，然后同时替换 API 和 Worker。部署与验证说明见 [RELEASE_NOTES_6.5.0.md](RELEASE_NOTES_6.5.0.md)。
+本版合入《改造方案补丁1》，增加 Gemini 同供应族首轮协议物化、单轮共享前缀上下文、1024 token 隐式门槛、按协议区分的亲和淘汰，以及显式缓存请求体瘦身与尾轮守卫。普通 Gemini 请求在 Adapter 和 HTTP 规范化两处保证 `systemInstruction` 位于顶层第一字段。已部署 6.5.0 的实例先执行 `sql/009_cache_v66_patch.sql`，再同时更新 API 与 Worker。详见 [RELEASE_NOTES_6.6.0.md](RELEASE_NOTES_6.6.0.md)。
 
 # Model Relay 6.4.1 — Gemini 业务链内缓存诊断
 

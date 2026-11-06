@@ -80,7 +80,9 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 payload = None
             if isinstance(payload, dict):
                 payload = normalize_native_payload(payload, unordered_tools=ctx.get("unordered_tools") is True)
-                body = serialize_wire(payload)
+                # Native Gemini requires its system field to lead the top level.
+                # Nested objects and every other top-level field remain canonical.
+                body = serialize_wire(payload, system_instruction_first=True)
                 request.headers.pop("transfer-encoding", None)
                 request.headers["content-length"] = str(len(body))
                 request = httpx.Request(request.method, request.url, headers=request.headers,

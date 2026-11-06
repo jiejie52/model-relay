@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from ..core.idempotency import caller_intent_hash, request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
 from ..cache.affinity import session_affinity_token
+from ..routing.gemini_supply_group import context_settings
 from ..cache.planner import freeze_dual_track_plan
 from ..core.context_normalizer import canonical_structure, normalize_structured_output
 from ..cache.context_plan import build_context_plan
@@ -158,6 +159,10 @@ def _session_response(row: dict[str, Any]) -> SessionResponse:
         context_policy=row.get("context_policy") or "conversation",
         material_ids=[str(x) for x in material_manifest] if isinstance(material_manifest, list) else [],
         history_version=int(row.get("history_version") or 0),
+        route_pin_state=str(row.get("route_pin_state") or "pinned"),
+        supply_group_id=row.get("supply_group_id"),
+        history_mode=str(row.get("history_mode") or "cumulative"),
+        sticky_scope=str(row.get("sticky_scope") or "session"),
         active_request_id=UUID(row["active_request_id"]) if row.get("active_request_id") else None,
         execution_pool=row.get("execution_pool") or "railway-default",
         route_revision=str(route.get("route_revision")) if route.get("route_revision") else None,
@@ -853,7 +858,7 @@ async def create_session(
         "conversation_hash": body.conversation_hash,
         "provider": body.provider,
         "model": body.model,
-        "context_policy": body.context_policy,
+        "context_policy": body.context_policy if isinstance(body.context_policy, str) else body.context_policy.model_dump(mode="json"),
         "material_ids": body.material_ids,
         "execution_pool": body.execution_pool or settings.execution_pool,
         "capability_requirements": body.capability_requirements.model_dump(mode="json"),
@@ -877,12 +882,7 @@ async def create_session(
         return _session_response(existing)
 
     try:
-        route = _route_resolver(request).resolve(
-            provider=body.provider,
-            model=body.model,
-            purpose="session",
-            requirements=body.capability_requirements.model_dump(mode="json"),
-        )
+        route, route_group, route_pin_state = _route_resolver(request).resolve_on_session_create(body)
         _route_resolver(request).handle_legacy_hint(
             client_hint=body.connection_id,
             resolved=route,
@@ -922,9 +922,15 @@ async def create_session(
         route=route,
     )
 
+    if any(str(key).startswith("_relay_") for key in body.metadata):
+        raise HTTPException(status_code=422, detail={"code": "SESSION_INTERNAL_METADATA_FORBIDDEN"})
     session_id = uuid4()
     session_metadata = dict(body.metadata)
     session_metadata["_relay_route"] = route.internal_metadata()
+    context = context_settings(body.context_policy)
+    session_metadata["_relay_cache_v66"] = context
+    if route_group:
+        session_metadata["_relay_route_group"] = route_group
     if route.provider == "gemini":
         # Physical provider layout is frozen at Session creation. Existing
         # Sessions created before this version keep their prior wire semantics.
@@ -946,7 +952,11 @@ async def create_session(
             "history_object_id": None,
             "signed_url_expires_at": None,
             "history_version": 0,
-            "context_policy": body.context_policy,
+            "context_policy": context["context_policy"],
+            "history_mode": context["history_mode"],
+            "sticky_scope": context["sticky_scope"],
+            "route_pin_state": route_pin_state,
+            "supply_group_id": route.supply_group_id,
             "material_manifest": body.material_ids,
             "active_request_id": None,
             "execution_pool": route.execution_pool,
@@ -1165,6 +1175,33 @@ async def create_request(
         )
         return await _request_envelope_hydrated(request, existing)
 
+    pending_pin = None
+    session_metadata = session.get("metadata") or {}
+    is_v66 = isinstance(session_metadata.get("_relay_cache_v66"), dict)
+    if is_v66:
+        try:
+            selected_route = _route_resolver(request).materialize_on_first_request(session, body)
+        except RouteResolutionError as exc:
+            raise HTTPException(status_code=409, detail=exc.public_detail()) from exc
+        session = {**session, "connection_id": selected_route["connection_id"],
+                   "metadata": {**session_metadata, "_relay_route": selected_route}}
+        connection_id = str(session["connection_id"])
+        effective_instructions = body.instructions
+        if effective_instructions is None and session.get("history_mode") == "ephemeral_turn":
+            effective_instructions = session.get("frozen_instructions")
+        session["system_semantic_hash"] = stable_hash(effective_instructions or "")
+        affinity_token = session_affinity_token(settings, session, int(session.get("affinity_epoch") or 1))
+        session["session_affinity_token"] = affinity_token
+        pending_pin = {
+            "route": selected_route,
+            "group_hash": (session_metadata.get("_relay_route_group") or {}).get("group_hash"),
+            "affinity_token": affinity_token,
+            "instructions": effective_instructions,
+            "system_semantic_hash": session["system_semantic_hash"],
+        }
+    else:
+        effective_instructions = body.instructions
+
     effective_material_ids = list(body.material_ids)
     if session.get("context_policy") == "conversation" and isinstance(session.get("material_manifest"), list):
         effective_material_ids = [str(x) for x in session.get("material_manifest") or []] + effective_material_ids
@@ -1330,7 +1367,7 @@ async def create_request(
         "tenant_id": tenant_id,
         "conversation_hash": conversation_hash,
         "input": body.input,
-        "instructions": body.instructions,
+        "instructions": effective_instructions,
         "material_ids": body.material_ids,
         "effective_material_ids": effective_material_ids,
         "material_hashes": material_hashes,
@@ -1364,7 +1401,7 @@ async def create_request(
     cache_plan: dict[str, Any] | None = None
     history_identity: dict[str, Any] | None = None
     if cache_contract_session:
-        if session.get("history_object_id"):
+        if session.get("history_mode", "cumulative") != "ephemeral_turn" and session.get("history_object_id"):
             history_obj = await repo.get_object(
                 str(session["history_object_id"]),
                 tenant_id=tenant_id,
@@ -1391,6 +1428,18 @@ async def create_request(
         if body.requested_cache_mode != "off" and grok_mode != "legacy_v1":
             base_snapshot["input"] = canonical_structure(base_snapshot["input"])
             base_snapshot["structured_output"] = normalize_structured_output(base_snapshot["structured_output"])
+            plan_seed.update(base_snapshot)
+        if is_v66:
+            cache_upgrade.update({
+                "version": 2,
+                "max_uncached_tokens": settings.relay_cache_roll_max_uncached_tokens,
+                "minimum_roll_delta": settings.relay_cache_roll_min_delta_tokens,
+                "implicit_min_tokens": settings.relay_implicit_prefix_min_tokens,
+                "tail_min_chars": settings.relay_tail_turn_min_reserve_chars,
+            })
+            base_snapshot["history_mode"] = str(session.get("history_mode") or "cumulative")
+            base_snapshot["sticky_scope"] = str(session.get("sticky_scope") or "session")
+            base_snapshot["supply_group_id"] = session.get("supply_group_id")
             plan_seed.update(base_snapshot)
         plan_seed["cache_upgrade"] = cache_upgrade
         context_plan = build_context_plan(
@@ -1606,6 +1655,7 @@ async def create_request(
                 expected_history_version=int(session.get("history_version") or 0),
                 metadata=accept_metadata,
                 job_id=job_id,
+                route_pin=pending_pin,
             )
         else:
             row = await repo.accept_request(
@@ -1626,6 +1676,10 @@ async def create_request(
             )
     except SupabaseError as exc:
         text = exc.body
+        if "ROUTE_PIN_CONFLICT" in text or "ROUTE_GROUP_MISMATCH" in text:
+            raise HTTPException(status_code=409, detail={
+                "code": "ROUTE_PIN_CONFLICT", "message": "Reload the Session and retry the same logical Request",
+            }) from exc
         if "SESSION_BUSY" in text:
             raise HTTPException(status_code=409, detail="SESSION_BUSY") from exc
         if "IDEMPOTENCY_CONFLICT" in text:

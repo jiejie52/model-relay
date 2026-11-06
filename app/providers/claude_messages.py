@@ -40,7 +40,8 @@ class ClaudeMessagesV2Adapter:
 
     async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         messages: list[dict[str, Any]] = []
-        if context.session.get("context_policy") == "conversation":
+        if (context.session.get("context_policy") == "conversation"
+                and context.snapshot.get("history_mode", context.session.get("history_mode", "cumulative")) != "ephemeral_turn"):
             for turn in context.history:
                 transport = turn.get("transport_history") if isinstance(turn, dict) else None
                 if not isinstance(transport, dict) or transport.get("kind") != "claude_messages":

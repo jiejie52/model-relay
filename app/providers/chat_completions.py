@@ -48,7 +48,8 @@ class ChatCompletionsV2Adapter:
         if instructions:
             messages.append({"role": "system", "content": str(instructions)})
 
-        if context.session.get("context_policy") == "conversation":
+        if (context.session.get("context_policy") == "conversation"
+                and context.snapshot.get("history_mode", context.session.get("history_mode", "cumulative")) != "ephemeral_turn"):
             for turn in context.history:
                 transport = turn.get("transport_history") if isinstance(turn, dict) else None
                 if not isinstance(transport, dict) or transport.get("kind") != "chat_completions":

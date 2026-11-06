@@ -202,6 +202,10 @@ class GeminiAIHubMixGenAIClient:
                     display_name=display_name,
                     contents=contents,
                     system_instruction=system_instruction,
+                    **({
+                        "tools": cached_prefix.get("tools"),
+                        "tool_config": cached_prefix.get("toolConfig"),
+                    } if cached_prefix.get("tools") or cached_prefix.get("toolConfig") else {}),
                     ttl=f"{int(ttl_seconds)}s",
                 ),
             )

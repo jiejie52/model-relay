@@ -13,6 +13,7 @@ from ..cache.affinity import AffinityDriftDetected, build_wire_context, drift_re
 from ..cache.planner import final_track_facts
 from ..observability.http_wire_logger import wire_context
 from .context_normalizer import canonical_structure
+from .cache_usage_normalizer import normalize_observed_cache_audit
 from ..cache.contracts import CacheDecisionError, ExecutionFence
 from ..cache.orchestrator import CacheOrchestrator
 from ..cache.usage import normalize_cache_usage
@@ -100,7 +101,12 @@ class SharedExecutionRuntime:
         )
         self._assert_frozen_route(session, snapshot, request_id=request_id)
         history: list[dict[str, Any]] = []
-        if session.get("context_policy") == "conversation" and session.get("history_object_id"):
+        cumulative_history = snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn"
+        native_gemini = (
+            str(snapshot.get("provider") or "") == "gemini"
+            and snapshot.get("protocol", "gemini_native") == "gemini_native"
+        )
+        if cumulative_history and session.get("context_policy") == "conversation" and session.get("history_object_id"):
             loaded = await self._load_json_object(
                 session["history_object_id"],
                 tenant_id=request_row["tenant_id"],
@@ -140,7 +146,11 @@ class SharedExecutionRuntime:
             if wire["normalize"]:
                 affinity_rows = await self.repo.recent_affinity_observations(request_row)
             if affinity_rows and wire.get("affinity_token"):
-                reason = drift_reason(affinity_rows, epoch=wire["affinity_epoch"])
+                reason = drift_reason(
+                    affinity_rows, epoch=wire["affinity_epoch"],
+                    min_tokens=int(upgrade.get("implicit_min_tokens") or 2048),
+                    strategy=wire["affinity_eviction_strategy"],
+                )
                 if reason and str(session.get("affinity_eviction_request_id")) != request_id:
                     session = await rotate_affinity(self.repo, request_row, session, fence, reason)
                     rotated_affinity = True
@@ -165,7 +175,7 @@ class SharedExecutionRuntime:
             request_id=request_id,
             session_id=session_id,
             gemini_inline_cache_strategy=(
-                str(snapshot.get("provider") or "") == "gemini"
+                native_gemini
                 and uses_inline_cache_transport_layout(session)
             ),
             gemini_session_material_ids=(
@@ -211,7 +221,7 @@ class SharedExecutionRuntime:
         material_reuse_observation = None
         if (
             is_v3
-            and str(snapshot.get("provider") or "") == "gemini"
+            and native_gemini
             and uses_supported_physical_layout(session)
         ):
             if context_plan is None:
@@ -760,10 +770,33 @@ class SharedExecutionRuntime:
                     "prefix_diff": wire.get("prefix_diff"),
                     "compared_request_id": wire.get("compared_request_id"),
                     "read_tokens": cache_usage.get("cache_read_tokens"),
-                    "implicit_active": bool((cache_metadata.get("tracks") or {}).get("implicit_base")),
+                    "implicit_active": bool((cache_metadata.get("tracks") or {}).get(
+                        "implicit_effective" if int(upgrade.get("version") or 0) >= 2 else "implicit_base"
+                    )),
                     "payload_sha256": wire.get("payload_sha256"),
                 }
                 cache_usage["cache_tracks"] = cache_metadata.get("tracks")
+            if int(upgrade.get("version") or 0) >= 2:
+                audit = normalize_observed_cache_audit(
+                    protocol=str(snapshot.get("protocol") or ""), response_json=result.raw_json,
+                    response_headers=wire.get("route_observation") or {},
+                    track_facts=cache_metadata.get("tracks") or {},
+                    payload_stripped_bytes=int((result.observed or {}).get("payload_stripped_bytes") or 0),
+                )
+                action = (
+                    "BYPASS_OFF" if snapshot.get("requested_cache_mode") == "off"
+                    else "IMPLICIT_WATCHDOG_BELOW_THRESHOLD" if cache_decision_reason == "insufficient_prefix_length"
+                    else "ROLL_STATEFUL_SNAPSHOT" if cache_resource_action == "created" and cache_metadata.get("prefix_growth_decision")
+                    else "CREATE_INITIAL_STATEFUL" if cache_resource_action == "created"
+                    else "REUSE_STATEFUL_WITH_SUFFIX" if cache_mechanism == "stateful_resource"
+                    else "BREAKPOINT_AND_IMPLICIT" if cache_mechanism == "breakpoint"
+                    else "IMPLICIT_ONLY_ACTIVE" if cache_mechanism == "implicit_prefix"
+                    else "UNCACHED_SAME_CONTEXT"
+                )
+                cache_usage.update(
+                    observed_cache_audit=audit, payload_stripped_bytes=audit["payload_stripped_bytes"],
+                    cache_decision_reason=cache_decision_reason, action=action,
+                )
             compact_result["cache"] = {
                 "material_reuse": material_reuse_observation if str(snapshot.get("provider") or "").lower() == "gemini" else None,
                 "material_fingerprint": ((context_plan or {}).get("material_reuse") or {}).get("ordered_material_fingerprint"),
@@ -792,7 +825,7 @@ class SharedExecutionRuntime:
             compact_result["text_truncated"] = True
 
         history_object_id = None
-        if session.get("context_policy") == "conversation":
+        if cumulative_history and session.get("context_policy") == "conversation":
             new_history = list(history)
             entry = {
                 "request_id": request_row["id"],
