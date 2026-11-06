@@ -173,10 +173,6 @@ class CacheIntentResolver:
             and bool(str(provider or "").lower() == "gemini")
         )
         stable_prefix_ids = context_plan.get("stable_prefix_segment_ids") or []
-        v66 = int(upgrade.get("version") or 0) >= 2
-        chat_watchdog = v66 and (protocol_profile or {}).get("protocol") == "chat_completions" and (
-            contract.get("implicit_watchdog") or profile_cache.get("implicit_watchdog")
-        )
         cold_start = bool(
             upgrade and str(provider or "").lower() == "gemini"
             and stable_prefix_ids and stable_large_attachment
@@ -225,7 +221,7 @@ class CacheIntentResolver:
 
         if preference == "auto":
             if mode == "auto" and str(provider or "").lower() == "gemini":
-                select_explicit = (v66 and (protocol_profile or {}).get("protocol") == "gemini_native") or resource_hint or (
+                select_explicit = resource_hint or (
                     explicit_assessment_candidate and explicit_first_read_advantage
                     or cold_start
                 )
@@ -263,12 +259,6 @@ class CacheIntentResolver:
                 if str(cfg.get("threshold_mode") or "unknown").lower() == "unknown":
                     cfg["threshold_mode"] = "provider_create"
                     cfg["threshold_admission_override"] = "provider_create"
-            if chat_watchdog and mechanism == "implicit_prefix":
-                cfg["minimum_cacheable_tokens"] = max(
-                    int(cfg.get("minimum_cacheable_tokens") or 0), int(upgrade["implicit_min_tokens"]),
-                )
-                cfg["implicit_watchdog"] = True
-                cfg["final_threshold_guard"] = True
             threshold = str(cfg.get("threshold_mode") or "unknown").lower()
             if (upgrade and mechanism == "breakpoint" and threshold == "provider_enforced"
                     and (protocol_profile or {}).get("protocol") == "claude_messages"):
@@ -279,9 +269,7 @@ class CacheIntentResolver:
             below = not stable_prefix_ids
             uncertain = False
             if not below:
-                if chat_watchdog and mechanism == "implicit_prefix":
-                    uncertain = True
-                elif mechanism in trials:
+                if mechanism in trials:
                     # Provider decides whether this full-context request hits.
                     # No local token threshold or invented reuse count applies.
                     pass
@@ -333,10 +321,6 @@ class CacheIntentResolver:
                         "cold_start_implicit_hit_rate": economics.get("cold_start_implicit_hit_rate"),
                         "cold_start_max_tokens": economics.get("cold_start_max_tokens"),
                         "use_snapshot_cost": True,
-                        **({
-                            "max_uncached_tokens": upgrade["max_uncached_tokens"],
-                            "minimum_roll_delta": upgrade["minimum_roll_delta"],
-                        } if v66 else {}),
                     } if upgrade else {}),
                     "minimum_additional_tokens": economics.get("minimum_additional_tokens", 4096),
                     "new_economics_policy": "relative_cache/2" if str(provider or "").lower() == "gemini" else "legacy_forecast/1",
@@ -407,8 +391,6 @@ class CacheIntentResolver:
         # on+omitted-mechanism preserves the documented 'below minimum -> None'
         # behavior of previously frozen v3 Sessions.
         reason = rejections[0]["reason"] if rejections else "mechanism_unavailable"
-        if chat_watchdog and reason == "below_minimum":
-            return none("insufficient_prefix_length", rejections)
         if mode == "on" and mechanism_explicit and not (upgrade and reason == "below_minimum"):
             raise CacheDecisionError("CACHE_MECHANISM_INELIGIBLE", "Requested forced cache mechanism is ineligible", reason=reason)
         if mode == "on" and (

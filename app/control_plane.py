@@ -174,7 +174,6 @@ class ModelOffering:
     model_pattern: str
     connection_id: str
     capability_contract_id: str
-    supply_group_id: str | None = None
     protocol_profile_id: str | None = None
     cache_policy_id: str | None = None
     priority: int = 100
@@ -197,7 +196,6 @@ class ModelOffering:
     def canonical(self) -> dict[str, Any]:
         return {
             "offering_id": self.offering_id,
-            **({"supply_group_id": self.supply_group_id} if self.supply_group_id else {}),
             "provider": self.provider,
             "model_pattern": self.model_pattern,
             "connection_id": self.connection_id,
@@ -562,11 +560,6 @@ class ModelControlPlane:
                 requires_file_adapter=True,
             ),
         ]
-        from .routing.gemini_supply_group import extend_gemini_supplies
-
-        contracts, protocol_profiles, offerings = extend_gemini_supplies(
-            contracts, protocol_profiles, offerings, settings,
-        )
         return cls(
             revision=settings.model_control_plane_revision,
             connections=connections,
@@ -795,7 +788,6 @@ class ModelControlPlane:
             raise ValueError("Model offerings require offering_id, provider, model_pattern, connection_id and capability_contract_id")
         return ModelOffering(
             **required,
-            supply_group_id=(str(value["supply_group_id"]) if value.get("supply_group_id") else None),
             protocol_profile_id=(str(value.get("protocol_profile_id")) if value.get("protocol_profile_id") else None),
             cache_policy_id=(str(value.get("cache_policy_id")) if value.get("cache_policy_id") else None),
             priority=int(value.get("priority", 100)),

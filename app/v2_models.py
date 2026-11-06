@@ -29,12 +29,6 @@ class SessionCapabilityRequirements(BaseModel):
     channel_allowlist: list[str] = Field(default_factory=list)
 
 
-class SessionContextPolicy(BaseModel):
-    history_mode: Literal["cumulative", "ephemeral_turn"] = "cumulative"
-    sticky_scope: Literal["session", "conversation_family"] = "session"
-    workload_hint: Literal["auto", "multimodal_or_long_doc", "pure_text_qa"] = "auto"
-
-
 class SessionCreateRequest(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=200)
     conversation_hash: str = Field(min_length=1, max_length=256)
@@ -43,7 +37,7 @@ class SessionCreateRequest(BaseModel):
     # Contract 2.1 compatibility only. Relay RouteResolver is authoritative and
     # never lets this legacy hint select or override an Adapter.
     connection_id: str | None = Field(default=None, max_length=120)
-    context_policy: ContextPolicy | SessionContextPolicy = "conversation"
+    context_policy: ContextPolicy = "conversation"
     material_ids: list[str] = Field(default_factory=list)
     execution_pool: str | None = Field(default=None, max_length=120)
     capability_requirements: SessionCapabilityRequirements = Field(default_factory=SessionCapabilityRequirements)
@@ -60,10 +54,6 @@ class SessionResponse(BaseModel):
     context_policy: ContextPolicy
     material_ids: list[str]
     history_version: int
-    route_pin_state: str = "pinned"
-    supply_group_id: str | None = None
-    history_mode: str = "cumulative"
-    sticky_scope: str = "session"
     active_request_id: UUID | None = None
     execution_pool: str
     route_revision: str | None = None
@@ -113,10 +103,6 @@ class SessionRequestCreate(BaseModel):
 class CacheSummary(BaseModel):
     gemini_diagnostics: dict[str, Any] | None = None
     cache_tracks: dict[str, Any] | None = None
-    cache_decision_reason: str | None = None
-    payload_stripped_bytes: int = 0
-    observed_cache_audit: dict[str, Any] | None = None
-    action: str | None = None
     prefix_diff: dict[str, Any] | None = None
     material_reuse: dict[str, Any] | None = None
     material_fingerprint: str | None = None

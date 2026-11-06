@@ -16,8 +16,7 @@ def prepare_implicit_prefix_binding(
     provider_physical_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = plan.get("mechanism_config") if isinstance(plan.get("mechanism_config"), dict) else {}
-    if (str(provider or "").strip().lower() == "gemini"
-            and (snapshot or {}).get("protocol", "gemini_native") == "gemini_native"):
+    if str(provider or "").strip().lower() == "gemini":
         physical = provider_physical_plan if isinstance(provider_physical_plan, dict) else {}
         if (
             str(physical.get("layout_version") or "") != "gemini-physical-cache-layout/9"

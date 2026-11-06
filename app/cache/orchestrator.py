@@ -7,7 +7,6 @@ from .breakpoints import prepare_breakpoint_binding
 from .contracts import CacheDecisionError, CacheExecutionBinding, ExecutionFence, provider_managed_trial_enabled
 from .prefix import prepare_implicit_prefix_binding
 from .stateful import StatefulResourceManager
-from .watchdog import assess_implicit_prefix
 
 
 class CacheOrchestrator:
@@ -49,7 +48,6 @@ class CacheOrchestrator:
                 context_plan=context_plan,
                 material_binding_hash=material_binding_hash,
                 provider_physical_plan=provider_physical_plan,
-                history=history,
             )
 
         if mechanism == "breakpoint":
@@ -124,7 +122,6 @@ class CacheOrchestrator:
                         context_plan=context_plan,
                         material_binding_hash=material_binding_hash,
                         provider_physical_plan=provider_physical_plan,
-                        history=history,
                     )
                     fallback_metadata = dict(implicit_binding.metadata or {})
                     fallback_metadata.update({
@@ -178,36 +175,7 @@ class CacheOrchestrator:
         context_plan: dict[str, Any],
         material_binding_hash: str,
         provider_physical_plan: dict[str, Any] | None,
-        history: list[dict[str, Any]] | None = None,
     ) -> CacheExecutionBinding:
-        cfg = plan.get("mechanism_config") or {}
-        watchdog_metadata = {}
-        if cfg.get("implicit_watchdog"):
-            try:
-                tokens, source = await assess_implicit_prefix(
-                    self.stateful.registry, snapshot, context_plan, history or [],
-                )
-            except CacheDecisionError:
-                prepared = self.stateful._prepare_failure(
-                    plan, reason="prefix_assessment_unknown", message="Stable prefix eligibility cannot be measured",
-                )
-                return CacheExecutionBinding(
-                    mechanism=prepared.get("mechanism"), decision_reason=prepared["decision_reason"],
-                    context_plan_hash=str(context_plan.get("context_plan_hash") or ""),
-                    plan_hash=plan_hash, material_binding_hash=material_binding_hash,
-                )
-            minimum = int(cfg["minimum_cacheable_tokens"])
-            watchdog_metadata = {
-                "prefix_token_count": tokens, "minimum_cacheable_tokens": minimum,
-                "threshold_measurement": source,
-            }
-            if tokens < minimum:
-                return CacheExecutionBinding(
-                    mechanism=None, decision_reason="insufficient_prefix_length",
-                    context_plan_hash=str(context_plan.get("context_plan_hash") or ""),
-                    plan_hash=plan_hash, material_binding_hash=material_binding_hash,
-                    metadata=watchdog_metadata,
-                )
         try:
             prefix = prepare_implicit_prefix_binding(
                 plan=plan,
@@ -232,7 +200,7 @@ class CacheOrchestrator:
                 metadata=dict(prepared.get("metadata") or {}),
             )
 
-        threshold_metadata: dict[str, Any] = dict(watchdog_metadata)
+        threshold_metadata: dict[str, Any] = {}
         cfg = plan.get("mechanism_config") if isinstance(plan.get("mechanism_config"), dict) else {}
         trial = cfg.get("threshold_mode") == "provider_managed_trial"
         if trial:
@@ -257,9 +225,7 @@ class CacheOrchestrator:
                 "threshold_measurement": "provider_managed_trial",
                 "provider_hit_guaranteed": False,
             }
-        if (not trial and str(snapshot.get("provider") or "").lower() == "gemini"
-                and snapshot.get("protocol", "gemini_native") == "gemini_native"
-                and str(plan.get("resolution_status") or "") == "pending"):
+        if not trial and str(snapshot.get("provider") or "").lower() == "gemini" and str(plan.get("resolution_status") or "") == "pending":
             cfg = plan.get("mechanism_config") if isinstance(plan.get("mechanism_config"), dict) else {}
             minimum = cfg.get("minimum_cacheable_tokens")
             if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0:
