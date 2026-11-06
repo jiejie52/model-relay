@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 
 from ..core.cache_fingerprint import compute_lcp_diff, physical_chain
-from ..core.context_normalizer import normalize_native_payload, serialize_wire
+from ..core.context_normalizer import canonical_structure, normalize_native_payload, serialize_wire
 from . import info as log_info, warning as log_warning
 
 logger = logging.getLogger("relay.http.wire")
@@ -80,7 +80,19 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 payload = None
             if isinstance(payload, dict):
                 payload = normalize_native_payload(payload, unordered_tools=ctx.get("unordered_tools") is True)
-                body = serialize_wire(payload)
+                if self.provider == "gemini" and "systemInstruction" in payload:
+                    # Canonicalize every object first, then preserve Gemini's
+                    # stable instruction as the first top-level wire field.
+                    ordered = canonical_structure(payload)
+                    ordered = {
+                        "systemInstruction": ordered["systemInstruction"],
+                        **{key: value for key, value in ordered.items() if key != "systemInstruction"},
+                    }
+                    body = json.dumps(
+                        ordered, ensure_ascii=False, sort_keys=False, separators=(",", ":"),
+                    ).encode("utf-8")
+                else:
+                    body = serialize_wire(payload)
                 request.headers.pop("transfer-encoding", None)
                 request.headers["content-length"] = str(len(body))
                 request = httpx.Request(request.method, request.url, headers=request.headers,

@@ -77,6 +77,14 @@ class GeminiNativeAdapter:
         # provider_payload field can re-introduce a forbidden top-level key.
         self._enforce_cached_inference_wire(payload, context)
 
+        # Keep the stable instruction first at the final Adapter boundary.
+        # The HTTP normalizer must preserve this top-level wire ordering too.
+        if "systemInstruction" in payload:
+            payload = {
+                "systemInstruction": payload["systemInstruction"],
+                **{key: value for key, value in payload.items() if key != "systemInstruction"},
+            }
+
         model = str(context.snapshot["model"])
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
         headers = {
