@@ -33,6 +33,7 @@ from ..providers.gemini_physical import (
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
     frozen_session_projection_metadata_v9,
 )
+from ..providers.gemini_wire import OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
 from ..routing import RouteBinding, RouteResolutionError
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -1388,6 +1389,8 @@ async def create_request(
             "material_budget": settings.relay_inline_cache_budget_bytes,
             "roll_alpha": settings.relay_cache_roll_alpha,
         }
+        if provider == "gemini" and body.requested_cache_mode != "off":
+            cache_upgrade["gemini_implicit_layout"] = OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
         if body.requested_cache_mode != "off" and grok_mode != "legacy_v1":
             base_snapshot["input"] = canonical_structure(base_snapshot["input"])
             base_snapshot["structured_output"] = normalize_structured_output(base_snapshot["structured_output"])

@@ -7,6 +7,8 @@ from typing import Any
 from ..core.idempotency import stable_hash
 from .base import ProviderRequestError
 from .gemini_wire import (
+    OFFICIAL_IMPLICIT_CONTENTS_LAYOUT,
+    project_official_implicit_contents,
     project_current_user_content,
     project_history_contents,
     project_material_part,
@@ -838,6 +840,13 @@ def _build_gemini_physical_cache_plan_v9(
     if cache_instruction is not None:
         implicit_prefix_payload["systemInstruction"] = copy.deepcopy(cache_instruction)
     implicit_prefix_measurement_payload = copy.deepcopy(implicit_stable_prefix)
+    official_implicit = (
+        (snapshot.get("cache_upgrade") or {}).get("gemini_implicit_layout")
+        == OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
+    )
+    if official_implicit:
+        implicit_prefix_payload = project_official_implicit_contents(implicit_prefix_payload)
+        implicit_prefix_measurement_payload = project_official_implicit_contents(implicit_prefix_measurement_payload)
     effective_tools = provider_payload.get("tools") if provider_payload.get("tools") is not None else snapshot.get("tools")
     effective_tool_config = (
         provider_payload.get("toolConfig")
@@ -859,7 +868,10 @@ def _build_gemini_physical_cache_plan_v9(
                 "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
                 "projector_version": GEMINI_PHYSICAL_PROJECTOR_VERSION_V9,
                 "model": model,
-                "prefix": _candidate_prefix(version),
+                "prefix": (
+                    project_official_implicit_contents(_candidate_prefix(version))
+                    if official_implicit else _candidate_prefix(version)
+                ),
                 "semantic_dependencies": semantic_dependencies,
                 "scope": {
                     "session_id": session.get("id"),
@@ -879,7 +891,10 @@ def _build_gemini_physical_cache_plan_v9(
     fallback_instruction = request_instruction or session_instruction
     if fallback_instruction is not None:
         full_uncached_payload["systemInstruction"] = copy.deepcopy(fallback_instruction)
-    if context_policy == "explicit" and implicit_prefix_payload != full_uncached_payload:
+    implicit_uncached_equivalent = (
+        project_official_implicit_contents(full_uncached_payload) if official_implicit else full_uncached_payload
+    )
+    if context_policy == "explicit" and implicit_prefix_payload != implicit_uncached_equivalent:
         raise ProviderRequestError(
             "GEMINI_PHYSICAL_PLAN_INVALID",
             "Layout/9 explicit implicit-prefix wire must preserve the complete canonical user Content",
@@ -970,6 +985,8 @@ def _build_gemini_physical_cache_plan_v9(
     plan["full_uncached_wire_hash"] = stable_hash(full_uncached_payload)
     plan["occurrence_mapping_hash"] = stable_hash(occurrence_mapping)
     plan["implicit_prefix_payload_hash"] = stable_hash(implicit_prefix_payload)
+    if official_implicit:
+        plan["implicit_input_layout"] = OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
     plan["physical_plan_hash"] = stable_hash(plan)
     return plan
 
