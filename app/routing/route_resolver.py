@@ -48,6 +48,7 @@ class RouteBinding:
     purpose: str
     capability_revision: str = CAPABILITY_PROFILE_REVISION
     offering_id: str | None = None
+    supply_group_id: str | None = None
     channel_id: str | None = None
     protocol: str | None = None
     capability_contract_id: str | None = None
@@ -79,6 +80,7 @@ class RouteBinding:
             "execution_pool": self.execution_pool,
             "capability_revision": self.capability_revision,
             "offering_id": self.offering_id,
+            **({"supply_group_id": self.supply_group_id} if self.supply_group_id else {}),
             "channel_id": self.channel_id,
             "protocol": self.protocol,
             "capability_contract_id": self.capability_contract_id,
@@ -275,6 +277,7 @@ class RouteResolver:
         model: str,
         purpose: str,
         requirements: dict[str, Any] | None = None,
+        offering_id: str | None = None,
     ) -> RouteBinding:
         provider_raw = str(provider or "").strip().lower()
         provider_n = _PROVIDER_ALIASES.get(provider_raw, provider_raw)
@@ -300,6 +303,8 @@ class RouteResolver:
                 model=model_n,
                 deployment_id=self.settings.deployment_id,
             )
+            if offering_id is not None:
+                candidates = [entry for entry in candidates if entry.offering_id == offering_id]
             if not candidates:
                 if self.catalog.has_provider(provider_n, deployment_id=self.settings.deployment_id):
                     raise RouteResolutionError(
@@ -458,6 +463,7 @@ class RouteResolver:
                 "model": model_n,
                 "connection_id": selected.connection_id,
                 "offering_id": selected.offering_id,
+                **({"supply_group_id": selected.supply_group_id} if selected.supply_group_id else {}),
                 "channel_id": selected.channel_id,
                 "protocol": selected.protocol,
                 "route_revision": self.catalog.revision,
@@ -493,6 +499,7 @@ class RouteResolver:
                 purpose=purpose_n,
                 capability_revision=capability_revision,
                 offering_id=selected.offering_id,
+                supply_group_id=selected.supply_group_id,
                 channel_id=selected.channel_id,
                 protocol=selected.protocol,
                 capability_contract_id=selected.capability_contract_id,
@@ -589,6 +596,21 @@ class RouteResolver:
                 ),
             )
             raise
+
+    def resolve_on_session_create(self, request: Any) -> tuple[RouteBinding, dict[str, Any] | None, str]:
+        from .gemini_supply_group import context_settings, resolve_supply_group
+
+        policy = context_settings(request.context_policy)
+        initial = self.resolve(
+            provider=request.provider, model=request.model, purpose="session",
+            requirements=request.capability_requirements.model_dump(mode="json"),
+        )
+        return resolve_supply_group(self, request, initial, policy)
+
+    def materialize_on_first_request(self, session: dict[str, Any], request: Any) -> dict[str, Any]:
+        from .gemini_supply_group import materialize_supply_group
+
+        return materialize_supply_group(session, request)
 
     def _assert_adapter_contract(self, entry: RouteEntry, provider_meta: dict[str, Any]) -> None:
         registered_provider = str(provider_meta.get("provider") or "").lower()
