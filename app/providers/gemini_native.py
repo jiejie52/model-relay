@@ -10,7 +10,6 @@ from .base import ProviderHTTPError, ProviderRequestError
 from .http_wire import decode_entity, observed_response_facts, read_raw_response
 from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..observability.http_wire_logger import normalization_active, provider_transport
-from ..core.context_normalizer import serialize_wire
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
 from ..structured_output import project_schema_for_provider, resolve_structured_output
@@ -77,23 +76,6 @@ class GeminiNativeAdapter:
         # this after all option/structured-output projection so no legacy
         # provider_payload field can re-introduce a forbidden top-level key.
         self._enforce_cached_inference_wire(payload, context)
-
-        # Keep the requested native field order even when HTTP normalization is disabled.
-        if "systemInstruction" in payload:
-            payload = {"systemInstruction": payload["systemInstruction"],
-                       **{key: value for key, value in payload.items() if key != "systemInstruction"}}
-        stripped_bytes = 0
-        if int((context.snapshot.get("cache_upgrade") or {}).get("version") or 0) >= 2 and payload.get("cachedContent"):
-            tail = payload.get("contents") or []
-            minimum = int(context.snapshot["cache_upgrade"].get("tail_min_chars") or 1)
-            tail_text = "".join(str(part.get("text") or "") for part in (tail[-1].get("parts") or [])) if tail else ""
-            if not tail or tail[-1].get("role") != "user" or len(tail_text.strip()) < minimum:
-                raise ProviderRequestError("TAIL_TURN_RESERVATION_VIOLATION", "Cached inference requires the original nonempty user tail")
-            full = copy.deepcopy((context.provider_physical_plan or {}).get("full_uncached_payload") or {})
-            for key, value in payload.items():
-                if key not in {"cachedContent", "contents"}:
-                    full[key] = value
-            stripped_bytes = max(0, len(serialize_wire(full))-len(serialize_wire(payload)))
 
         model = str(context.snapshot["model"])
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
@@ -198,10 +180,7 @@ class GeminiNativeAdapter:
                 body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
                 protocol="gemini_native",
                 channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
-            ) | {
-                "cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details")),
-                "payload_stripped_bytes": stripped_bytes,
-            },
+            ) | {"cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details"))},
         )
 
     @classmethod

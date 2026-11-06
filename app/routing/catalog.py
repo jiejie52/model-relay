@@ -19,7 +19,6 @@ class RouteEntry:
     deployment_id: str | None = None
     requires_file_adapter: bool = False
     offering_id: str | None = None
-    supply_group_id: str | None = None
     channel_id: str | None = None
     protocol: str | None = None
     capability_contract_id: str | None = None
@@ -95,7 +94,6 @@ class RouteCatalog:
                     "deployment_id": x.deployment_id,
                     "requires_file_adapter": x.requires_file_adapter,
                     "offering_id": x.offering_id,
-                    **({"supply_group_id": x.supply_group_id} if x.supply_group_id else {}),
                     "channel_id": x.channel_id,
                     "protocol": x.protocol,
                     "capability_contract_id": x.capability_contract_id,
@@ -166,7 +164,6 @@ class RouteCatalog:
                     deployment_id=offering.deployment_id,
                     requires_file_adapter=offering.requires_file_adapter,
                     offering_id=offering.offering_id,
-                    supply_group_id=offering.supply_group_id,
                     channel_id=connection.channel_id,
                     protocol=connection.protocol,
                     capability_contract_id=contract.contract_id,
@@ -205,7 +202,6 @@ class RouteCatalog:
             deployment_id=str(value.get("deployment_id") or default_deployment),
             requires_file_adapter=bool(value.get("requires_file_adapter", False)),
             offering_id=(str(value.get("offering_id")) if value.get("offering_id") else None),
-            supply_group_id=(str(value["supply_group_id"]) if value.get("supply_group_id") else None),
             channel_id=(str(value.get("channel_id")) if value.get("channel_id") else None),
             protocol=(str(value.get("protocol")) if value.get("protocol") else None),
             capability_contract_id=(

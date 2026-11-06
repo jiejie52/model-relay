@@ -41,7 +41,7 @@ class ResponsesV2Adapter:
         material_prefix = await self._material_prefix(context)
 
         legacy_history = []
-        for turn in (context.history if snapshot.get("history_mode", "cumulative") != "ephemeral_turn" else []):
+        for turn in context.history:
             transport = turn.get("transport_history") if isinstance(turn, dict) else None
             if isinstance(transport, dict) and transport.get("kind") == "responses":
                 legacy_history.append(

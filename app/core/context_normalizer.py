@@ -1,7 +1,6 @@
 """Equivalence rules for Relay-owned structure. Literal strings and arrays stay intact."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from .idempotency import canonical_json_bytes
@@ -79,11 +78,6 @@ def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool =
     return result
 
 
-def serialize_wire(payload: dict[str, Any], *, system_instruction_first: bool = True) -> bytes:
+def serialize_wire(payload: dict[str, Any]) -> bytes:
     """Serialize the native JSON without touching any model-visible literal."""
-    canonical = canonical_structure(payload)
-    if system_instruction_first and "systemInstruction" in canonical:
-        canonical = {"systemInstruction": canonical["systemInstruction"],
-                     **{key: value for key, value in canonical.items() if key != "systemInstruction"}}
-        return json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return canonical_json_bytes(canonical)
+    return canonical_json_bytes(payload)
