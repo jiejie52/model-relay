@@ -1,4 +1,8 @@
-# Model Relay 6.5.0
+# Model Relay 6.5.1
+
+本版基于 6.5.0 完整源码，修正 Gemini Native 的请求字段顺序：Adapter 在最终发送前将已有 `systemInstruction` 放在顶层第一项；HTTP 规范化保留该顺序，同时继续规范化其他对象键序。消息、Part、文本、参数及全局幂等哈希算法保持原有语义。API 和 Worker 均升级为 `6.5.1`；从 6.5.0 升级无需新增 SQL、依赖或环境变量。该调整用于验证字段布局对缓存的影响，实际命中仍以上游 Usage 为准。
+
+## 6.5.0 缓存执行升级基线
 
 本版升级缓存执行控制面，增加分段指纹、双轨计划、会话粘性与派发前淘汰、60 MiB 附件缓存筛选和 HTTP 传输诊断。升级前应用 `sql/008_cache_v65_upgrade.sql`，然后同时替换 API 和 Worker。部署与验证说明见 [RELEASE_NOTES_6.5.0.md](RELEASE_NOTES_6.5.0.md)。
 
