@@ -42,7 +42,7 @@ class ChatCompletionsV2Adapter:
         self.connection_id = connection_id
         self.channel_id = channel_id
 
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         instructions = context.snapshot.get("instructions")
         if instructions:
@@ -78,6 +78,17 @@ class ChatCompletionsV2Adapter:
         self._apply_thinking(payload, context.snapshot)
         self._apply_structured_output(payload, context.snapshot)
 
+        return {"payload": payload, "user_message": user_message}
+
+    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        prepared = copy.deepcopy(prepared)
+        return prepared
+
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+        prepared = context.prepared_native or await self.prepare_native(context)
+        payload = prepared["payload"]
+        user_message = prepared["user_message"]
         url = f"{self.base_url}/chat/completions"
         timeout = httpx.Timeout(
             connect=self.settings.upstream_connect_timeout_seconds,

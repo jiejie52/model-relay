@@ -40,6 +40,8 @@ def freeze_dual_track_plan(intent: CacheIntentPlan, *, snapshot: dict[str, Any],
         "controlled": {"candidate": controlled_candidate, "selected": controlled},
         "compatibility": compatibility,
     }
+    if (snapshot.get("cache_upgrade") or {}).get("version") == 2:
+        plan["implicit_prefix_plan"] = (snapshot.get("context_plan") or {}).get("implicit_prefix_plan")
     plan["plan_hash"] = stable_hash(plan)
     return plan
 

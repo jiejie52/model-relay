@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..core.context_normalizer import unified_cache_enabled
 from ..core.idempotency import stable_hash
 
 
@@ -16,6 +17,7 @@ def build_context_plan(
     session: dict[str, Any],
     material_rows: list[dict[str, Any]],
     history_identity: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, provider-neutral cache context IR.
 
@@ -23,6 +25,14 @@ def build_context_plan(
     rewrite prompt text, roles, material MIME, tool order, or history. Provider
     adapters may only project anchors already present in this IR.
     """
+
+    if unified_cache_enabled(snapshot):
+        # Follow frozen caller/Session order, never the storage query order.
+        expected = snapshot.get("effective_material_ids")
+        if not isinstance(expected, list):
+            expected = [*(session.get("material_manifest") or []), *(snapshot.get("material_ids") or [])]
+        order = {str(mid): i for i, mid in enumerate(dict.fromkeys(expected))}
+        material_rows = sorted(material_rows, key=lambda row: order.get(str(row.get("id")), len(order)))
 
     segments: list[dict[str, Any]] = []
     ordinal = 0
@@ -160,6 +170,14 @@ def build_context_plan(
             "options": snapshot.get("effective_options"),
             "think_level": snapshot.get("think_level"),
         })
+    if unified_cache_enabled(snapshot):
+        from .implicit_planner import ImplicitPrefixPlanner, semantic_segments
+        prefix_plan = ImplicitPrefixPlanner().freeze(semantic_segments(snapshot, session, material_rows, history or []))
+        plan["schema_version"] = "relay-context-plan/2"
+        plan["semantic_fingerprint"] = prefix_plan["semantic_fingerprint"]
+        plan["implicit_prefix_plan"] = prefix_plan
+        from ..core.context_normalizer import SemanticEquivalenceNormalizer
+        plan["normalization_contract"] = SemanticEquivalenceNormalizer.contract
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 

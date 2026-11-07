@@ -50,6 +50,8 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
         "phase": "cache_prepare", "normalize": managed,
         "unordered_tools": profile.get("unordered_tools") is True,
         "semantic_fingerprint": (snapshot.get("context_plan") or {}).get("semantic_fingerprint"),
+        "prefix_version": 2 if upgrade.get("version") == 2 else 1,
+        "protocol": (snapshot.get("protocol_profile") or {}).get("protocol") or snapshot.get("protocol"),
         "previous_chain": previous_chain, "affinity_epoch": epoch,
         "affinity_token": token if managed and header and hosts else None,
         "affinity_hosts": tuple(hosts or ()), "affinity_header": header,

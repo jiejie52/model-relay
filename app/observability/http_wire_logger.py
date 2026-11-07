@@ -13,8 +13,8 @@ from typing import Any
 
 import httpx
 
-from ..core.cache_fingerprint import compute_lcp_diff, physical_chain
-from ..core.context_normalizer import canonical_structure, normalize_native_payload, serialize_wire
+from ..core.cache_fingerprint import compute_lcp_diff, physical_chain, physical_chain_v2
+from ..core.context_normalizer import canonical_structure, normalize_native_payload, serialize_wire, normalize_wire, native_json_bytes
 from . import info as log_info, warning as log_warning
 
 logger = logging.getLogger("relay.http.wire")
@@ -80,7 +80,16 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 payload = None
             if isinstance(payload, dict):
                 payload = normalize_native_payload(payload, unordered_tools=ctx.get("unordered_tools") is True)
-                if self.provider == "gemini" and "systemInstruction" in payload:
+                if ctx.get("prefix_version") == 2:
+                    payload = normalize_wire(payload, protocol=ctx.get("protocol") or "",
+                                             unordered_tools=ctx.get("unordered_tools") is True)
+                    body = native_json_bytes(payload)
+                    if ctx.get("phase") == "inference":
+                        expected = ctx.get("expected_inference_body_sha256")
+                        if not expected or hashlib.sha256(body).hexdigest() != expected:
+                            from ..providers.base import ProviderRequestError
+                            raise ProviderRequestError("CACHE_NATIVE_BODY_MISMATCH", "Final HTTP body differs from the pre-dispatch native plan")
+                elif self.provider == "gemini" and "systemInstruction" in payload:
                     # Canonicalize every object first, then preserve Gemini's
                     # stable instruction as the first top-level wire field.
                     ordered = canonical_structure(payload)
@@ -98,14 +107,23 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 request = httpx.Request(request.method, request.url, headers=request.headers,
                                         content=body, extensions=request.extensions)
                 if ctx.get("phase") == "inference":
-                    chain = physical_chain(payload, scope=ctx["scope"])
+                    chain = (physical_chain_v2(payload, scope=ctx["scope"],
+                                material_bindings=ctx.get("material_bindings"), history=ctx.get("history"))
+                             if ctx.get("prefix_version") == 2 else physical_chain(payload, scope=ctx["scope"]))
                     ctx["physical_chain"] = chain
                     ctx["prefix_diff"] = compute_lcp_diff(ctx.get("previous_chain") or [], chain)
                     ctx["payload_sha256"] = hashlib.sha256(body).hexdigest()
-                    if (ctx.get("previous_semantic_fingerprint") and
+                    if (ctx.get("prefix_version") != 2 and ctx.get("previous_semantic_fingerprint") and
                             ctx["previous_semantic_fingerprint"] == ctx.get("semantic_fingerprint") and
                             ctx["prefix_diff"]["first_divergence_index"] is not None):
                         ctx["prefix_diff"]["divergence_reason"] = "wire_projection_changed"
+        if ctx.get("normalize") and ctx.get("prefix_version") == 2 and ctx.get("phase") == "inference":
+            # Cover malformed/non-JSON bodies and content-type changes as well.
+            if body is None:
+                body = await request.aread()
+            if hashlib.sha256(body).hexdigest() != ctx.get("expected_inference_body_sha256"):
+                from ..providers.base import ProviderRequestError
+                raise ProviderRequestError("CACHE_NATIVE_BODY_MISMATCH", "Final HTTP entity is not the sealed native body")
         if enabled:
             # Provider JSON requests are replayable byte streams. Avoid consuming streaming file uploads.
             if body is None and isinstance(request.stream, httpx.ByteStream):

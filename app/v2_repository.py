@@ -51,6 +51,16 @@ class RelayV2Repository(RelayRepository):
             limit=3,
         )
 
+    async def prefix_reuse_observations(self, request_row: dict[str, Any]) -> list[dict[str, Any]]:
+        """Bounded content evidence only. It neither authorizes resources nor predicts hits."""
+        return await self.backend.select(
+            "relay_requests", filters={
+                "session_id": f"eq.{request_row['session_id']}",
+                "tenant_id": f"eq.{request_row['tenant_id']}",
+                "conversation_hash": f"eq.{request_row['conversation_hash']}",
+                "status": "eq.succeeded", "completed_at": "not.is.null",
+            }, select="id,cache_usage,completed_at", order="completed_at.desc,id.desc", limit=32)
+
     async def rotate_cache_affinity(self, request_id: str, epoch: int, token: str,
                                     reason: str, fence: Any) -> bool:
         return bool(await self.backend.rpc("rotate_cache_affinity_v65", {

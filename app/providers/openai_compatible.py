@@ -46,14 +46,8 @@ class OpenAICompatibleResponsesProvider:
         self.connection_id = connection_id
         self.channel_id = channel_id
 
-    async def execute(
-        self,
-        request_snapshot: dict[str, Any],
-        *,
-        session: dict[str, Any] | None,
-        material_prefix: Any,
-        history: list[dict[str, Any]],
-    ) -> ProviderResult:
+    def build_payload(self, request_snapshot: dict[str, Any], *, session: dict[str, Any] | None,
+                      material_prefix: Any, history: list[dict[str, Any]]) -> dict[str, Any]:
         provider = str(request_snapshot.get("provider", "")).lower()
         model = str(request_snapshot["model"])
         think_level = str(request_snapshot.get("think_level") or "auto").lower()
@@ -116,6 +110,19 @@ class OpenAICompatibleResponsesProvider:
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
 
+        return payload
+
+    async def execute(
+        self,
+        request_snapshot: dict[str, Any],
+        *,
+        session: dict[str, Any] | None,
+        material_prefix: Any,
+        history: list[dict[str, Any]],
+        prepared_payload: dict[str, Any] | None = None,
+    ) -> ProviderResult:
+        payload = prepared_payload if prepared_payload is not None else self.build_payload(
+            request_snapshot, session=session, material_prefix=material_prefix, history=history)
         base_url = (
             ((request_snapshot.get("upstream") or {}).get("base_url"))
             or self.base_url

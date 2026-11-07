@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import json
+import hashlib
 import logging
 import math
 from typing import Any
@@ -12,7 +13,9 @@ from ..config import Settings
 from ..cache.affinity import AffinityDriftDetected, build_wire_context, drift_reason, rotate_affinity
 from ..cache.planner import final_track_facts
 from ..observability.http_wire_logger import wire_context
-from .context_normalizer import canonical_structure
+from .context_normalizer import canonical_structure, unified_cache_enabled, normalize_wire, native_json_bytes
+from .history_freeze import restore_history, history_scope, freeze_history_turn
+from ..cache.implicit_planner import ImplicitPrefixPlanner, prefix_summary, legacy_grok_binding
 from ..cache.contracts import CacheDecisionError, ExecutionFence
 from ..cache.orchestrator import CacheOrchestrator
 from ..cache.usage import normalize_cache_usage
@@ -109,6 +112,9 @@ class SharedExecutionRuntime:
             if isinstance(loaded, list):
                 history = loaded
 
+        prefix_v2 = unified_cache_enabled(snapshot)
+        if prefix_v2:
+            history = restore_history(history, scope=history_scope(snapshot))
         material_ids = list(snapshot.get("material_ids") or [])
         if session.get("context_policy") == "conversation":
             base = session.get("material_manifest") or []
@@ -292,6 +298,39 @@ class SharedExecutionRuntime:
                 ),
             )
 
+        prepared_native = None
+        native_context = None
+        prefix_reuse = None
+        if prefix_v2:
+            native_adapter = self.providers.get_v2(str(snapshot["connection_id"]))
+            if not callable(getattr(native_adapter, "prepare_native", None)):
+                raise ProviderRequestError("CACHE_NATIVE_PREPARATION_UNSUPPORTED", "Frozen adapter has no native preparation boundary")
+            native_context = V2ExecutionContext(
+                snapshot=snapshot, session=session, history=history, material_ids=material_ids,
+                material_bindings=material_bindings, tenant_id=request_row["tenant_id"],
+                conversation_hash=request_row["conversation_hash"], request_id=request_id,
+                session_id=session_id, context_plan=context_plan, provider_physical_plan=provider_physical_plan)
+            with wire_context(wire):
+                full_native = await native_adapter.prepare_native(native_context)
+            full_payload = normalize_wire(full_native["payload"], protocol=wire.get("protocol") or "",
+                                          unordered_tools=wire.get("unordered_tools") is True)
+            try:
+                observations = await self.repo.prefix_reuse_observations(request_row)
+            except Exception as exc:
+                log_warning(logger, "prefix_reuse_evidence_unavailable", request_id=request_id,
+                            error_type=type(exc).__name__)
+                observations = []
+            candidates = []
+            for row in observations:
+                audit = (row.get("cache_usage") or {}).get("prefix_reuse_audit") or {}
+                if audit.get("scope") == wire["scope"]:
+                    candidates.append({**audit, "request_id": str(row["id"])})
+            prefix_reuse = ImplicitPrefixPlanner().prepare(
+                full_payload, scope=wire["scope"], previous=[], candidates=candidates,
+                material_bindings=material_bindings, history=history)
+            wire["material_bindings"] = material_bindings
+            wire["history"] = history
+
         cache_binding = None
         execution_snapshot = snapshot
         if is_v3:
@@ -301,6 +340,8 @@ class SharedExecutionRuntime:
                     "Cache-aware Request is missing its frozen ContextPlan",
                 )
             async def prepare_binding():
+                if upgrade.get("version") == 2 and upgrade.get("grok_mode") == "legacy_v1":
+                    return legacy_grok_binding(snapshot, context_plan, material_bindings, session)
                 with wire_context(wire):
                     return await self.cache.prepare(
                         request_row=request_row,
@@ -331,6 +372,27 @@ class SharedExecutionRuntime:
                     "affinity_epoch": wire.get("affinity_epoch"),
                     "affinity_token_hash": stable_hash(wire.get("affinity_token")) if wire.get("affinity_token") else None,
                 })
+            if prefix_reuse is not None:
+                # A drift rotation changes physical authorization scope. Re-plan before the seal.
+                if prefix_reuse["scope"] != wire["scope"]:
+                    prefix_reuse = ImplicitPrefixPlanner().prepare(
+                        full_payload, scope=wire["scope"], previous=[],
+                        material_bindings=material_bindings, history=history)
+                    wire["material_bindings"], wire["history"] = material_bindings, history
+                summary = prefix_summary(prefix_reuse)
+                cache_binding_obj = replace(cache_binding_obj,
+                    prefix={**cache_binding_obj.prefix, "native_prefix_plan": summary},
+                    metadata={**cache_binding_obj.metadata, "implicit_prefix_plan": summary})
+                final_context = replace(native_context, session=session,
+                    cache_execution_binding=cache_binding_obj.canonical(include_provider_handle=True))
+                with wire_context(wire):
+                    prepared_native = native_adapter.finalize_native(final_context, full_native)
+                prepared_native["payload"] = normalize_wire(prepared_native["payload"],
+                    protocol=wire.get("protocol") or "", unordered_tools=wire.get("unordered_tools") is True)
+                body_hash = hashlib.sha256(native_json_bytes(prepared_native["payload"])).hexdigest()
+                wire["expected_inference_body_sha256"] = body_hash
+                cache_binding_obj = replace(cache_binding_obj,
+                    metadata={**cache_binding_obj.metadata, "native_body_sha256": body_hash})
             cache_binding = cache_binding_obj.canonical(include_provider_handle=True)
             if cache_binding_obj.mechanism == "stateful_resource" and not str(cache_binding_obj.provider_handle or "").strip():
                 log_error(
@@ -376,6 +438,7 @@ class SharedExecutionRuntime:
                     "material_bindings": material_bindings,
                     "provider_physical_plan_hash": (provider_physical_plan or {}).get("physical_plan_hash"),
                     "cache_binding": cache_binding,
+                    **({"native_body_sha256": wire["expected_inference_body_sha256"]} if prefix_v2 else {}),
                 }
             )
             sealed = await self.repo.seal_cache_and_dispatch_v3(
@@ -440,6 +503,7 @@ class SharedExecutionRuntime:
                         cache_execution_binding=cache_binding,
                         execution_fence=(fence.canonical() if fence is not None else None),
                         provider_physical_plan=provider_physical_plan,
+                        prepared_native=prepared_native,
                     )
                 )
         except Exception as exc:
@@ -751,6 +815,11 @@ class SharedExecutionRuntime:
                 )
                 if cache_metadata.get("prefix_growth_decision") is not None:
                     cache_usage["prefix_growth_decision"] = cache_metadata.get("prefix_growth_decision")
+            if prefix_reuse is not None:
+                cache_usage["prefix_reuse_audit"] = {
+                    "scope": prefix_reuse["scope"], "physical_chain": prefix_reuse["physical_chain"],
+                    "summary": prefix_summary(prefix_reuse)}
+                cache_usage["prefix_reuse"] = prefix_summary(prefix_reuse)
             if upgrade and wire.get("normalize"):
                 cache_usage["affinity_audit"] = {
                     "affinity_epoch": wire.get("affinity_epoch"),
@@ -782,7 +851,7 @@ class SharedExecutionRuntime:
                 # installed and sealed, so any final-threshold guard is resolved.
                 "resolution_status": "finalized",
                 "decision_reason": cache_decision_reason,
-                **{k: v for k, v in cache_usage.items() if k != "affinity_audit"},
+                **{k: v for k, v in cache_usage.items() if k not in {"affinity_audit", "prefix_reuse_audit"}},
             }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
@@ -801,6 +870,8 @@ class SharedExecutionRuntime:
             entry.update(
                 canonical_structure(result.history_entry) if wire.get("normalize") else result.history_entry
             )
+            if prefix_v2:
+                entry = freeze_history_turn(entry, scope=history_scope(snapshot))
             new_history.append(entry)
             history_object_id = await self._store_history(
                 request_row,

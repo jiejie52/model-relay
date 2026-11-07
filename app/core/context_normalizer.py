@@ -81,3 +81,43 @@ def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool =
 def serialize_wire(payload: dict[str, Any]) -> bytes:
     """Serialize the native JSON without touching any model-visible literal."""
     return canonical_json_bytes(payload)
+
+
+def unified_cache_enabled(snapshot: dict[str, Any]) -> bool:
+    """Only newly frozen 6.6 requests opt in. Never upgrade old recovery facts."""
+    upgrade = snapshot.get("cache_upgrade") or {}
+    policy = snapshot.get("cache_policy") or {}
+    return (upgrade.get("version") == 2 and upgrade.get("grok_mode") != "legacy_v1"
+            and snapshot.get("requested_cache_mode") != "off" and not policy.get("deny")
+            and not (snapshot.get("requested_cache_mode") == "auto" and policy.get("auto_disabled")))
+
+
+class SemanticEquivalenceNormalizer:
+    """Normalize owned structure; never search/replace model-visible literals."""
+    contract = {"version": "relay-equivalence/2", "literal_text": "preserved",
+                "role_and_part_order": "preserved", "relay_ephemeral_metadata": "audit_only",
+                "history": "scoped_frozen_native_fragments"}
+
+    def normalize_request(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        result = dict(snapshot)
+        result["input"] = canonical_structure(snapshot.get("input"))
+        result["structured_output"] = normalize_structured_output(snapshot.get("structured_output") or {})
+        return result
+
+
+def normalize_wire(payload: dict[str, Any], *, protocol: str, unordered_tools: bool = False) -> dict[str, Any]:
+    """One projection used by preparation and transport; literal text is immutable.
+
+    Relay request IDs/timestamps stay in audit metadata, never in this content
+    projection. No regex-based removal of caller text or user-owned JSON keys.
+    """
+    result = canonical_structure(normalize_native_payload(payload, unordered_tools=unordered_tools))
+    if protocol == "gemini_native" and "systemInstruction" in result:
+        result = {"systemInstruction": result["systemInstruction"],
+                  **{k: v for k, v in result.items() if k != "systemInstruction"}}
+    return result
+
+
+def native_json_bytes(payload: dict[str, Any]) -> bytes:
+    import json
+    return json.dumps(payload, ensure_ascii=False, sort_keys=False, separators=(",", ":")).encode("utf-8")

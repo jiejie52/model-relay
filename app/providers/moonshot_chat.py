@@ -38,7 +38,7 @@ class MoonshotChatAdapter:
         self.materials = materials
         self.repo = repo
 
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
         if self.settings.moonshot_api_key is None:
             raise ProviderRequestError(
                 "CONNECTION_NOT_CONFIGURED",
@@ -91,6 +91,17 @@ class MoonshotChatAdapter:
                     },
                 }
 
+        return {"payload": payload, "user_message": user_message}
+
+    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        prepared = copy.deepcopy(prepared)
+        return prepared
+
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+        prepared = context.prepared_native or await self.prepare_native(context)
+        payload = prepared["payload"]
+        user_message = prepared["user_message"]
         url = f"{self.settings.moonshot_root}/chat/completions"
         timeout = httpx.Timeout(
             connect=self.settings.upstream_connect_timeout_seconds,

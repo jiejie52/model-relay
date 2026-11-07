@@ -10,7 +10,6 @@ from ..core.idempotency import stable_hash
 from ..materials.gemini_transport import project_gemini_input_content_type
 
 PROJECTION_VERSION = "gemini-cachedcontent-prefix/1"
-OFFICIAL_IMPLICIT_CONTENTS_LAYOUT = "gemini-implicit-contents/1"
 _HANDLE_RE = re.compile(r"^cachedContents/[A-Za-z0-9._~-]+$")
 
 
@@ -29,42 +28,6 @@ def project_system_instruction(snapshot: dict[str, Any]) -> dict[str, Any] | Non
     if value in (None, ""):
         return None
     return {"parts": [{"text": str(value)}]}
-
-
-def project_official_implicit_contents(payload: dict[str, Any]) -> dict[str, Any]:
-    """Explicitly authorized diagnostic layout: contents = fixed text + question.
-
-    Only new Requests freezing this layout use it. Canonical instructions and
-    persisted history stay unchanged; existing Content/Part order is retained.
-    """
-    result = copy.deepcopy(payload)
-    instruction = result.pop("systemInstruction", None)
-    if instruction is None:
-        return result
-    parts = instruction.get("parts") if isinstance(instruction, dict) else None
-    if not isinstance(parts, list) or any(
-        not isinstance(part, dict) or set(part) != {"text"} or not isinstance(part["text"], str)
-        for part in parts
-    ):
-        raise ProviderRequestError(
-            "GEMINI_IMPLICIT_INSTRUCTION_INVALID",
-            "Official implicit layout requires plain-text instruction parts",
-        )
-    prefix = "".join(part["text"] for part in parts)
-    contents = result.setdefault("contents", [])
-    if not isinstance(contents, list):
-        raise ProviderRequestError("GEMINI_PHYSICAL_PLAN_INVALID", "Gemini contents must be an array")
-    if contents and contents[0].get("role") == "user":
-        user_parts = contents[0].setdefault("parts", [])
-        if not isinstance(user_parts, list):
-            raise ProviderRequestError("GEMINI_PHYSICAL_PLAN_INVALID", "Gemini user parts must be an array")
-        if user_parts and isinstance(user_parts[0], dict) and set(user_parts[0]) == {"text"}:
-            user_parts[0]["text"] = prefix + user_parts[0]["text"]
-        else:
-            user_parts.insert(0, {"text": prefix})
-    else:
-        contents.insert(0, {"role": "user", "parts": [{"text": prefix}]})
-    return result
 
 
 def project_history_contents(

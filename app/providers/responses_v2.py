@@ -26,7 +26,7 @@ class ResponsesV2Adapter:
         self.legacy = legacy
         self.materials = materials
 
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
         snapshot = dict(context.snapshot)
         snapshot["_relay_log_context"] = {
             "request_id": context.request_id,
@@ -51,13 +51,31 @@ class ResponsesV2Adapter:
                     }
                 )
 
+        payload = self.legacy.build_payload(snapshot, session=context.session,
+                                            material_prefix=material_prefix, history=legacy_history)
+        return {"payload": payload, "snapshot": snapshot,
+                "user_item": self.legacy.make_user_item(snapshot["current_query"])}
+
+    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        prepared = copy.deepcopy(prepared)
+        snapshot = {**prepared["snapshot"], "_relay_cache_execution": context.cache_execution_binding}
+        self.legacy._apply_cache_projection(prepared["payload"], snapshot,
+            provider=str(snapshot.get("provider") or "").lower(), model=str(snapshot["model"]))
+        prepared["snapshot"] = snapshot
+        return prepared
+
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+        prepared = context.prepared_native or await self.prepare_native(context)
+        snapshot = prepared["snapshot"]
         result = await self.legacy.execute(
             snapshot,
             session=context.session,
-            material_prefix=material_prefix,
-            history=legacy_history,
+            material_prefix=[],
+            history=[],
+            prepared_payload=prepared["payload"],
         )
-        user_item = self.legacy.make_user_item(snapshot["current_query"])
+        user_item = prepared["user_item"]
         return V2ProviderResult(
             raw_bytes=result.raw_bytes,
             raw_json=result.raw_json,

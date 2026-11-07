@@ -15,7 +15,7 @@ from ..core.idempotency import caller_intent_hash, request_identity, stable_hash
 from ..core.raw_error import raw_body_inline_fields
 from ..cache.affinity import session_affinity_token
 from ..cache.planner import freeze_dual_track_plan
-from ..core.context_normalizer import canonical_structure, normalize_structured_output
+from ..core.context_normalizer import canonical_structure, normalize_structured_output, SemanticEquivalenceNormalizer
 from ..cache.context_plan import build_context_plan
 from ..cache.intent_resolver import CacheIntentResolver
 from ..cache.contracts import CacheDecisionError
@@ -33,7 +33,6 @@ from ..providers.gemini_physical import (
     GEMINI_SESSION_PROJECTION_METADATA_KEY,
     frozen_session_projection_metadata_v9,
 )
-from ..providers.gemini_wire import OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
 from ..routing import RouteBinding, RouteResolutionError
 from ..security import require_owner_headers, require_relay_auth
 from ..storage_paths import request_object_path_v2
@@ -1376,6 +1375,8 @@ async def create_request(
                     "object_id": history_obj.get("id"),
                     "sha256": history_obj.get("sha256"),
                 }
+        if session.get("history_object_id") and not history_identity:
+            raise HTTPException(status_code=409, detail={"code": "CACHE_HISTORY_OBJECT_MISSING"})
         plan_seed = dict(base_snapshot)
         plan_seed["schema_version"] = "relay-request/2.3"
         supply_cache = frozen_route.get("cache_contract") or {}
@@ -1385,22 +1386,38 @@ async def create_request(
             if grok_mode not in {"unified_v2", "legacy_v1"}:
                 raise HTTPException(status_code=409, detail={"code": "CACHE_GROK_MODE_INVALID"})
         cache_upgrade = {
-            "version": 1, "grok_mode": grok_mode,
+            "version": 2, "grok_mode": grok_mode,
             "material_budget": settings.relay_inline_cache_budget_bytes,
             "roll_alpha": settings.relay_cache_roll_alpha,
         }
-        if provider == "gemini" and body.requested_cache_mode != "off":
-            cache_upgrade["gemini_implicit_layout"] = OFFICIAL_IMPLICIT_CONTENTS_LAYOUT
         if body.requested_cache_mode != "off" and grok_mode != "legacy_v1":
-            base_snapshot["input"] = canonical_structure(base_snapshot["input"])
-            base_snapshot["structured_output"] = normalize_structured_output(base_snapshot["structured_output"])
+            base_snapshot = SemanticEquivalenceNormalizer().normalize_request(base_snapshot)
             plan_seed.update(base_snapshot)
         plan_seed["cache_upgrade"] = cache_upgrade
+        plan_seed["requested_cache_mode"] = body.requested_cache_mode
+        plan_seed["cache_policy"] = frozen_route.get("cache_policy") or {}
+        history_content = []
+        if session.get("context_policy") == "conversation" and history_identity:
+            from ..core.history_freeze import restore_history, history_scope
+            from ..persistence.object_storage import ObjectLocation
+            data = await _storage(request).get(history_obj["storage_id"]).get_bytes(
+                ObjectLocation(history_obj["storage_id"], history_obj["bucket"], history_obj["object_key"]))
+            if history_identity.get("sha256") and hashlib.sha256(data).hexdigest() != history_identity["sha256"]:
+                raise HTTPException(status_code=409, detail={"code": "CACHE_HISTORY_INTEGRITY_MISMATCH"})
+            loaded_history = json.loads(data.decode("utf-8"))
+            if not isinstance(loaded_history, list):
+                raise HTTPException(status_code=409, detail={"code": "CACHE_HISTORY_INVALID"})
+            from ..providers.base import ProviderRequestError
+            try:
+                history_content = restore_history(loaded_history, scope=history_scope(plan_seed))
+            except ProviderRequestError as exc:
+                raise HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message}) from exc
         context_plan = build_context_plan(
             snapshot=plan_seed,
             session=session,
             material_rows=material_rows,
             history_identity=history_identity,
+            history=history_content,
         )
         evidence_key = reuse_evidence_key(plan_seed, context_plan)
         observed_reuse: dict[str, Any] = {"observed_compatible_uses": 0}
@@ -1476,6 +1493,7 @@ async def create_request(
             )
         except CacheDecisionError as exc:
             raise HTTPException(status_code=409, detail=exc.public_detail()) from exc
+        plan_seed["context_plan"] = context_plan
         cache_plan = freeze_dual_track_plan(
             cache_intent, snapshot=plan_seed,
             protocol_profile=frozen_route.get("protocol_profile") or {},

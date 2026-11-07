@@ -41,7 +41,6 @@ def prepare_implicit_prefix_binding(
             "projector_version": physical.get("projector_version"),
             "physical_plan_hash": physical.get("physical_plan_hash"),
             "implicit_prefix_payload_hash": physical.get("implicit_prefix_payload_hash"),
-            **({"input_layout": physical["implicit_input_layout"]} if physical.get("implicit_input_layout") else {}),
             # Gemini implicit caching is provider-managed and has no CachedContent
             # handle or caller-visible prompt_cache_key on this native API path.
             "prompt_cache_key": None,

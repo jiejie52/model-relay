@@ -12,7 +12,6 @@ from .v2_base import V2ExecutionContext, V2ProviderResult
 from ..observability.http_wire_logger import normalization_active, provider_transport
 from ..config import Settings
 from ..core.idempotency import CANONICAL_REQUEST_VERSIONS
-from ..core.context_normalizer import normalize_native_payload
 from ..structured_output import project_schema_for_provider, resolve_structured_output
 from .gemini_physical import (
     GEMINI_PHYSICAL_LAYOUT_VERSION,
@@ -21,92 +20,11 @@ from .gemini_physical import (
     SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS,
 )
 from .gemini_wire import (
-    OFFICIAL_IMPLICIT_CONTENTS_LAYOUT,
     project_current_user_content,
     project_history_contents,
     project_system_instruction,
     validate_cached_content_handle,
 )
-
-
-class _SingleSDKDispatchTransport(httpx.AsyncBaseTransport):
-    """Retain exact entities and prohibit hidden SDK inference replays."""
-
-    def __init__(self, wrapped: httpx.AsyncBaseTransport, payload: dict[str, Any], url: str) -> None:
-        self.wrapped = wrapped
-        self.expected = self._comparable(payload)
-        self.url = url
-        self.sent = False
-        self.response: tuple[int, dict[str, str], bytes] | None = None
-
-    @staticmethod
-    def _comparable(payload: dict[str, Any]) -> dict[str, Any]:
-        value = copy.deepcopy(payload)
-        def schema_types(schema: Any) -> None:
-            if not isinstance(schema, dict):
-                return
-            kind = schema.get("type")
-            if isinstance(kind, str) and kind.upper() in {
-                "STRING", "NUMBER", "INTEGER", "BOOLEAN", "ARRAY", "OBJECT", "NULL", "TYPE_UNSPECIFIED",
-            }:
-                schema["type"] = kind.upper()
-            for item in (schema.get("properties") or {}).values():
-                schema_types(item)
-            schema_types(schema.get("items"))
-            for item in schema.get("anyOf") or []:
-                schema_types(item)
-
-        # Native Schema.type is a protobuf enum; SDK casing does not change
-        # the validation set. Never normalize examples, defaults or enum values.
-        schema_types((value.get("generationConfig") or {}).get("responseSchema"))
-        for tool in value.get("tools") or []:
-            for function in tool.get("functionDeclarations") or []:
-                schema_types(function.get("parameters"))
-                schema_types(function.get("response"))
-        # The SDK emits protobuf snake_case names inside Blob/FileData. Compare
-        # their documented native aliases without changing any MIME, URI or bytes.
-        for content in value.get("contents") or []:
-            for part in content.get("parts") or []:
-                for field, aliases in (
-                    ("inlineData", {"mime_type": "mimeType"}),
-                    ("fileData", {"mime_type": "mimeType", "file_uri": "fileUri"}),
-                ):
-                    blob = part.get(field)
-                    if isinstance(blob, dict):
-                        for alias, canonical in aliases.items():
-                            if alias in blob and canonical not in blob:
-                                blob[canonical] = blob.pop(alias)
-        return normalize_native_payload(value)
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if self.sent:
-            raise ProviderRequestError("GEMINI_SDK_REPLAY_FORBIDDEN", "SDK cannot send a second inference for one Relay Request")
-        payload = json.loads(await request.aread())
-        # SDK-only local controls may produce an empty generationConfig.
-        # The official no-config example omits this field entirely.
-        if payload.get("generationConfig") == {} and "generationConfig" not in self.expected:
-            payload.pop("generationConfig")
-            body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            request.headers.pop("transfer-encoding", None)
-            request.headers["content-length"] = str(len(body))
-            request = httpx.Request(request.method, request.url, headers=request.headers,
-                                    content=body, extensions=request.extensions)
-        if (request.method != "POST" or str(request.url) != self.url
-                or self._comparable(payload) != self.expected):
-            raise ProviderRequestError(
-                "GEMINI_SDK_WIRE_MISMATCH", "SDK projection changed the frozen native input or inference route",
-            )
-        self.sent = True
-        response = await self.wrapped.handle_async_request(request)
-        raw = await read_raw_response(response)
-        self.response = (response.status_code, dict(response.headers), raw)
-        # Let the SDK parse the response normally, while Relay retains the
-        # original bytes (including compressed/error bodies) for its own archive.
-        return httpx.Response(response.status_code, headers=response.headers, content=raw,
-                              extensions=response.extensions, request=request)
-
-    async def aclose(self) -> None:
-        await self.wrapped.aclose()
 
 
 
@@ -127,7 +45,7 @@ class GeminiNativeAdapter:
         self.base_url = settings.aihubmix_gemini_base_url.rstrip("/")
         self._transport = transport
 
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
         payload, user_content = self._build_context_payload(context)
 
         self._apply_model_options(payload, context.snapshot)
@@ -167,6 +85,24 @@ class GeminiNativeAdapter:
                 **{key: value for key, value in payload.items() if key != "systemInstruction"},
             }
 
+        return {"payload": payload, "user_content": user_content}
+
+    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
+        prepared = copy.deepcopy(prepared)
+        projected, user_content = self._build_context_payload(context)
+        # Binding changes context only. Keep the already projected sampling and
+        # output-schema options, as in prepare_native's original projection order.
+        payload = {**projected, **{k: v for k, v in prepared["payload"].items()
+                   if k not in {"contents", "systemInstruction", "cachedContent"}}}
+        self._enforce_cached_inference_wire(payload, context)
+        prepared["payload"] = payload
+        prepared["user_content"] = user_content
+        return prepared
+
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+        prepared = context.prepared_native or await self.prepare_native(context)
+        payload = prepared["payload"]
+        user_content = prepared["user_content"]
         model = str(context.snapshot["model"])
         url = f"{self.base_url}/v1beta/models/{model}:generateContent"
         headers = {
@@ -181,23 +117,11 @@ class GeminiNativeAdapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        binding = context.cache_execution_binding
-        if not isinstance(binding, dict):
-            binding = context.snapshot.get("_relay_cache_execution") or {}
-        official_implicit = (
-            (context.snapshot.get("cache_upgrade") or {}).get("gemini_implicit_layout")
-            == OFFICIAL_IMPLICIT_CONTENTS_LAYOUT and binding.get("mechanism") == "implicit_prefix"
-        )
-        if official_implicit:
-            if (context.provider_physical_plan or {}).get("implicit_input_layout") != OFFICIAL_IMPLICIT_CONTENTS_LAYOUT:
-                raise ProviderRequestError("CACHE_CONTEXT_MISMATCH", "Official implicit layout was not frozen before dispatch")
-            status, response_headers, raw = await self._invoke_official_implicit(payload, model, url, timeout)
-        else:
-            async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url)) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
-                    status = response.status_code
-                    response_headers = dict(response.headers)
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url)) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
+                status = response.status_code
+                response_headers = dict(response.headers)
         if not 200 <= status < 300:
             raise ProviderHTTPError(
                 status,
@@ -285,57 +209,6 @@ class GeminiNativeAdapter:
             ) | {"cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details"))},
         )
 
-    async def _invoke_official_implicit(
-        self, payload: dict[str, Any], model: str, url: str, timeout: httpx.Timeout,
-    ) -> tuple[int, dict[str, str], bytes]:
-        """Official generate_content call, constrained to Relay's single dispatch."""
-        from google import genai
-        from google.genai import types
-
-        if "systemInstruction" in payload or "cachedContent" in payload:
-            raise ProviderRequestError("GEMINI_IMPLICIT_LAYOUT_INVALID", "Official implicit layout must carry its fixed text in contents")
-        contents = payload["contents"]
-        if (len(contents) == 1 and contents[0].get("role") == "user"
-                and len(contents[0].get("parts") or []) == 1
-                and set(contents[0]["parts"][0]) == {"text"}):
-            contents = contents[0]["parts"][0]["text"]
-        config = dict(payload.get("generationConfig") or {})
-        config.update({key: value for key, value in payload.items() if key not in {"contents", "generationConfig"}})
-        # These are local SDK controls, not model sampling parameters. They
-        # prevent AFC/continuation from introducing extra inference side effects.
-        config["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-        if "automatic_continuation" in types.GenerateContentConfig.model_fields:
-            config["automatic_continuation"] = False
-        sdk_config = types.GenerateContentConfig(**config)
-        transport = _SingleSDKDispatchTransport(
-            provider_transport(self.settings, "gemini", self._transport, url, always=True), payload, url,
-        )
-        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=transport) as http_client:
-            client = genai.Client(
-                vertexai=False,
-                api_key=self.settings.aihubmix_api_key.get_secret_value(),
-                http_options=types.HttpOptions(
-                    base_url=self.base_url, api_version="v1beta",
-                    retry_options=types.HttpRetryOptions(attempts=1),
-                    httpx_async_client=http_client, client_args={"trust_env": False},
-                ),
-            )
-            try:
-                await client.aio.models.generate_content(model=model, contents=contents, config=sdk_config)
-            except ProviderRequestError:
-                raise
-            except Exception:
-                if transport.response is None:
-                    raise
-                # Preserve HTTP errors and malformed success entities for the
-                # existing raw Error / result parser, without a second call.
-            finally:
-                await client.aio.aclose()
-                client.close()
-        if transport.response is None:
-            raise ProviderRequestError("GEMINI_SDK_RESPONSE_MISSING", "SDK returned without a captured upstream response")
-        return transport.response
-
     @classmethod
     def _enforce_cached_inference_wire(
         cls,
@@ -410,7 +283,6 @@ class GeminiNativeAdapter:
                     or expected_prefix_version != actual_prefix_version
                     or str(prefix.get("layout_version") or "") != str(physical.get("layout_version") or "")
                     or str(prefix.get("projector_version") or "") != str(physical.get("projector_version") or "")
-                    or prefix.get("input_layout") != physical.get("implicit_input_layout")
                     or (expected_payload_hash and expected_payload_hash != actual_payload_hash)
                 ):
                     raise ProviderRequestError(

@@ -38,7 +38,7 @@ class ClaudeMessagesV2Adapter:
         self.connection_id = connection_id
         self.channel_id = channel_id
 
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         if context.session.get("context_policy") == "conversation":
             for turn in context.history:
@@ -73,6 +73,18 @@ class ClaudeMessagesV2Adapter:
         self._apply_thinking_and_output(payload, context.snapshot)
         self._apply_cache_binding(payload, context.cache_execution_binding or {})
 
+        return {"payload": payload, "user_message": user_message}
+
+    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
+        import copy
+        prepared = copy.deepcopy(prepared)
+        self._apply_cache_binding(prepared["payload"], context.cache_execution_binding or {})
+        return prepared
+
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
+        prepared = context.prepared_native or await self.prepare_native(context)
+        payload = prepared["payload"]
+        user_message = prepared["user_message"]
         url = f"{self.base_url}/v1/messages"
         headers = {
             "x-api-key": self.api_key,

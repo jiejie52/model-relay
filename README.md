@@ -1,19 +1,10 @@
-# Model Relay 6.5.2
+# Model Relay 6.6.0
 
-本版以 6.5.1 完整源码为基线，按 AIHubMix《Gemini 指南》的隐式缓存示例增加 `contents = 固定文本 + 本轮问题` 执行布局，并使用官方 `google-genai` SDK 的异步 `generate_content` 调用。
+本版以 6.5.1 完整源码为基线，针对缓存改造方案的要点 1、3、4 补齐统一语义规范化入口、逐轮原生历史冻结、派发前通用最长公共前缀规划，以及逐段语义/链式物理指纹。五类协议共用隐式前缀规划器，Adapter 先准备原生请求，再按最终缓存绑定完成投影；最终请求体摘要进入既有 Atomic Dispatch Seal，并在 HTTP 发送前核对。Grok `legacy_v1` 对新受理请求直接旁路新版缓存编排器，同时保留执行租约、绑定和原子派发门禁。
 
-- 新受理的 Gemini 缓存请求冻结 `cache_upgrade.gemini_implicit_layout = gemini-implicit-contents/1`。只有最终选择 `implicit_prefix` 时采用新布局；此前已经受理的 Request 继续按原快照执行。
-- 新隐式布局将原 `systemInstruction` 的文本移入首个用户文本前缀。无历史、无附件时，最终请求只有 `contents: [{role: user, parts: [{text: 固定文本 + 本轮问题}]}]`。不插入额外分隔符，不修改原始 Request、材料或已提交历史；多模态 Part 和历史轮次的相对顺序保留。
-- 这是一版按用户指定布局进行的诊断实现：移入 `contents` 后，该文本不再具有原系统指令的角色优先级；不能将这种移动宣称为普遍的语义等价优化。
-- 没有显式生成参数或结构化输出要求时，最终 HTTP 不发送 `generationConfig`；调用方明确要求的参数与 Schema 继续保留。SDK 负责生成鉴权及客户端标识，Relay 继续注入会话亲和头，并原样保存上游响应实体、错误和缓存用量。
-- SDK 重试次数为 1，关闭自动函数调用及可用的自动续写；发送门槛还会拦截 SDK 内部的额外推理请求。不会因缓存未命中额外重发，也不增加探测请求。
-- 显式缓存、其他 Provider、路由、幂等、Fencing 和数据库结构沿用 6.5.1。升级无需新增 SQL、环境变量或依赖。API 和 Worker 均为 `6.5.2`。
+API/Worker 均为 `6.6.0`。从已正常运行的 6.5.1 升级，无需新增 SQL、依赖或环境变量；须同时部署 API 与 Worker。旧 Request 的冻结计划和旧算法恢复语义保留。源码包保留原包全部文件及版本管理数据，未新增或修改 tests 文件。136 项离线检查通过，真实供应的缓存命中与数据库并发仍需部署验收。变更、升级与能力边界见 [RELEASE_NOTES_6.6.0.md](RELEASE_NOTES_6.6.0.md)。
 
-测试时请同步更新 API 和 Worker，创建干净的 Gemini Session，沿用之前的固定 `instructions` 与变化的 `input`，选择隐式缓存。无需手动将长文本复制到 `input`。最终 Wire 应出现以固定文本开头的 `contents`，不再出现顶层 `systemInstruction`；没有显式生成参数时也不出现 `generationConfig`。实际命中以上游 `usageMetadata.cachedContentTokenCount` / SDK `cached_content_token_count` 为准，省略计数仍保留为 Unknown。
-
-参考：https://docs.aihubmix.com/cn/api/Gemini-Guides#上下文缓存
-
-## 6.5.1 请求字段顺序基线
+## 6.5.1 历史说明
 
 本版基于 6.5.0 完整源码，修正 Gemini Native 的请求字段顺序：Adapter 在最终发送前将已有 `systemInstruction` 放在顶层第一项；HTTP 规范化保留该顺序，同时继续规范化其他对象键序。消息、Part、文本、参数及全局幂等哈希算法保持原有语义。API 和 Worker 均升级为 `6.5.1`；从 6.5.0 升级无需新增 SQL、依赖或环境变量。该调整用于验证字段布局对缓存的影响，实际命中仍以上游 Usage 为准。
 
