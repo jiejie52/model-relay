@@ -26,7 +26,7 @@ class ResponsesV2Adapter:
         self.legacy = legacy
         self.materials = materials
 
-    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         snapshot = dict(context.snapshot)
         snapshot["_relay_log_context"] = {
             "request_id": context.request_id,
@@ -41,7 +41,7 @@ class ResponsesV2Adapter:
         material_prefix = await self._material_prefix(context)
 
         legacy_history = []
-        for turn in context.history:
+        for turn in (context.history if snapshot.get("history_mode", "cumulative") != "ephemeral_turn" else []):
             transport = turn.get("transport_history") if isinstance(turn, dict) else None
             if isinstance(transport, dict) and transport.get("kind") == "responses":
                 legacy_history.append(
@@ -51,31 +51,13 @@ class ResponsesV2Adapter:
                     }
                 )
 
-        payload = self.legacy.build_payload(snapshot, session=context.session,
-                                            material_prefix=material_prefix, history=legacy_history)
-        return {"payload": payload, "snapshot": snapshot,
-                "user_item": self.legacy.make_user_item(snapshot["current_query"])}
-
-    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
-        import copy
-        prepared = copy.deepcopy(prepared)
-        snapshot = {**prepared["snapshot"], "_relay_cache_execution": context.cache_execution_binding}
-        self.legacy._apply_cache_projection(prepared["payload"], snapshot,
-            provider=str(snapshot.get("provider") or "").lower(), model=str(snapshot["model"]))
-        prepared["snapshot"] = snapshot
-        return prepared
-
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
-        prepared = context.prepared_native or await self.prepare_native(context)
-        snapshot = prepared["snapshot"]
         result = await self.legacy.execute(
             snapshot,
             session=context.session,
-            material_prefix=[],
-            history=[],
-            prepared_payload=prepared["payload"],
+            material_prefix=material_prefix,
+            history=legacy_history,
         )
-        user_item = prepared["user_item"]
+        user_item = self.legacy.make_user_item(snapshot["current_query"])
         return V2ProviderResult(
             raw_bytes=result.raw_bytes,
             raw_json=result.raw_json,
@@ -114,6 +96,13 @@ class ResponsesV2Adapter:
             mime = str(resolved.material.get("content_type") or "application/octet-stream")
             filename = str(resolved.material.get("filename") or material_id)
             frozen = by_id.get(material_id) or {}
+            projected = await self.materials.read_bound_text(frozen, tenant_id=context.tenant_id,
+                                                             conversation_hash=context.conversation_hash) if frozen.get("projection_object_id") else None
+            if projected is not None:
+                from ..core.context_normalizer import source_markers
+                begin, end = source_markers(material_id, filename, upgraded=True)
+                items.append(self.legacy.make_user_item(f"{begin}\n{projected.decode('utf-8')}\n{end}"))
+                continue
             object_id = frozen.get("object_id")
             obj = None
             if object_id:

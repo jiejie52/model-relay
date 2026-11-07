@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core.context_normalizer import unified_cache_enabled
 from ..core.idempotency import stable_hash
+from ..core.context_normalizer import freeze_history, normalize_native_payload
 
 
 def _content_hash(value: Any) -> str:
@@ -26,14 +26,7 @@ def build_context_plan(
     adapters may only project anchors already present in this IR.
     """
 
-    if unified_cache_enabled(snapshot):
-        # Follow frozen caller/Session order, never the storage query order.
-        expected = snapshot.get("effective_material_ids")
-        if not isinstance(expected, list):
-            expected = [*(session.get("material_manifest") or []), *(snapshot.get("material_ids") or [])]
-        order = {str(mid): i for i, mid in enumerate(dict.fromkeys(expected))}
-        material_rows = sorted(material_rows, key=lambda row: order.get(str(row.get("id")), len(order)))
-
+    upgraded = int((snapshot.get("cache_upgrade") or {}).get("version") or 0) >= 3
     segments: list[dict[str, Any]] = []
     ordinal = 0
 
@@ -55,6 +48,18 @@ def build_context_plan(
         )
         ordinal += 1
 
+    if upgraded:
+        native = snapshot.get("provider_payload") or {}
+        tools = native.get("tools", snapshot.get("tools"))
+        if tools:
+            value = normalize_native_payload({"tools": tools}, response_schemas=True, unordered_tools=(
+                ((snapshot.get("protocol_profile") or {}).get("cache") or {}).get("unordered_tools") is True))
+            segments.append({"segment_id": f"seg-{ordinal}", "domain": "tools", "role": "tool_schema",
+                             "source_ref": "request.tools", "canonical_content_hash": stable_hash(value),
+                             "ordinal": ordinal, "stability": "request_stable", "semantic_boundary": "tools_end",
+                             "dependency_ids": []})
+            ordinal += 1
+
     session_materials = {
         str(x) for x in (session.get("material_manifest") or []) if str(x)
     }
@@ -66,6 +71,7 @@ def build_context_plan(
             {
                 "segment_id": f"seg-{ordinal}",
                 "domain": "material",
+                **({"material_cache_class": material_cache_class(row.get("content_type"))} if upgraded else {}),
                 "role": "user_material",
                 "source_ref": material_id,
                 "canonical_content_hash": str(row.get("sha256") or ""),
@@ -85,7 +91,19 @@ def build_context_plan(
         )
         ordinal += 1
 
-    if session.get("context_policy") == "conversation" and history_identity:
+    if (upgraded and history is not None and session.get("context_policy") == "conversation"
+            and session.get("history_mode", "cumulative") != "ephemeral_turn"):
+        for turn_index, turn in enumerate(freeze_history(history)):
+            segments.append({
+                "segment_id": f"seg-{ordinal}", "domain": "history", "role": "conversation_turn",
+                "source_ref": f"history_turn:{turn_index}",
+                "canonical_content_hash": stable_hash(turn.get("transport_history") or {}),
+                "ordinal": ordinal, "stability": "committed_history",
+                "semantic_boundary": "history_turn_end", "dependency_ids": [f"history_turn:{turn_index}"],
+            })
+            ordinal += 1
+    elif (session.get("context_policy") == "conversation"
+            and session.get("history_mode", "cumulative") != "ephemeral_turn" and history_identity):
         segments.append(
             {
                 "segment_id": f"seg-{ordinal}",
@@ -163,6 +181,12 @@ def build_context_plan(
     }
     if isinstance(snapshot.get("cache_upgrade"), dict):
         plan["cache_upgrade"] = snapshot["cache_upgrade"]
+        if int(snapshot["cache_upgrade"].get("version") or 0) >= 2:
+            plan["session_context"] = {
+                "history_mode": snapshot.get("history_mode", "cumulative"),
+                "sticky_scope": snapshot.get("sticky_scope", "session"),
+                "supply_group_id": snapshot.get("supply_group_id"),
+            }
         plan["semantic_fingerprint"] = stable_hash({
             "segments": [{k: v for k, v in segment.items() if k != "source_ref"} for segment in segments],
             "materials": [segment["source_ref"] for segment in segments if segment["domain"] == "material"],
@@ -170,17 +194,32 @@ def build_context_plan(
             "options": snapshot.get("effective_options"),
             "think_level": snapshot.get("think_level"),
         })
-    if unified_cache_enabled(snapshot):
-        from .implicit_planner import ImplicitPrefixPlanner, semantic_segments
-        prefix_plan = ImplicitPrefixPlanner().freeze(semantic_segments(snapshot, session, material_rows, history or []))
-        plan["schema_version"] = "relay-context-plan/2"
-        plan["semantic_fingerprint"] = prefix_plan["semantic_fingerprint"]
-        plan["implicit_prefix_plan"] = prefix_plan
-        from ..core.context_normalizer import SemanticEquivalenceNormalizer
-        plan["normalization_contract"] = SemanticEquivalenceNormalizer.contract
+        if upgraded:
+            # Logical identity remains in request_identity. Context identity has
+            # no executor IDs, object IDs, timestamps, sampling, or wire handles.
+            plan["semantic_fingerprint"] = stable_hash({
+                "format": "relay-semantic-context/2",
+                "segments": [{**{k: segment.get(k) for k in (
+                    "domain", "role", "canonical_content_hash", "material_representation_digest",
+                    "material_cache_class", "ordinal",
+                )}, **({"material_id": segment["source_ref"]} if segment["domain"] == "material" else {})}
+                    for segment in segments],
+                "structured_output": snapshot.get("structured_output"),
+            })
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 
 
 def context_plan_preview(plan: dict[str, Any]) -> str:
     return json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def material_cache_class(content_type: Any) -> str:
+    mime = str(content_type or "").split(";", 1)[0].lower()
+    if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "docx_content"
+    if mime == "application/pdf":
+        return "pdf_document"
+    if mime.startswith("video/"):
+        return "video_media"
+    return "material_other"

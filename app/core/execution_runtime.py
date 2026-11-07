@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import json
-import hashlib
 import logging
 import math
 from typing import Any
@@ -13,10 +12,11 @@ from ..config import Settings
 from ..cache.affinity import AffinityDriftDetected, build_wire_context, drift_reason, rotate_affinity
 from ..cache.planner import final_track_facts
 from ..observability.http_wire_logger import wire_context
-from .context_normalizer import canonical_structure, unified_cache_enabled, normalize_wire, native_json_bytes
-from .history_freeze import restore_history, history_scope, freeze_history_turn
-from ..cache.implicit_planner import ImplicitPrefixPlanner, prefix_summary, legacy_grok_binding
-from ..cache.contracts import CacheDecisionError, ExecutionFence
+from .context_normalizer import canonical_structure, freeze_history, freeze_history_turn
+from .cache_usage_normalizer import normalize_observed_cache_audit
+from ..cache.contracts import CacheDecisionError, ExecutionFence, CacheExecutionBinding
+from ..cache.prefix import prepare_implicit_prefix_binding
+from ..cache.context_plan import material_cache_class
 from ..cache.orchestrator import CacheOrchestrator
 from ..cache.usage import normalize_cache_usage
 from .idempotency import stable_hash
@@ -33,6 +33,7 @@ from ..providers.gemini_physical import (
     uses_supported_physical_layout,
 )
 from ..providers.base import ProviderHTTPError, ProviderRequestError
+from ..providers.gemini_wire import project_material_part
 from ..providers.v2_base import V2ExecutionContext
 from ..observability import elapsed_ms, error as log_error, info as log_info, now_ms, exception_failure_class, warning as log_warning
 from ..storage_paths import request_object_path_v2, session_history_request_path
@@ -103,7 +104,12 @@ class SharedExecutionRuntime:
         )
         self._assert_frozen_route(session, snapshot, request_id=request_id)
         history: list[dict[str, Any]] = []
-        if session.get("context_policy") == "conversation" and session.get("history_object_id"):
+        cumulative_history = snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn"
+        native_gemini = (
+            str(snapshot.get("provider") or "") == "gemini"
+            and snapshot.get("protocol", "gemini_native") == "gemini_native"
+        )
+        if cumulative_history and session.get("context_policy") == "conversation" and session.get("history_object_id"):
             loaded = await self._load_json_object(
                 session["history_object_id"],
                 tenant_id=request_row["tenant_id"],
@@ -112,9 +118,6 @@ class SharedExecutionRuntime:
             if isinstance(loaded, list):
                 history = loaded
 
-        prefix_v2 = unified_cache_enabled(snapshot)
-        if prefix_v2:
-            history = restore_history(history, scope=history_scope(snapshot))
         material_ids = list(snapshot.get("material_ids") or [])
         if session.get("context_policy") == "conversation":
             base = session.get("material_manifest") or []
@@ -138,6 +141,11 @@ class SharedExecutionRuntime:
             )
 
         upgrade = snapshot.get("cache_upgrade") or {}
+        if int(upgrade.get("version") or 0) >= 3 and upgrade.get("grok_mode") != "legacy_v1":
+            try:
+                history = freeze_history(history)
+            except ValueError as exc:
+                raise ProviderRequestError("HISTORY_INTEGRITY_MISMATCH", str(exc)) from exc
         affinity_rows = []
         wire = {}
         rotated_affinity = False
@@ -146,7 +154,11 @@ class SharedExecutionRuntime:
             if wire["normalize"]:
                 affinity_rows = await self.repo.recent_affinity_observations(request_row)
             if affinity_rows and wire.get("affinity_token"):
-                reason = drift_reason(affinity_rows, epoch=wire["affinity_epoch"])
+                reason = drift_reason(
+                    affinity_rows, epoch=wire["affinity_epoch"],
+                    min_tokens=int(upgrade.get("implicit_min_tokens") or 2048),
+                    strategy=wire["affinity_eviction_strategy"],
+                )
                 if reason and str(session.get("affinity_eviction_request_id")) != request_id:
                     session = await rotate_affinity(self.repo, request_row, session, fence, reason)
                     rotated_affinity = True
@@ -171,7 +183,7 @@ class SharedExecutionRuntime:
             request_id=request_id,
             session_id=session_id,
             gemini_inline_cache_strategy=(
-                str(snapshot.get("provider") or "") == "gemini"
+                native_gemini
                 and uses_inline_cache_transport_layout(session)
             ),
             gemini_session_material_ids=(
@@ -181,6 +193,8 @@ class SharedExecutionRuntime:
                 if uses_request_material_cache_candidates_layout(session)
                 else []
             ),
+            document_projection_contract=(snapshot.get("capability_contract") if
+                int(upgrade.get("version") or 0) >= 3 and upgrade.get("grok_mode") != "legacy_v1" else None),
         )
         log_info(
             logger,
@@ -213,11 +227,19 @@ class SharedExecutionRuntime:
                 )
 
         context_plan = snapshot.get("context_plan") if isinstance(snapshot.get("context_plan"), dict) else None
+        if (int(upgrade.get("version") or 0) >= 3 and upgrade.get("grok_mode") != "legacy_v1"
+                and context_plan is not None):
+            expected_turns = [s["canonical_content_hash"] for s in context_plan.get("segments") or []
+                              if s.get("domain") == "history"]
+            actual_turns = [stable_hash(turn.get("transport_history") or {}) for turn in history]
+            if expected_turns != actual_turns:
+                raise ProviderRequestError("HISTORY_INTEGRITY_MISMATCH", "History no longer matches the accepted ContextPlan")
         provider_physical_plan: dict[str, Any] | None = None
+        cache_material_projection = None
         material_reuse_observation = None
         if (
             is_v3
-            and str(snapshot.get("provider") or "") == "gemini"
+            and native_gemini
             and uses_supported_physical_layout(session)
         ):
             if context_plan is None:
@@ -298,40 +320,27 @@ class SharedExecutionRuntime:
                 ),
             )
 
-        prepared_native = None
-        native_context = None
-        prefix_reuse = None
-        if prefix_v2:
-            native_adapter = self.providers.get_v2(str(snapshot["connection_id"]))
-            if not callable(getattr(native_adapter, "prepare_native", None)):
-                raise ProviderRequestError("CACHE_NATIVE_PREPARATION_UNSUPPORTED", "Frozen adapter has no native preparation boundary")
-            native_context = V2ExecutionContext(
-                snapshot=snapshot, session=session, history=history, material_ids=material_ids,
-                material_bindings=material_bindings, tenant_id=request_row["tenant_id"],
-                conversation_hash=request_row["conversation_hash"], request_id=request_id,
-                session_id=session_id, context_plan=context_plan, provider_physical_plan=provider_physical_plan)
-            with wire_context(wire):
-                full_native = await native_adapter.prepare_native(native_context)
-            full_payload = normalize_wire(full_native["payload"], protocol=wire.get("protocol") or "",
-                                          unordered_tools=wire.get("unordered_tools") is True)
-            try:
-                observations = await self.repo.prefix_reuse_observations(request_row)
-            except Exception as exc:
-                log_warning(logger, "prefix_reuse_evidence_unavailable", request_id=request_id,
-                            error_type=type(exc).__name__)
-                observations = []
-            candidates = []
-            for row in observations:
-                audit = (row.get("cache_usage") or {}).get("prefix_reuse_audit") or {}
-                if audit.get("scope") == wire["scope"]:
-                    candidates.append({**audit, "request_id": str(row["id"])})
-            prefix_reuse = ImplicitPrefixPlanner().prepare(
-                full_payload, scope=wire["scope"], previous=[], candidates=candidates,
-                material_bindings=material_bindings, history=history)
-            wire["material_bindings"] = material_bindings
-            wire["history"] = history
-
         cache_binding = None
+        if int(upgrade.get("version") or 0) >= 3:
+            # Bind native URI/inline representations back to Canonical Material
+            # solely for semantic-vs-wire divergence diagnosis.
+            identity_bindings = list(material_bindings)
+            if native_gemini and cache_material_projection:
+                identity_bindings += cache_material_projection.get("cache_material_bindings") or []
+            identities = {}
+            for material_binding in identity_bindings:
+                if (material_binding.get("content_sha256") and
+                    (material_binding.get("representation") or material_binding.get("binding_kind")) in {
+                        "gemini_inline_data", "gemini_external_url", "gemini_file_uri"}):
+                    part = project_material_part(material_binding, material_id=material_binding.get("material_id"))
+                    identities[stable_hash(part)] = {
+                        "material_id": material_binding.get("material_id"),
+                        "sha256": material_binding["content_sha256"],
+                        "content_type": material_binding.get("content_type"),
+                        "projection_sha256": material_binding.get("projection_sha256"),
+                        "class": material_cache_class(material_binding.get("content_type")),
+                    }
+            wire["material_identities"] = identities
         execution_snapshot = snapshot
         if is_v3:
             if context_plan is None or fence is None:
@@ -340,8 +349,23 @@ class SharedExecutionRuntime:
                     "Cache-aware Request is missing its frozen ContextPlan",
                 )
             async def prepare_binding():
-                if upgrade.get("version") == 2 and upgrade.get("grok_mode") == "legacy_v1":
-                    return legacy_grok_binding(snapshot, context_plan, material_bindings, session)
+                if int(upgrade.get("version") or 0) >= 3 and upgrade.get("grok_mode") == "legacy_v1":
+                    # Preserve legacy Grok key/history/store projection while
+                    # keeping the shared execution fence and dispatch seal.
+                    plan = snapshot.get("cache_plan") or {}
+                    mechanism = plan.get("planned_mechanism")
+                    if mechanism not in {None, "implicit_prefix"}:
+                        raise CacheDecisionError("CACHE_LEGACY_PLAN_INVALID", "Grok legacy plan cannot prepare resources")
+                    prefix = prepare_implicit_prefix_binding(
+                        plan=plan, context_plan=context_plan, session=session, provider=snapshot.get("provider"),
+                        snapshot=snapshot,
+                    ) if mechanism == "implicit_prefix" else {}
+                    return CacheExecutionBinding(
+                        mechanism=mechanism, decision_reason="grok_legacy_bypass",
+                        context_plan_hash=context_plan["context_plan_hash"], plan_hash=snapshot["cache_plan_hash"],
+                        material_binding_hash=stable_hash(material_bindings), prefix=prefix,
+                        metadata={"grok_legacy_bypass": True},
+                    )
                 with wire_context(wire):
                     return await self.cache.prepare(
                         request_row=request_row,
@@ -368,31 +392,12 @@ class SharedExecutionRuntime:
                 plan = snapshot.get("cache_plan") or {}
                 cache_binding_obj = replace(cache_binding_obj, metadata={
                     **cache_binding_obj.metadata,
-                    "tracks": final_track_facts(plan, cache_binding_obj.mechanism),
+                    "tracks": (cache_binding_obj.metadata["tracks"]
+                               if plan.get("schema_version") == "relay-unified-cache-plan/1"
+                               else final_track_facts(plan, cache_binding_obj.mechanism)),
                     "affinity_epoch": wire.get("affinity_epoch"),
                     "affinity_token_hash": stable_hash(wire.get("affinity_token")) if wire.get("affinity_token") else None,
                 })
-            if prefix_reuse is not None:
-                # A drift rotation changes physical authorization scope. Re-plan before the seal.
-                if prefix_reuse["scope"] != wire["scope"]:
-                    prefix_reuse = ImplicitPrefixPlanner().prepare(
-                        full_payload, scope=wire["scope"], previous=[],
-                        material_bindings=material_bindings, history=history)
-                    wire["material_bindings"], wire["history"] = material_bindings, history
-                summary = prefix_summary(prefix_reuse)
-                cache_binding_obj = replace(cache_binding_obj,
-                    prefix={**cache_binding_obj.prefix, "native_prefix_plan": summary},
-                    metadata={**cache_binding_obj.metadata, "implicit_prefix_plan": summary})
-                final_context = replace(native_context, session=session,
-                    cache_execution_binding=cache_binding_obj.canonical(include_provider_handle=True))
-                with wire_context(wire):
-                    prepared_native = native_adapter.finalize_native(final_context, full_native)
-                prepared_native["payload"] = normalize_wire(prepared_native["payload"],
-                    protocol=wire.get("protocol") or "", unordered_tools=wire.get("unordered_tools") is True)
-                body_hash = hashlib.sha256(native_json_bytes(prepared_native["payload"])).hexdigest()
-                wire["expected_inference_body_sha256"] = body_hash
-                cache_binding_obj = replace(cache_binding_obj,
-                    metadata={**cache_binding_obj.metadata, "native_body_sha256": body_hash})
             cache_binding = cache_binding_obj.canonical(include_provider_handle=True)
             if cache_binding_obj.mechanism == "stateful_resource" and not str(cache_binding_obj.provider_handle or "").strip():
                 log_error(
@@ -438,7 +443,6 @@ class SharedExecutionRuntime:
                     "material_bindings": material_bindings,
                     "provider_physical_plan_hash": (provider_physical_plan or {}).get("physical_plan_hash"),
                     "cache_binding": cache_binding,
-                    **({"native_body_sha256": wire["expected_inference_body_sha256"]} if prefix_v2 else {}),
                 }
             )
             sealed = await self.repo.seal_cache_and_dispatch_v3(
@@ -503,7 +507,6 @@ class SharedExecutionRuntime:
                         cache_execution_binding=cache_binding,
                         execution_fence=(fence.canonical() if fence is not None else None),
                         provider_physical_plan=provider_physical_plan,
-                        prepared_native=prepared_native,
                     )
                 )
         except Exception as exc:
@@ -677,6 +680,9 @@ class SharedExecutionRuntime:
                 "reason": "provider_usage_or_frozen_price_schedule_incomplete",
             }
             cache_plan_config = plan.get("mechanism_config") if isinstance(plan.get("mechanism_config"), dict) else {}
+            if plan.get("schema_version") == "relay-unified-cache-plan/1":
+                cache_plan_config = ((plan.get("candidates") or {}).get(cache_mechanism) or {}).get("mechanism_config") or {}
+                cache_usage["arbitration"] = cache_metadata.get("arbitration")
             price_schedule = cache_plan_config.get("prefix_growth") if isinstance(cache_plan_config.get("prefix_growth"), dict) else {}
             economics_for_observation = cache_plan_config.get("auto_economics") if isinstance(cache_plan_config.get("auto_economics"), dict) else {}
             resolver_version = str(plan.get("resolver_version") or "")
@@ -815,11 +821,6 @@ class SharedExecutionRuntime:
                 )
                 if cache_metadata.get("prefix_growth_decision") is not None:
                     cache_usage["prefix_growth_decision"] = cache_metadata.get("prefix_growth_decision")
-            if prefix_reuse is not None:
-                cache_usage["prefix_reuse_audit"] = {
-                    "scope": prefix_reuse["scope"], "physical_chain": prefix_reuse["physical_chain"],
-                    "summary": prefix_summary(prefix_reuse)}
-                cache_usage["prefix_reuse"] = prefix_summary(prefix_reuse)
             if upgrade and wire.get("normalize"):
                 cache_usage["affinity_audit"] = {
                     "affinity_epoch": wire.get("affinity_epoch"),
@@ -829,10 +830,33 @@ class SharedExecutionRuntime:
                     "prefix_diff": wire.get("prefix_diff"),
                     "compared_request_id": wire.get("compared_request_id"),
                     "read_tokens": cache_usage.get("cache_read_tokens"),
-                    "implicit_active": bool((cache_metadata.get("tracks") or {}).get("implicit_base")),
+                    "implicit_active": bool((cache_metadata.get("tracks") or {}).get(
+                        "implicit_effective" if int(upgrade.get("version") or 0) >= 2 else "implicit_base"
+                    )),
                     "payload_sha256": wire.get("payload_sha256"),
                 }
                 cache_usage["cache_tracks"] = cache_metadata.get("tracks")
+            if int(upgrade.get("version") or 0) >= 2:
+                audit = normalize_observed_cache_audit(
+                    protocol=str(snapshot.get("protocol") or ""), response_json=result.raw_json,
+                    response_headers=wire.get("route_observation") or {},
+                    track_facts=cache_metadata.get("tracks") or {},
+                    payload_stripped_bytes=int((result.observed or {}).get("payload_stripped_bytes") or 0),
+                )
+                action = (
+                    "BYPASS_OFF" if snapshot.get("requested_cache_mode") == "off"
+                    else "IMPLICIT_WATCHDOG_BELOW_THRESHOLD" if cache_decision_reason == "insufficient_prefix_length"
+                    else "ROLL_STATEFUL_SNAPSHOT" if cache_resource_action == "created" and cache_metadata.get("prefix_growth_decision")
+                    else "CREATE_INITIAL_STATEFUL" if cache_resource_action == "created"
+                    else "REUSE_STATEFUL_WITH_SUFFIX" if cache_mechanism == "stateful_resource"
+                    else "BREAKPOINT_AND_IMPLICIT" if cache_mechanism == "breakpoint"
+                    else "IMPLICIT_ONLY_ACTIVE" if cache_mechanism == "implicit_prefix"
+                    else "UNCACHED_SAME_CONTEXT"
+                )
+                cache_usage.update(
+                    observed_cache_audit=audit, payload_stripped_bytes=audit["payload_stripped_bytes"],
+                    cache_decision_reason=cache_decision_reason, action=action,
+                )
             compact_result["cache"] = {
                 "material_reuse": material_reuse_observation if str(snapshot.get("provider") or "").lower() == "gemini" else None,
                 "material_fingerprint": ((context_plan or {}).get("material_reuse") or {}).get("ordered_material_fingerprint"),
@@ -851,7 +875,7 @@ class SharedExecutionRuntime:
                 # installed and sealed, so any final-threshold guard is resolved.
                 "resolution_status": "finalized",
                 "decision_reason": cache_decision_reason,
-                **{k: v for k, v in cache_usage.items() if k not in {"affinity_audit", "prefix_reuse_audit"}},
+                **{k: v for k, v in cache_usage.items() if k != "affinity_audit"},
             }
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
@@ -861,7 +885,7 @@ class SharedExecutionRuntime:
             compact_result["text_truncated"] = True
 
         history_object_id = None
-        if session.get("context_policy") == "conversation":
+        if cumulative_history and session.get("context_policy") == "conversation":
             new_history = list(history)
             entry = {
                 "request_id": request_row["id"],
@@ -870,8 +894,8 @@ class SharedExecutionRuntime:
             entry.update(
                 canonical_structure(result.history_entry) if wire.get("normalize") else result.history_entry
             )
-            if prefix_v2:
-                entry = freeze_history_turn(entry, scope=history_scope(snapshot))
+            if int(upgrade.get("version") or 0) >= 3 and wire.get("normalize"):
+                entry = freeze_history_turn(entry)
             new_history.append(entry)
             history_object_id = await self._store_history(
                 request_row,

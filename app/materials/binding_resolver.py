@@ -13,6 +13,7 @@ from ..v2_repository import RelayV2Repository
 from ..providers.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION_V9
 from .fallback_storage import FallbackObjectStorage
 from .projection_store import reusable_inline_data
+from .document_projection import DOCX, projection_authorized, prepare_document_binding
 from .gemini_cache_projection import (
     GEMINI_CACHE_PROJECTION_VERSION,
     GEMINI_CACHE_PROJECTION_VERSION_V3,
@@ -60,6 +61,7 @@ class BindingResolver:
         session_id: str | None = None,
         gemini_inline_cache_strategy: bool = False,
         gemini_session_material_ids: list[str] | None = None,
+        document_projection_contract: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         # Once a Request has frozen bindings, retries reuse those exact provider
         # identities instead of silently switching generations. The frozen
@@ -178,6 +180,38 @@ class BindingResolver:
         snapshots: list[dict[str, Any]] = []
         for material in materials:
             material_id = str(material["id"])
+
+            if (str(material.get("content_type") or "").split(";", 1)[0].lower() == DOCX
+                    and projection_authorized(document_projection_contract)):
+                fallback = await self.repo.get_material_fallback(material_id)
+                if not fallback:
+                    raise ProviderRequestError("MATERIAL_REUPLOAD_REQUIRED", "DOCX bridge requires original Relay bytes")
+                try:
+                    projected = await prepare_document_binding(
+                        repo=self.repo, fallback_store=self.fallback, material=material, fallback=fallback,
+                        connection_id=connection_id, account_scope_hash=(adapter.account_scope_hash if adapter else "relay-fallback"),
+                        tenant_id=tenant_id, conversation_hash=conversation_hash, session_id=session_id,
+                    )
+                except ProviderRequestError as exc:
+                    if exc.code != "DOCX_PROJECTION_INELIGIBLE":
+                        raise
+                    native_mimes = ((document_projection_contract or {}).get("metadata") or {}).get(
+                        "native_material_mime_types", [])
+                    if not isinstance(native_mimes, (list, tuple)) or DOCX not in native_mimes:
+                        raise
+                    log_warning(logger, "document_projection_ineligible", material_id=material_id,
+                                session_id=session_id, reason=exc.message)
+                    projected = None
+                if projected is not None:
+                    if gemini_decision is not None:
+                        from .resolver import MaterialResolver
+                        data = await MaterialResolver(self.repo, self.fallback.storage, self.fallback.settings).read_bound_text(
+                            projected, tenant_id=tenant_id, conversation_hash=conversation_hash)
+                        projected.update(representation=GEMINI_INLINE_CACHE_REPRESENTATION,
+                                         binding_kind=GEMINI_INLINE_CACHE_REPRESENTATION,
+                                         inline_data=base64.b64encode(data).decode("ascii"))
+                    snapshots.append(projected)
+                    continue
 
             if adapter is None:
                 fallback = await self.repo.get_material_fallback(material_id)
@@ -317,6 +351,15 @@ class BindingResolver:
             else []
         )
 
+        # Admission consumes the derived representation's actual bytes. The
+        # source DOCX identity/MIME is retained in Canonical Material and binding.
+        projected_by_id = {str(b.get("material_id")): b for b in material_bindings if b.get("projection_object_id")}
+        if cache_budget_bytes is not None and projected_by_id:
+            rows = [{**row, "actual_size": projected_by_id[str(row["id"])]["projection_size_bytes"],
+                     "content_type": "text/plain", "metadata": {**(row.get("metadata") or {}),
+                     "is_docx_text_projection": True}}
+                    if str(row["id"]) in projected_by_id else row for row in rows]
+
         try:
             if is_inline_cache_layout:
                 planned_obj = plan_gemini_cache_materials(
@@ -362,6 +405,14 @@ class BindingResolver:
             binding = binding_by_id.get(material_id)
             row = row_by_id.get(material_id)
             if binding is None or row is None:
+                continue
+
+            if material_id in projected_by_id:
+                projected = projected_by_id[material_id]
+                cache_bindings.append(dict(projected))
+                actual_cache_ids.append(material_id)
+                reuse_observation["reused"] += 1
+                reuse_observation["reused_bytes"] += projected["projection_size_bytes"]
                 continue
 
             if material_id not in inline_set:

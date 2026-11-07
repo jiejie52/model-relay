@@ -38,9 +38,10 @@ class ClaudeMessagesV2Adapter:
         self.connection_id = connection_id
         self.channel_id = channel_id
 
-    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         messages: list[dict[str, Any]] = []
-        if context.session.get("context_policy") == "conversation":
+        if (context.session.get("context_policy") == "conversation"
+                and context.snapshot.get("history_mode", context.session.get("history_mode", "cumulative")) != "ephemeral_turn"):
             for turn in context.history:
                 transport = turn.get("transport_history") if isinstance(turn, dict) else None
                 if not isinstance(transport, dict) or transport.get("kind") != "claude_messages":
@@ -73,18 +74,6 @@ class ClaudeMessagesV2Adapter:
         self._apply_thinking_and_output(payload, context.snapshot)
         self._apply_cache_binding(payload, context.cache_execution_binding or {})
 
-        return {"payload": payload, "user_message": user_message}
-
-    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
-        import copy
-        prepared = copy.deepcopy(prepared)
-        self._apply_cache_binding(prepared["payload"], context.cache_execution_binding or {})
-        return prepared
-
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
-        prepared = context.prepared_native or await self.prepare_native(context)
-        payload = prepared["payload"]
-        user_message = prepared["user_message"]
         url = f"{self.base_url}/v1/messages"
         headers = {
             "x-api-key": self.api_key,
@@ -225,6 +214,11 @@ class ClaudeMessagesV2Adapter:
             data = resolved.data or b""
             mime = str(resolved.material.get("content_type") or "application/octet-stream").lower()
             filename = str(resolved.material.get("filename") or material_id)
+            binding = next((b for b in context.material_bindings if str(b.get("material_id")) == material_id), {})
+            projected = await self.materials.read_bound_text(binding, tenant_id=context.tenant_id,
+                                                             conversation_hash=context.conversation_hash) if binding.get("projection_object_id") else None
+            if projected is not None:
+                data, mime = projected, "text/plain"
             if mime.startswith("text/") or mime in {"application/json", "application/xml"}:
                 text = data.decode("utf-8", errors="strict")
                 begin, end = source_markers(material_id, filename, upgraded=normalization_active())

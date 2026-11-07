@@ -51,16 +51,6 @@ class RelayV2Repository(RelayRepository):
             limit=3,
         )
 
-    async def prefix_reuse_observations(self, request_row: dict[str, Any]) -> list[dict[str, Any]]:
-        """Bounded content evidence only. It neither authorizes resources nor predicts hits."""
-        return await self.backend.select(
-            "relay_requests", filters={
-                "session_id": f"eq.{request_row['session_id']}",
-                "tenant_id": f"eq.{request_row['tenant_id']}",
-                "conversation_hash": f"eq.{request_row['conversation_hash']}",
-                "status": "eq.succeeded", "completed_at": "not.is.null",
-            }, select="id,cache_usage,completed_at", order="completed_at.desc,id.desc", limit=32)
-
     async def rotate_cache_affinity(self, request_id: str, epoch: int, token: str,
                                     reason: str, fence: Any) -> bool:
         return bool(await self.backend.rpc("rotate_cache_affinity_v65", {
@@ -349,10 +339,12 @@ class RelayV2Repository(RelayRepository):
         expected_history_version: int,
         metadata: dict[str, Any],
         job_id: str | None,
+        route_pin: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         result = await self.backend.rpc(
-            "accept_relay_request_v3",
+            "accept_relay_request_v66" if route_pin is not None else "accept_relay_request_v3",
             {
+                **({"p_route_pin": route_pin} if route_pin is not None else {}),
                 "p_session_id": session_id,
                 "p_request_id": request_id,
                 "p_tenant_id": tenant_id,
@@ -773,7 +765,7 @@ class RelayV2Repository(RelayRepository):
         fence_epoch: int,
     ) -> bool:
         result = await self.backend.rpc(
-            "store_relay_result_v3",
+            "store_relay_result_v66",
             {
                 "p_request_id": request_id,
                 "p_result_object_id": result_object_id,
@@ -803,7 +795,7 @@ class RelayV2Repository(RelayRepository):
         fence_epoch: int,
     ) -> bool:
         result = await self.backend.rpc(
-            "complete_relay_request_v3",
+            "complete_relay_request_v66",
             {
                 "p_request_id": request_id,
                 "p_session_id": session_id,

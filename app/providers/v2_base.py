@@ -43,8 +43,6 @@ class V2ExecutionContext:
     # transient fileData URIs and is intentionally never persisted as the
     # canonical Session/History; only its hashes enter the cache binding/seal.
     provider_physical_plan: dict[str, Any] | None = None
-    # In-memory, prepared before dispatch; never contains credentials.
-    prepared_native: dict[str, Any] | None = None
 
 
 class V2ProviderAdapter(Protocol):

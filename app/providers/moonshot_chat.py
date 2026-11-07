@@ -38,7 +38,7 @@ class MoonshotChatAdapter:
         self.materials = materials
         self.repo = repo
 
-    async def prepare_native(self, context: V2ExecutionContext) -> dict[str, Any]:
+    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
         if self.settings.moonshot_api_key is None:
             raise ProviderRequestError(
                 "CONNECTION_NOT_CONFIGURED",
@@ -46,7 +46,8 @@ class MoonshotChatAdapter:
             )
 
         messages: list[dict[str, Any]] = []
-        if context.session.get("context_policy") == "conversation":
+        if (context.session.get("context_policy") == "conversation"
+                and context.snapshot.get("history_mode", context.session.get("history_mode", "cumulative")) != "ephemeral_turn"):
             for turn in context.history:
                 transport = turn.get("transport_history") if isinstance(turn, dict) else None
                 if not isinstance(transport, dict) or transport.get("kind") != "moonshot_chat":
@@ -91,17 +92,6 @@ class MoonshotChatAdapter:
                     },
                 }
 
-        return {"payload": payload, "user_message": user_message}
-
-    def finalize_native(self, context: V2ExecutionContext, prepared: dict[str, Any]) -> dict[str, Any]:
-        import copy
-        prepared = copy.deepcopy(prepared)
-        return prepared
-
-    async def execute(self, context: V2ExecutionContext) -> V2ProviderResult:
-        prepared = context.prepared_native or await self.prepare_native(context)
-        payload = prepared["payload"]
-        user_message = prepared["user_message"]
         url = f"{self.settings.moonshot_root}/chat/completions"
         timeout = httpx.Timeout(
             connect=self.settings.upstream_connect_timeout_seconds,
@@ -199,6 +189,12 @@ class MoonshotChatAdapter:
                 )
             filename = str(binding.get("filename") or material_id)
             purpose = str(binding.get("purpose") or "")
+            if binding.get("projection_object_id"):
+                raw = await self.materials.read_bound_text(binding, tenant_id=context.tenant_id,
+                                                          conversation_hash=context.conversation_hash)
+                begin, end = source_markers(material_id, filename, upgraded=True)
+                system_messages.append({"role": "system", "content": f"{begin}\n{raw.decode('utf-8')}\n{end}"})
+                continue
             if purpose == "file-extract":
                 metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
                 extraction_object_id = metadata.get("extraction_object_id")

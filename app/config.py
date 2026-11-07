@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     relay_http_wire_log_redact_auth: bool = True
     relay_http_wire_log_directory: str = "/tmp/relay-http-wire"
     relay_inline_cache_budget_bytes: int = Field(60 * 1024 * 1024, gt=0, le=60 * 1024 * 1024)
+    relay_cache_roll_max_uncached_tokens: int = Field(16384, gt=0)
+    relay_implicit_prefix_min_tokens: int = Field(1024, gt=0)
+    relay_tail_turn_min_reserve_chars: int = Field(1, ge=1)
+    relay_cache_roll_min_delta_tokens: int = Field(2048, gt=0)
     relay_cache_roll_alpha: float = Field(0.5, gt=0, allow_inf_nan=False)
     relay_grok_cache_mode: Literal["unified_v2", "legacy_v1"] = "unified_v2"
 

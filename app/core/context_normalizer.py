@@ -1,6 +1,7 @@
 """Equivalence rules for Relay-owned structure. Literal strings and arrays stay intact."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .idempotency import canonical_json_bytes
@@ -47,9 +48,19 @@ def source_markers(material_id: str, filename: str, *, upgraded: bool) -> tuple[
     return f"[SOURCE_FILE:{identity}]", f"[END_SOURCE_FILE:{identity}]"
 
 
-def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool = False) -> dict[str, Any]:
+def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool = False,
+                             response_schemas: bool = False) -> dict[str, Any]:
     """Canonicalize declared tool schemas while retaining tool ordering by default."""
-    result = dict(payload)
+    result = canonical_structure(payload) if response_schemas else dict(payload)
+    if response_schemas:
+        for path in (("generationConfig", "responseSchema"), ("generationConfig", "responseJsonSchema"),
+                     ("output_config", "format", "schema"), ("response_format", "json_schema", "schema"),
+                     ("text", "format", "schema")):
+            node = result
+            for key in path[:-1]:
+                node = node.get(key) if isinstance(node, dict) else None
+            if isinstance(node, dict) and isinstance(node.get(path[-1]), dict):
+                node[path[-1]] = canonical_schema(node[path[-1]])
     if not isinstance(result.get("tools"), list):
         return result
 
@@ -66,6 +77,11 @@ def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool =
             normalized["functionDeclarations"] = [
                 normalize_tool(declaration) for declaration in normalized["functionDeclarations"]
             ]
+            declarations = normalized["functionDeclarations"]
+            if response_schemas and unordered_tools and all(isinstance(d, dict) for d in declarations):
+                names = [d.get("name") for d in declarations]
+                if all(isinstance(name, str) and name for name in names) and len(set(names)) == len(names):
+                    normalized["functionDeclarations"] = sorted(declarations, key=lambda d: d["name"])
         return normalized
 
     tools = [normalize_tool(tool) for tool in result["tools"]]
@@ -78,46 +94,43 @@ def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool =
     return result
 
 
-def serialize_wire(payload: dict[str, Any]) -> bytes:
+def serialize_wire(payload: dict[str, Any], *, system_instruction_first: bool = True) -> bytes:
     """Serialize the native JSON without touching any model-visible literal."""
-    return canonical_json_bytes(payload)
+    canonical = canonical_structure(payload)
+    if system_instruction_first and "systemInstruction" in canonical:
+        canonical = {"systemInstruction": canonical["systemInstruction"],
+                     **{key: value for key, value in canonical.items() if key != "systemInstruction"}}
+        return json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return canonical_json_bytes(canonical)
 
 
-def unified_cache_enabled(snapshot: dict[str, Any]) -> bool:
-    """Only newly frozen 6.6 requests opt in. Never upgrade old recovery facts."""
-    upgrade = snapshot.get("cache_upgrade") or {}
-    policy = snapshot.get("cache_policy") or {}
-    return (upgrade.get("version") == 2 and upgrade.get("grok_mode") != "legacy_v1"
-            and snapshot.get("requested_cache_mode") != "off" and not policy.get("deny")
-            and not (snapshot.get("requested_cache_mode") == "auto" and policy.get("auto_disabled")))
+def freeze_history_turn(entry: dict[str, Any]) -> dict[str, Any]:
+    """Freeze native turn blocks once; timestamps/request IDs never enter them.
 
-
-class SemanticEquivalenceNormalizer:
-    """Normalize owned structure; never search/replace model-visible literals."""
-    contract = {"version": "relay-equivalence/2", "literal_text": "preserved",
-                "role_and_part_order": "preserved", "relay_ephemeral_metadata": "audit_only",
-                "history": "scoped_frozen_native_fragments"}
-
-    def normalize_request(self, snapshot: dict[str, Any]) -> dict[str, Any]:
-        result = dict(snapshot)
-        result["input"] = canonical_structure(snapshot.get("input"))
-        result["structured_output"] = normalize_structured_output(snapshot.get("structured_output") or {})
-        return result
-
-
-def normalize_wire(payload: dict[str, Any], *, protocol: str, unordered_tools: bool = False) -> dict[str, Any]:
-    """One projection used by preparation and transport; literal text is immutable.
-
-    Relay request IDs/timestamps stay in audit metadata, never in this content
-    projection. No regex-based removal of caller text or user-owned JSON keys.
+    The existing transport_history is the authoritative immutable representation,
+    not a second rendered copy. Hashes bind that representation and each native
+    block. A corrupted frozen turn fails before dispatch rather than being repaired.
     """
-    result = canonical_structure(normalize_native_payload(payload, unordered_tools=unordered_tools))
-    if protocol == "gemini_native" and "systemInstruction" in result:
-        result = {"systemInstruction": result["systemInstruction"],
-                  **{k: v for k, v in result.items() if k != "systemInstruction"}}
+    from .idempotency import stable_hash
+
+    result = canonical_structure(entry)
+    transport = result.get("transport_history")
+    if not isinstance(transport, dict):
+        return result
+    blocks = []
+    for field in ("user_content", "model_content", "user_message", "assistant_message", "user_item", "response_output"):
+        if field in transport:
+            value = transport[field]
+            blocks.append({"field": field, "semantic_hash": stable_hash(value),
+                           "wire_sha256": stable_hash(value),
+                           "raw_byte_size": len(canonical_json_bytes(value))})
+    frozen = {"format": "relay-frozen-turn/1", "transport_hash": stable_hash(transport), "blocks": blocks}
+    prior = entry.get("_relay_context_freeze")
+    if prior is not None and prior != frozen:
+        raise ValueError("Frozen history transport or native blocks changed")
+    result["_relay_context_freeze"] = frozen
     return result
 
 
-def native_json_bytes(payload: dict[str, Any]) -> bytes:
-    import json
-    return json.dumps(payload, ensure_ascii=False, sort_keys=False, separators=(",", ":")).encode("utf-8")
+def freeze_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [freeze_history_turn(turn) for turn in history]

@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from ..core.idempotency import stable_hash
+from ..core.context_normalizer import normalize_native_payload
 from .base import ProviderRequestError
 from .gemini_wire import (
     project_current_user_content,
@@ -185,6 +186,11 @@ def build_gemini_physical_cache_plan(
     """
 
     layout_version = session_projection_version(session)
+    if int((snapshot.get("cache_upgrade") or {}).get("version") or 0) >= 3:
+        snapshot = {**snapshot, "provider_payload": normalize_native_payload(
+            snapshot.get("provider_payload") or {}, response_schemas=True,
+            unordered_tools=(((snapshot.get("protocol_profile") or {}).get("cache") or {}).get("unordered_tools") is True),
+        )}
     if layout_version not in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS:
         raise ProviderRequestError(
             "GEMINI_PHYSICAL_LAYOUT_UNAVAILABLE",
@@ -519,6 +525,9 @@ def _build_gemini_physical_cache_plan_v9(
     Sessions; resource lookup remains fenced by the Session cache scope.
     """
     model = str(snapshot.get("model") or "").strip()
+    upgraded = int((snapshot.get("cache_upgrade") or {}).get("version") or 0) >= 2
+    cache_contract = snapshot.get("cache_contract") or {}
+    allow_tool_cache = upgraded and cache_contract.get("enable_payload_stripping") is True
     context_policy = str(session.get("context_policy") or "conversation")
     manifest = (
         session.get("material_manifest")
@@ -682,10 +691,20 @@ def _build_gemini_physical_cache_plan_v9(
         "structured_output_hash": stable_hash(snapshot.get("structured_output") or {}),
         "provider_payload_hash": stable_hash(snapshot.get("provider_payload") or {}),
     }
-    unsupported_cached_fields = sorted(
+    unsupported_cached_fields = [] if allow_tool_cache else sorted(
         key for key, value in tool_definitions.items()
         if value not in (None, [], {})
     )
+    cache_tools = provider_payload.get("tools") if provider_payload.get("tools") is not None else snapshot.get("tools")
+    cache_tool_config = (
+        provider_payload.get("toolConfig") if provider_payload.get("toolConfig") is not None
+        else snapshot.get("tool_config", snapshot.get("toolConfig"))
+    )
+    if allow_tool_cache:
+        if cache_tools:
+            base_prefix["tools"] = copy.deepcopy(cache_tools)
+        if cache_tool_config:
+            base_prefix["toolConfig"] = copy.deepcopy(cache_tool_config)
     base_descriptor = {
         "system_instruction": cache_instruction,
         "cache_materials": cached_material_descriptors,
@@ -715,6 +734,9 @@ def _build_gemini_physical_cache_plan_v9(
             candidate["contents"] = contents
         if cache_instruction is not None:
             candidate["systemInstruction"] = copy.deepcopy(cache_instruction)
+        for field in ("tools", "toolConfig"):
+            if field in base_prefix:
+                candidate[field] = copy.deepcopy(base_prefix[field])
         return candidate
 
     def _candidate_spec(version: int, candidate_prefix: dict[str, Any]) -> dict[str, Any]:
@@ -772,9 +794,15 @@ def _build_gemini_physical_cache_plan_v9(
         max_history_prefix_version = version
         max_candidate_found = True
 
-    cacheable = bool(max_candidate_found and projection_safe and not unsupported_cached_fields)
+    tail_minimum = int((snapshot.get("cache_upgrade") or {}).get("tail_min_chars") or 1)
+    tail_parts = current_uncached_user.get("parts") or []
+    tail_text = "".join(str(part.get("text") or "") for part in tail_parts if isinstance(part, dict))
+    tail_safe = not upgraded or len(tail_text.strip()) >= tail_minimum
+    cacheable = bool(max_candidate_found and projection_safe and not unsupported_cached_fields and tail_safe)
     cacheability_reason = None
-    if not projection_safe:
+    if not tail_safe:
+        cacheability_reason = "tail_turn_reservation_violation"
+    elif not projection_safe:
         cacheability_reason = "history_material_projection_unsafe"
     elif unsupported_cached_fields:
         cacheability_reason = "cached_content_unsupported_provider_fields"
@@ -837,6 +865,11 @@ def _build_gemini_physical_cache_plan_v9(
     }
     if cache_instruction is not None:
         implicit_prefix_payload["systemInstruction"] = copy.deepcopy(cache_instruction)
+    if upgraded:
+        if cache_tools:
+            implicit_prefix_payload["tools"] = copy.deepcopy(cache_tools)
+        if cache_tool_config:
+            implicit_prefix_payload["toolConfig"] = copy.deepcopy(cache_tool_config)
     implicit_prefix_measurement_payload = copy.deepcopy(implicit_stable_prefix)
     effective_tools = provider_payload.get("tools") if provider_payload.get("tools") is not None else snapshot.get("tools")
     effective_tool_config = (
@@ -879,6 +912,10 @@ def _build_gemini_physical_cache_plan_v9(
     fallback_instruction = request_instruction or session_instruction
     if fallback_instruction is not None:
         full_uncached_payload["systemInstruction"] = copy.deepcopy(fallback_instruction)
+    if upgraded:
+        for key, value in (("tools", cache_tools), ("toolConfig", cache_tool_config)):
+            if value:
+                full_uncached_payload[key] = copy.deepcopy(value)
     if context_policy == "explicit" and implicit_prefix_payload != full_uncached_payload:
         raise ProviderRequestError(
             "GEMINI_PHYSICAL_PLAN_INVALID",
@@ -1111,6 +1148,10 @@ def _material_descriptor(material_id: str, binding: dict[str, Any], *, part_kind
         "representation": binding.get("representation") or binding.get("binding_kind"),
         "part_kind": part_kind,
     }
+    if binding.get("projection_object_id"):
+        descriptor.update(projection_version=binding.get("projection_version"),
+                          projection_sha256=binding.get("projection_sha256"),
+                          projected_content_type=binding.get("projected_content_type"))
     descriptor["representation_digest"] = stable_hash(descriptor)
     return descriptor
 

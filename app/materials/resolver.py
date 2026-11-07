@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any
 
 from ..config import Settings
@@ -77,6 +78,20 @@ class MaterialResolver:
         if not obj:
             raise LookupError(f"Object not found: {object_id}")
         return await self.read_object(obj)
+
+    async def read_bound_text(self, binding: dict[str, Any], *, tenant_id: str,
+                              conversation_hash: str) -> bytes | None:
+        object_id = binding.get("projection_object_id")
+        if not object_id:
+            return None
+        from ..providers.base import ProviderRequestError
+        obj = await self.repo.get_object(str(object_id), tenant_id=tenant_id, conversation_hash=conversation_hash)
+        if not obj or obj.get("sha256") != binding.get("projection_sha256"):
+            raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "Frozen document projection identity changed")
+        data = await self.read_object(obj)
+        if hashlib.sha256(data).hexdigest() != binding["projection_sha256"]:
+            raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "Frozen document projection bytes changed")
+        return data
 
     async def sign_object(self, obj: dict[str, Any], *, expires_in: int = 3600) -> str:
         location = ObjectLocation(

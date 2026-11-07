@@ -16,7 +16,15 @@ class AffinityDriftDetected(RuntimeError):
 
 
 def session_affinity_token(settings: Any, session: dict[str, Any], epoch: int) -> str:
-    identity = [str(session[key]) for key in ("tenant_id", "id", "connection_id")] + [epoch]
+    route = (session.get("metadata") or {}).get("_relay_route") or {}
+    if session.get("sticky_scope") == "conversation_family" and session.get("system_semantic_hash"):
+        identity = [
+            str(session["tenant_id"]), "conversation_family", str(session["conversation_hash"]),
+            route.get("offering_id") or session["connection_id"], route.get("account_scope_hash"),
+            route.get("protocol_profile_hash"), session["system_semantic_hash"], epoch,
+        ]
+    else:
+        identity = [str(session[key]) for key in ("tenant_id", "id", "connection_id")] + [epoch]
     secret = settings.relay_api_token.get_secret_value().encode()
     return hmac.new(secret, canonical_json_bytes(identity), hashlib.sha256).hexdigest()
 
@@ -26,7 +34,12 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
     upgrade = snapshot.get("cache_upgrade") or {}
     channel = str(snapshot.get("channel_id") or "")
     epoch = int(session.get("affinity_epoch") or 1)
-    token = session.get("session_affinity_token") or session_affinity_token(settings, session, epoch)
+    v66 = int(upgrade.get("version") or 0) >= 2
+    if v66 and session.get("sticky_scope") == "conversation_family":
+        token_session = {**session, "system_semantic_hash": stable_hash(snapshot.get("instructions") or "")}
+        token = session_affinity_token(settings, token_session, epoch)
+    else:
+        token = session.get("session_affinity_token") or session_affinity_token(settings, session, epoch)
     profile = (snapshot.get("protocol_profile") or {}).get("cache") or {}
     header = profile.get("affinity_header")
     if header is None and channel == "aihubmix":
@@ -48,10 +61,15 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
         "scope": stable_hash([session["id"], snapshot.get("route_binding_hash"), epoch,
                               route.get("account_scope_hash"), snapshot.get("protocol_profile_hash")]),
         "phase": "cache_prepare", "normalize": managed,
+        "affinity_eviction_strategy": (
+            (snapshot.get("cache_contract") or {}).get("affinity_eviction_strategy")
+            or profile.get("affinity_eviction_strategy")
+            or ("STATEFUL_HANDLE_STATUS_ONLY" if v66 and snapshot.get("protocol") == "gemini_native"
+                else "ROUTER_STICKY_AND_HIT_RATE")
+        ),
         "unordered_tools": profile.get("unordered_tools") is True,
         "semantic_fingerprint": (snapshot.get("context_plan") or {}).get("semantic_fingerprint"),
-        "prefix_version": 2 if upgrade.get("version") == 2 else 1,
-        "protocol": (snapshot.get("protocol_profile") or {}).get("protocol") or snapshot.get("protocol"),
+        "fingerprint_version": int(upgrade.get("fingerprint_version") or 1),
         "previous_chain": previous_chain, "affinity_epoch": epoch,
         "affinity_token": token if managed and header and hosts else None,
         "affinity_hosts": tuple(hosts or ()), "affinity_header": header,
@@ -68,12 +86,15 @@ def _audits(rows: list[dict[str, Any]], epoch: int) -> list[dict[str, Any]]:
 
 def drift_reason(rows: list[dict[str, Any]], *, epoch: int,
                  now: datetime | None = None, min_tokens: int = 2048,
-                 warm_seconds: int = 180, consecutive: int = 2) -> str | None:
+                 warm_seconds: int = 180, consecutive: int = 2,
+                 strategy: str = "ROUTER_STICKY_AND_HIT_RATE") -> str | None:
     audits = _audits(rows, epoch)
     if not audits or not audits[0]:
         return None
     if audits[0].get("handle_rejected_before_expiry") is True:
         return "unexpired_handle_inaccessible"
+    if strategy == "STATEFUL_HANDLE_STATUS_ONLY":
+        return None
     headers = audits[0].get("route") or {}
     if str(headers.get("x-aihubmix-router-fallback")).lower() == "true":
         return "upstream_router_fallback"
@@ -90,6 +111,7 @@ def drift_reason(rows: list[dict[str, Any]], *, epoch: int,
         diff = audit.get("prefix_diff") or {}
         if (audit.get("implicit_active") is not True or type(audit.get("read_tokens")) is not int
                 or audit["read_tokens"] != 0 or diff.get("lcp_estimated_tokens", 0) < min_tokens
+                or diff.get("comparable") is False
                 or audit.get("compared_request_id") != str(older["id"])):
             return None
         try:

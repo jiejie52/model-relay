@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contracts import CacheDecisionError, CacheIntentPlan, provider_managed_trial_enabled
+from .contracts import CacheConditionSet, CacheDecisionError, CacheIntentPlan, provider_managed_trial_enabled
 from .economics import (
     CACHE_READ_INPUT_RATIO,
     EXPLICIT_CREATE_INPUT_RATIO,
@@ -34,8 +34,9 @@ class CacheIntentResolver:
         mechanism_explicit: bool = False,
         reuse_evidence: dict[str, Any] | None = None,
         attachment_evidence: dict[str, Any] | None = None,
-    ) -> CacheIntentPlan:
+    ) -> CacheIntentPlan | CacheConditionSet:
         upgrade = context_plan.get("cache_upgrade") or {}
+        unified = int(upgrade.get("version") or 0) >= 4 and upgrade.get("grok_mode") != "legacy_v1"
         mode = str(requested_mode or "auto").strip().lower()
         preference = str(requested_mechanism or "auto").strip().lower()
         if mode not in {"off", "auto", "on"}:
@@ -59,7 +60,8 @@ class CacheIntentResolver:
         raw = contract.get("supported_mechanisms") or contract.get("mechanisms") or []
         declared = [str(v) for v in raw if str(v) in {"stateful_resource", "implicit_prefix", "breakpoint"}]
         supported_by_profile = {
-            str(x) for x in (profile_cache.get("supported_mechanisms") or declared)
+            str(x) for x in (profile_cache.get("supported_mechanisms", declared) if unified
+                             else profile_cache.get("supported_mechanisms") or declared)
         }
         candidates = [m for m in declared if m in supported_by_profile]
         verified = str(contract.get("verification_status") or "unverified").lower() in {
@@ -173,6 +175,10 @@ class CacheIntentResolver:
             and bool(str(provider or "").lower() == "gemini")
         )
         stable_prefix_ids = context_plan.get("stable_prefix_segment_ids") or []
+        v66 = int(upgrade.get("version") or 0) >= 2
+        chat_watchdog = v66 and (protocol_profile or {}).get("protocol") == "chat_completions" and (
+            contract.get("implicit_watchdog") or profile_cache.get("implicit_watchdog")
+        )
         cold_start = bool(
             upgrade and str(provider or "").lower() == "gemini"
             and stable_prefix_ids and stable_large_attachment
@@ -192,7 +198,7 @@ class CacheIntentResolver:
         explicit_first_read_advantage = False
         explicit_cost_preview: dict[str, Any] = {}
         if (
-            mode == "auto"
+            not unified and mode == "auto"
             and "stateful_resource" in candidates
             and (explicit_assessment_candidate or resource_hint)
         ):
@@ -221,7 +227,7 @@ class CacheIntentResolver:
 
         if preference == "auto":
             if mode == "auto" and str(provider or "").lower() == "gemini":
-                select_explicit = resource_hint or (
+                select_explicit = (v66 and (protocol_profile or {}).get("protocol") == "gemini_native") or resource_hint or (
                     explicit_assessment_candidate and explicit_first_read_advantage
                     or cold_start
                 )
@@ -245,6 +251,13 @@ class CacheIntentResolver:
         else:
             ordered = [preference]
 
+        if unified:
+            # Screen every declared mechanism first. No primary selection and
+            # no complete per-track plans are constructed during this stage.
+            preferred = [str(x) for x in policy.get("mechanism_preference") or candidates]
+            ordered = [name for name in preferred if name in candidates]
+            ordered += [name for name in candidates if name not in ordered]
+
         rejections: list[dict[str, Any]] = []
         assessment = context_plan.get("token_assessment") if isinstance(context_plan.get("token_assessment"), dict) else {}
         eligible: list[tuple[str, dict[str, Any], bool]] = []
@@ -259,6 +272,12 @@ class CacheIntentResolver:
                 if str(cfg.get("threshold_mode") or "unknown").lower() == "unknown":
                     cfg["threshold_mode"] = "provider_create"
                     cfg["threshold_admission_override"] = "provider_create"
+            if chat_watchdog and mechanism == "implicit_prefix":
+                cfg["minimum_cacheable_tokens"] = max(
+                    int(cfg.get("minimum_cacheable_tokens") or 0), int(upgrade["implicit_min_tokens"]),
+                )
+                cfg["implicit_watchdog"] = True
+                cfg["final_threshold_guard"] = True
             threshold = str(cfg.get("threshold_mode") or "unknown").lower()
             if (upgrade and mechanism == "breakpoint" and threshold == "provider_enforced"
                     and (protocol_profile or {}).get("protocol") == "claude_messages"):
@@ -269,7 +288,9 @@ class CacheIntentResolver:
             below = not stable_prefix_ids
             uncertain = False
             if not below:
-                if mechanism in trials:
+                if chat_watchdog and mechanism == "implicit_prefix":
+                    uncertain = True
+                elif mechanism in trials:
                     # Provider decides whether this full-context request hits.
                     # No local token threshold or invented reuse count applies.
                     pass
@@ -297,36 +318,76 @@ class CacheIntentResolver:
 
             eligible.append((mechanism, cfg, uncertain))
 
+        if unified and mode == "on" and preference != "auto" and not any(name == preference for name, _, _ in eligible):
+            reason = next((item["reason"] for item in rejections if item["mechanism"] == preference), "mechanism_unavailable")
+            if reason == "below_minimum":
+                return none(reason, rejections)
+            raise CacheDecisionError("CACHE_MECHANISM_INELIGIBLE", "Requested forced cache mechanism is ineligible", reason=reason)
+
+        def resource_economics() -> dict[str, Any]:
+            return {
+                "price_schedule": dict(economics.get("price_schedule") or {}) if isinstance(economics.get("price_schedule"), dict) else {},
+                "reuse_prediction": prediction,
+                "expected_future_reuses": prediction.get("expected_future_reuses", 0),
+                "max_new_resource_cost": economics.get("max_new_resource_cost"),
+                "safety_margin_ratio": economics.get("safety_margin_ratio", .20),
+                "cache_read_input_ratio": CACHE_READ_INPUT_RATIO,
+                "explicit_create_input_ratio": EXPLICIT_CREATE_INPUT_RATIO,
+                "observed_implicit_hit_rate": use_stats.get("observed_implicit_hit_rate"),
+                "observed_implicit_hit_rate_source": use_stats.get("observed_implicit_hit_rate_source"),
+                "observed_implicit_samples": use_stats.get("observed_implicit_samples", 0),
+                "certified_implicit_alternative": "implicit_prefix" in certified,
+                "trial_implicit_alternative": "implicit_prefix" in trials,
+                "enable_history_growth": economics.get("enable_history_growth") is True or bool(upgrade),
+                **({"roll_alpha": upgrade["roll_alpha"]} if upgrade.get("roll_alpha") is not None else {}),
+                **({
+                    "cold_start_candidate": cold_start,
+                    "cold_start_implicit_hit_rate": economics.get("cold_start_implicit_hit_rate"),
+                    "cold_start_max_tokens": economics.get("cold_start_max_tokens"),
+                    "use_snapshot_cost": True,
+                    **({
+                        "max_uncached_tokens": upgrade["max_uncached_tokens"],
+                        "minimum_roll_delta": upgrade["minimum_roll_delta"],
+                    } if v66 else {}),
+                } if upgrade else {}),
+                "minimum_additional_tokens": economics.get("minimum_additional_tokens", 4096),
+                "new_economics_policy": "relative_cache/2" if str(provider or "").lower() == "gemini" else "legacy_forecast/1",
+                "attachment_evidence": dict(attachment),
+                "existing_resource_candidate": resource_hint,
+            }
+
+        if eligible and unified:
+            screened = []
+            for name, config, uncertain in eligible:
+                if name == "stateful_resource":
+                    config["auto_economics"] = resource_economics()
+                    implicit_eligible = any(n == "implicit_prefix" for n, _, _ in eligible)
+                    if not implicit_eligible:
+                        config["auto_economics"]["certified_implicit_alternative"] = False
+                        config["auto_economics"]["trial_implicit_alternative"] = False
+                screened.append({"mechanism": name, "mechanism_config": config,
+                                 "resolution_status": "pending" if uncertain else "finalized",
+                                 "final_threshold_guard": bool(config.get("final_threshold_guard")),
+                                 "coverage_segment_ids": list(stable_prefix_ids)})
+            return CacheConditionSet(
+                common={"requested_mode": mode, "requested_mechanism": preference,
+                        "context_plan_hash": str(context_plan["context_plan_hash"]),
+                        "cache_contract_hash": cache_contract_hash, "profile_hash": profile_hash,
+                        "policy_hash": policy_hash, "scope": scope, "resolver_version": resolver_version,
+                        "allow_uncached_same_context": bool(mode == "auto" and policy.get("auto_prepare_failure") == "uncached_same_context"),
+                        "reuse_prediction": prediction,
+                        "selection_evidence": {"existing_resource_candidate": resource_hint,
+                                               "cold_start_candidate": cold_start,
+                                               "stable_attachment_bytes": attachment.get("stable_attachment_bytes", 0),
+                                               "observed_implicit_hit_rate": use_stats.get("observed_implicit_hit_rate"),
+                                               "selection_basis": "conditions_before_unified_plan"}},
+                eligible=tuple(screened), rejections=tuple(rejections),
+            )
+
         if eligible:
             mechanism, cfg, uncertain = eligible[0]
-
             if mechanism == "stateful_resource":
-                cfg["auto_economics"] = {
-                    "price_schedule": dict(economics.get("price_schedule") or {}) if isinstance(economics.get("price_schedule"), dict) else {},
-                    "reuse_prediction": prediction,
-                    "expected_future_reuses": prediction.get("expected_future_reuses", 0),
-                    "max_new_resource_cost": economics.get("max_new_resource_cost"),
-                    "safety_margin_ratio": economics.get("safety_margin_ratio", .20),
-                    "cache_read_input_ratio": CACHE_READ_INPUT_RATIO,
-                    "explicit_create_input_ratio": EXPLICIT_CREATE_INPUT_RATIO,
-                    "observed_implicit_hit_rate": use_stats.get("observed_implicit_hit_rate"),
-                    "observed_implicit_hit_rate_source": use_stats.get("observed_implicit_hit_rate_source"),
-                    "observed_implicit_samples": use_stats.get("observed_implicit_samples", 0),
-                    "certified_implicit_alternative": "implicit_prefix" in certified,
-                    "trial_implicit_alternative": "implicit_prefix" in trials,
-                    "enable_history_growth": economics.get("enable_history_growth") is True or bool(upgrade),
-                    **({"roll_alpha": upgrade["roll_alpha"]} if upgrade.get("roll_alpha") is not None else {}),
-                    **({
-                        "cold_start_candidate": cold_start,
-                        "cold_start_implicit_hit_rate": economics.get("cold_start_implicit_hit_rate"),
-                        "cold_start_max_tokens": economics.get("cold_start_max_tokens"),
-                        "use_snapshot_cost": True,
-                    } if upgrade else {}),
-                    "minimum_additional_tokens": economics.get("minimum_additional_tokens", 4096),
-                    "new_economics_policy": "relative_cache/2" if str(provider or "").lower() == "gemini" else "legacy_forecast/1",
-                    "attachment_evidence": dict(attachment),
-                    "existing_resource_candidate": resource_hint,
-                }
+                cfg["auto_economics"] = resource_economics()
 
             fallback_mechanisms: list[dict[str, Any]] = []
             if (
@@ -391,6 +452,8 @@ class CacheIntentResolver:
         # on+omitted-mechanism preserves the documented 'below minimum -> None'
         # behavior of previously frozen v3 Sessions.
         reason = rejections[0]["reason"] if rejections else "mechanism_unavailable"
+        if chat_watchdog and reason == "below_minimum":
+            return none("insufficient_prefix_length", rejections)
         if mode == "on" and mechanism_explicit and not (upgrade and reason == "below_minimum"):
             raise CacheDecisionError("CACHE_MECHANISM_INELIGIBLE", "Requested forced cache mechanism is ineligible", reason=reason)
         if mode == "on" and (

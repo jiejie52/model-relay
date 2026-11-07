@@ -34,6 +34,14 @@ def provider_managed_trial_enabled(config: dict[str, Any]) -> bool:
 
 
 @dataclass(frozen=True)
+class CacheConditionSet:
+    """Transient eligibility facts, before constructing the single Request plan."""
+    common: dict[str, Any]
+    eligible: tuple[dict[str, Any], ...]
+    rejections: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class CacheIntentPlan:
     requested_mode: CacheMode
     planned_mechanism: CacheMechanism | None

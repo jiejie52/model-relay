@@ -70,6 +70,7 @@ class StatefulResourceManager:
         session: dict[str, Any],
         history: list[dict[str, Any]],
         provider_physical_plan: dict[str, Any] | None = None,
+        assessment_only: bool = False,
     ) -> dict[str, Any]:
         connection_id = str(snapshot.get("connection_id") or "")
         adapter = self.registry.maybe_get(connection_id) if self.registry is not None else None
@@ -421,6 +422,14 @@ class StatefulResourceManager:
                     config=economics_cfg,
                     forced=bool(plan.get("requested_mode") == "on"),
                 )
+            if assessment_only:
+                return {
+                    "mechanism": "stateful_resource", "decision_reason": "creation_assessed",
+                    "metadata": {"cache_resource_action": "would_create",
+                                 "prefix_token_count": token_count,
+                                 "cache_cost_decision": cache_creation_decision,
+                                 "assessment_spec_hash": stable_hash(spec)},
+                }
             if not cache_creation_decision.get("allow"):
                 log_info(
                     logger, "cache_new_resource_creation_skipped",
@@ -449,6 +458,17 @@ class StatefulResourceManager:
                     "decision_reason": str(cache_creation_decision.get("reason") or "cost_gate_rejected"),
                     "metadata": {"cache_cost_decision": cache_creation_decision},
                 }
+
+        if assessment_only:
+            # Eligibility/cost assessment must not claim a create operation,
+            # publish a resource, or call a side-effecting Provider endpoint.
+            return {
+                "mechanism": "stateful_resource", "decision_reason": "creation_eligible",
+                "metadata": {"cache_resource_action": "would_create",
+                             "prefix_token_count": token_count,
+                             "cache_cost_decision": cache_creation_decision or {},
+                             "assessment_spec_hash": stable_hash(spec)},
+            }
 
         try:
             operation = await self.repo.create_cache_operation_intent(
@@ -947,6 +967,10 @@ class StatefulResourceManager:
         alpha = economics.get("roll_alpha")
         if isinstance(alpha, (int, float)) and alpha > 0:
             minimum = max(minimum, math.ceil(existing_tokens * alpha))
+        cap = economics.get("max_uncached_tokens")
+        if type(cap) is int and cap > 0:
+            proportional = math.ceil(existing_tokens * float(alpha or .5))
+            minimum = max(int(economics.get("minimum_roll_delta") or 2048), min(proportional, cap))
         if target_tokens - existing_tokens < minimum:
             return False, {
                 "decision": "reuse", "reason": "additional_prefix_too_small",
@@ -978,7 +1002,8 @@ class StatefulResourceManager:
         should_grow = economic.get("allow") is True
         return should_grow, {
             "decision": "grow" if should_grow else "reuse",
-            "reason": str(economic.get("reason") or "growth_economics_unavailable"),
+            "reason": ("hysteresis_or_cap_triggered_roll" if should_grow and type(cap) is int
+                       else str(economic.get("reason") or "growth_economics_unavailable")),
             "existing_prefix_tokens": existing_tokens,
             "target_prefix_tokens": target_tokens,
             "additional_prefix_tokens": target_tokens - existing_tokens,
