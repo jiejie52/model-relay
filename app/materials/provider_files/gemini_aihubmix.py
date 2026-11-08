@@ -4,11 +4,11 @@ import asyncio
 from datetime import timedelta
 from typing import Any
 
-from ...config import Settings
-from ...providers.base import ProviderRequestError
-from ...providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
-from ...utils import utcnow
-from .base import MaterialFile, ProviderFileResult
+from app.config import Settings
+from app.protocol_adapters.base import ProviderRequestError
+from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+from app.utils import utcnow
+from app.materials.provider_files.base import MaterialFile, ProviderFileResult
 
 
 class GeminiAIHubMixFileAdapter:

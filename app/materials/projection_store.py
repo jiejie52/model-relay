@@ -10,12 +10,12 @@ import hashlib
 import json
 from typing import Any
 
-from ..core.idempotency import stable_hash
-from ..observability import warning as log_warning
-from ..providers.base import ProviderRequestError
-from ..storage_paths import relay_object_path
-from ..utils import utcnow
-from .resolver import MaterialResolver
+from app.core.idempotency import stable_hash
+from app.observability import warning as log_warning
+from app.protocol_adapters.base import ProviderRequestError
+from app.storage_paths import relay_object_path
+from app.utils import utcnow
+from app.materials.resolver import MaterialResolver
 
 VERSION = "relay-material-inline-projection/1"
 

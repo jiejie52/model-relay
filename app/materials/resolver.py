@@ -4,9 +4,9 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any
 
-from ..config import Settings
-from ..persistence.object_storage import ObjectLocation, StorageRegistry
-from ..v2_repository import RelayV2Repository
+from app.config import Settings
+from app.persistence.object_storage import ObjectLocation, StorageRegistry
+from app.v2_repository import RelayV2Repository
 
 
 @dataclass
@@ -84,7 +84,7 @@ class MaterialResolver:
         object_id = binding.get("projection_object_id")
         if not object_id:
             return None
-        from ..providers.base import ProviderRequestError
+        from app.protocol_adapters.base import ProviderRequestError
         obj = await self.repo.get_object(str(object_id), tenant_id=tenant_id, conversation_hash=conversation_hash)
         if not obj or obj.get("sha256") != binding.get("projection_sha256"):
             raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "Frozen document projection identity changed")

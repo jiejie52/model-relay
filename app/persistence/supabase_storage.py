@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
-from .object_storage import ObjectLocation
-from ..config import Settings
-from ..supabase import SupabaseBackend
+from app.persistence.object_storage import ObjectLocation
+from app.config import Settings
+from app.supabase import SupabaseBackend
 
 
 class SupabaseObjectStorage:

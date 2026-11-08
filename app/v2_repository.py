@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 
-from .repository import RelayRepository
+from app.repository import RelayRepository
 
 
 class RelayV2Repository(RelayRepository):
@@ -408,6 +408,21 @@ class RelayV2Repository(RelayRepository):
             },
         )
         return bool(result)
+
+    async def acquire_sync_commit_fence(
+        self, request_id: str, executor_id: str, *, lease_seconds: int | None = None
+    ) -> int | None:
+        """Acquire a commit-only right; this RPC never authorizes model dispatch."""
+        result = await self.backend.rpc("acquire_sync_commit_fence", {
+            "p_request_id": request_id,
+            "p_executor_id": executor_id,
+            "p_lease_seconds": int(lease_seconds or self.settings.sync_request_deadline_seconds),
+        })
+        try:
+            value = int(result)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     async def install_request_material_binding_v3(
         self, *, request_id: str, snapshot: list[dict[str, Any]], fence_owner: str, fence_epoch: int

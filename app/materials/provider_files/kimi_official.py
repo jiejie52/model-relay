@@ -7,14 +7,14 @@ from uuid import uuid4
 
 import httpx
 
-from ...config import Settings
-from ...persistence.object_storage import StorageRegistry
-from ...providers.base import ProviderHTTPError, ProviderRequestError
-from ...providers.http_wire import decode_entity, read_raw_response
-from ...storage_paths import relay_object_path
-from ...utils import utcnow
-from ...v2_repository import RelayV2Repository
-from .base import MaterialFile, ProviderFileResult
+from app.config import Settings
+from app.persistence.object_storage import StorageRegistry
+from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.protocol_adapters.wire_projection.http_wire import decode_entity, read_raw_response
+from app.storage_paths import relay_object_path
+from app.utils import utcnow
+from app.v2_repository import RelayV2Repository
+from app.materials.provider_files.base import MaterialFile, ProviderFileResult
 
 
 class KimiOfficialFileAdapter:

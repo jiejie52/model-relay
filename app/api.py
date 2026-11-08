@@ -11,41 +11,43 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 
-from .config import get_settings
-from .control_plane import ModelControlPlane
-from .models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
-from .v2_repository import RelayV2Repository
-from .security import require_owner_headers, require_relay_auth
-from .storage_paths import job_object_path, session_material_prefix_path
-from .supabase import SupabaseBackend, SupabaseError
-from .utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
-from .relay_gateway import router as dify_relay_gateway_router
-from .api_v2.router import router as relay_v2_router
-from .persistence.object_storage import StorageRegistry
-from .persistence.supabase_storage import SupabaseObjectStorage
-from .materials.ingress import MaterialIngress
-from .model_options import CAPABILITY_PROFILE_REVISION
-from .materials.fallback_storage import FallbackObjectStorage
-from .materials.binding_resolver import BindingResolver
-from .materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
-from .materials.resolver import MaterialResolver
-from .providers.registry import ProviderRegistry
-from .providers.factory import register_protocol_adapters
-from .providers.moonshot_chat import MoonshotChatAdapter
-from .providers.gemini_native import GeminiNativeAdapter
-from .providers.gemini_genai_sdk import GeminiAIHubMixGenAIClient
-from .routing import RouteCatalog, RouteResolver
-from .core.execution_runtime import SharedExecutionRuntime
-from .cache.orchestrator import CacheOrchestrator
-from .cache.registry import CacheResourceRegistry
-from .cache.providers import GeminiAIHubMixCacheResourceAdapter
-from .core.raw_error import RawErrorRecorder
-from .execution.inline_executor import InlineExecutor
-from .observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
+from app.config import get_settings
+from app.control_plane.definitions import ModelControlPlane
+from app.control_plane.snapshot import get_active_config_snapshot, verify_node_snapshot_compatibility
+from app.models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
+from app.v2_repository import RelayV2Repository
+from app.security import require_owner_headers, require_relay_auth
+from app.storage_paths import job_object_path, session_material_prefix_path
+from app.supabase import SupabaseBackend, SupabaseError
+from app.utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
+from app.relay_gateway import router as dify_relay_gateway_router
+from app.api_v2.router import router as relay_v2_router
+from app.persistence.object_storage import StorageRegistry
+from app.persistence.supabase_storage import SupabaseObjectStorage
+from app.materials.ingress import MaterialIngress
+from app.execution_plane.semantic_resolver import CAPABILITY_PROFILE_REVISION
+from app.materials.fallback_storage import FallbackObjectStorage
+from app.runtime.material_binder import MaterialBinder
+from app.materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
+from app.materials.resolver import MaterialResolver
+from app.protocol_adapters.registry import ProviderRegistry
+from app.protocol_adapters.factory import register_protocol_adapters
+from app.protocol_adapters.profiles.moonshot_chat import MoonshotChatAdapter
+from app.protocol_adapters.profiles.gemini_native import GeminiNativeAdapter
+from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIClient
+from app.control_plane.catalog import RouteCatalog
+from app.execution_plane.route_resolver import RouteResolver
+from app.runtime.engine import RelayRuntimeEngine
+from app.runtime.cache_materializer import CacheOrchestrator
+from app.control_plane.resource_registry import CacheResourceRegistry
+from app.runtime.resource_adapters.gemini_aihubmix import GeminiAIHubMixCacheResourceAdapter
+from app.core.raw_error import RawErrorRecorder
+from app.execution_plane.schedulers.inline_scheduler import InlineScheduler
+from app.observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
 
 
-API_VERSION = "6.8.0"
+API_VERSION = "7.0.0"
 
 
 settings = get_settings()
@@ -164,7 +166,7 @@ async def lifespan(_: FastAPI):
             KimiOfficialFileAdapter(settings, repo, storage_registry),
         )
     material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
-    binding_resolver = BindingResolver(repo, fallback_storage, file_adapters)
+    binding_resolver = MaterialBinder(repo, fallback_storage, file_adapters)
     control_plane = ModelControlPlane.from_settings(settings)
     providers = ProviderRegistry(settings)
     providers.validate_enabled_connections()
@@ -192,6 +194,8 @@ async def lifespan(_: FastAPI):
             channel_id="moonshot_official",
         )
     route_catalog = RouteCatalog.from_settings(settings, control_plane=control_plane)
+    config_snapshot = get_active_config_snapshot(settings, control_plane=control_plane, catalog=route_catalog)
+    verify_node_snapshot_compatibility(config_snapshot)
     route_resolver = RouteResolver(
         settings=settings,
         catalog=route_catalog,
@@ -207,12 +211,12 @@ async def lifespan(_: FastAPI):
             GeminiAIHubMixCacheResourceAdapter(settings, sdk=gemini_sdk),
         )
     cache_orchestrator = CacheOrchestrator(repo, resource_registry=cache_resources)
-    runtime = SharedExecutionRuntime(
+    runtime = RelayRuntimeEngine(
         repo, storage_registry, providers, material_resolver, binding_resolver, settings,
         cache_orchestrator=cache_orchestrator,
     )
     raw_errors = RawErrorRecorder(repo, storage_registry, settings)
-    inline_executor = InlineExecutor(runtime, raw_errors, repo, settings)
+    inline_executor = InlineScheduler(runtime, raw_errors, repo, settings)
 
     app.state.settings = settings
     app.state.v2_repo = repo
@@ -223,6 +227,7 @@ async def lifespan(_: FastAPI):
     app.state.provider_file_registry = file_adapters
     app.state.binding_resolver = binding_resolver
     app.state.provider_registry = providers
+    app.state.config_snapshot = config_snapshot
     app.state.model_control_plane = control_plane
     app.state.route_catalog = route_catalog
     app.state.route_resolver = route_resolver

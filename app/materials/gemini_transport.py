@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Iterable
 
-from ..utils import utcnow
+from app.utils import utcnow
 
 
 GEMINI_EXTERNAL_URL_REPRESENTATION = "gemini_external_url"
@@ -96,6 +96,7 @@ def decide_gemini_request_transport(
     *,
     material_sizes: Iterable[int],
     threshold_bytes: int,
+    threshold_inclusive: bool = False,
 ) -> GeminiTransportDecision:
     """Freeze the authoritative Gemini Request aggregate strategy.
 
@@ -116,7 +117,7 @@ def decide_gemini_request_transport(
         raise GeminiTransportPolicyError("material size cannot be negative")
     total = sum(sizes)
     return GeminiTransportDecision(
-        mode=("inline_cache_no_files" if total < threshold else "hybrid_inline_cache_files"),
+        mode=("inline_cache_no_files" if (total <= threshold if threshold_inclusive else total < threshold) else "hybrid_inline_cache_files"),
         total_bytes=total,
         threshold_bytes=threshold,
         source="relay_request_material_sum_authoritative",

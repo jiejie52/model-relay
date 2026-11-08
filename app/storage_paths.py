@@ -1,5 +1,5 @@
-from .config import Settings
-from .utils import safe_segment
+from app.config import Settings
+from app.utils import safe_segment
 
 
 def _root(settings: Settings, tenant_id: str, conversation_hash: str) -> str:

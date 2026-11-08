@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .cache_selector import select_materials_for_cache
-from .gemini_transport import GEMINI_EXTERNAL_URL_REPRESENTATION, GEMINI_FILES_REPRESENTATION
+from app.materials.cache_selector import select_materials_for_cache
+from app.materials.gemini_transport import GEMINI_EXTERNAL_URL_REPRESENTATION, GEMINI_FILES_REPRESENTATION
 
 
 GEMINI_CACHE_INLINE_FALLBACK_LIMIT_BYTES = 70 * 1024 * 1024

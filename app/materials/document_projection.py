@@ -8,10 +8,10 @@ import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-from ..core.idempotency import stable_hash
-from ..providers.base import ProviderRequestError
-from ..storage_paths import relay_object_path
-from ..utils import utcnow
+from app.core.idempotency import stable_hash
+from app.protocol_adapters.base import ProviderRequestError
+from app.storage_paths import relay_object_path
+from app.utils import utcnow
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 VERSION = "relay-docx-structured-text/1"
@@ -184,7 +184,7 @@ async def prepare_document_binding(*, repo, fallback_store, material, fallback, 
     obj = await repo.get_object(object_id, tenant_id=tenant_id, conversation_hash=conversation_hash)
     data = None
     if obj:
-        from .resolver import MaterialResolver
+        from app.materials.resolver import MaterialResolver
         data = await MaterialResolver(repo, fallback_store.storage, fallback_store.settings).read_object(obj)
         if hashlib.sha256(data).hexdigest() != obj.get("sha256"):
             raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "DOCX bridge artifact checksum mismatch")

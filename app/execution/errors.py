@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from ..providers.base import ProviderHTTPError, ProviderRequestError
-from ..structured_output import StructuredOutputError
-from ..supabase import SupabaseError
+from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.execution_plane.structured_output import StructuredOutputError
+from app.supabase import SupabaseError
 
 
 def error_source(exc: BaseException) -> str:

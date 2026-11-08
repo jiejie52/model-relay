@@ -8,16 +8,16 @@ from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
-from ..config import get_settings
-from ..observability import configure_logging
-from ..fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
-from ..providers.base import ProviderHTTPError, ProviderRequestError
-from ..providers.openai_compatible import OpenAICompatibleResponsesProvider
-from ..providers.registry import ProviderRegistry
-from ..repository import RelayRepository
-from ..storage_paths import job_object_path, session_history_version_path
-from ..supabase import SupabaseBackend, SupabaseError
-from ..utils import json_bytes, truncate_utf8, utcnow
+from app.config import get_settings
+from app.observability import configure_logging
+from app.fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
+from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.protocol_adapters.profiles.openai_compatible import OpenAICompatibleResponsesProvider
+from app.protocol_adapters.registry import ProviderRegistry
+from app.repository import RelayRepository
+from app.storage_paths import job_object_path, session_history_version_path
+from app.supabase import SupabaseBackend, SupabaseError
+from app.utils import json_bytes, truncate_utf8, utcnow
 
 
 settings = get_settings()

@@ -2,9 +2,9 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from .config import Settings
-from .supabase import SupabaseBackend
-from .utils import utcnow
+from app.config import Settings
+from app.supabase import SupabaseBackend
+from app.utils import utcnow
 
 
 class RelayRepository:

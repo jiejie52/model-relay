@@ -8,24 +8,15 @@ from typing import Any
 from uuid import uuid4
 from xml.etree import ElementTree as ET
 
-from .config import Settings
-from .providers.base import ProviderResult
-from .providers.registry import ProviderRegistry
-from .repository import RelayRepository
-from .storage_paths import (
-    fusion_artifact_object_path,
-    fusion_corpus_manifest_path,
-    fusion_material_object_path,
-)
-from .supabase import SupabaseBackend, SupabaseError
-from .structured_output import (
-    StructuredOutputError,
-    StructuredOutputSpec,
-    apply_openai_responses_structured_output,
-    resolve_structured_output,
-    validate_against_schema,
-)
-from .utils import json_bytes, truncate_utf8, utcnow
+from app.config import Settings
+from app.protocol_adapters.base import ProviderResult
+from app.protocol_adapters.registry import ProviderRegistry
+from app.repository import RelayRepository
+from app.storage_paths import fusion_artifact_object_path, fusion_corpus_manifest_path, fusion_material_object_path
+from app.supabase import SupabaseBackend, SupabaseError
+from app.execution_plane.structured_output import StructuredOutputError, StructuredOutputSpec, resolve_structured_output, validate_against_schema
+from app.protocol_adapters.wire_projection.schema_projector import apply_openai_responses_structured_output
+from app.utils import json_bytes, truncate_utf8, utcnow
 
 
 FUSION_STAGES = {

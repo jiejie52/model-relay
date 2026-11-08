@@ -5,8 +5,8 @@ import hashlib
 import json
 from typing import Any
 
-from .idempotency import stable_hash
-from .context_normalizer import canonical_structure, serialize_wire
+from app.core.idempotency import stable_hash
+from app.core.context_codec import canonical_structure, serialize_wire
 
 
 def estimated_tokens(value: Any) -> int:

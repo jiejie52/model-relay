@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .config import Settings
+from app.config import Settings
 
 
 def _normalize_supabase_signed_url(supabase_root: str, signed_url: str) -> str:

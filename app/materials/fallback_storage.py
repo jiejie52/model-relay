@@ -4,11 +4,11 @@ import hashlib
 from typing import Any
 from uuid import uuid4
 
-from ..config import Settings
-from ..persistence.object_storage import ObjectLocation, StorageRegistry
-from ..storage_paths import relay_object_path
-from ..utils import utcnow
-from ..v2_repository import RelayV2Repository
+from app.config import Settings
+from app.persistence.object_storage import ObjectLocation, StorageRegistry
+from app.storage_paths import relay_object_path
+from app.utils import utcnow
+from app.v2_repository import RelayV2Repository
 
 
 class FallbackObjectStorage:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import ProviderFileAdapter
+from app.materials.provider_files.base import ProviderFileAdapter
 
 
 class ProviderFileRegistry:

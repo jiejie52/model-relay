@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
+from app.immutable import freeze_json
 from fnmatch import fnmatchcase
 import hashlib
 import json
@@ -10,7 +11,7 @@ from pathlib import Path
 import re
 from typing import Any, Iterable
 
-from .config import Settings
+from app.config import Settings
 
 
 CONTROL_PLANE_SCHEMA_VERSION = "relay-model-control-plane/3.0"
@@ -262,6 +263,17 @@ class ModelControlPlane:
             "offerings": [self.offerings[k].canonical() for k in sorted(self.offerings)],
         }
         self.control_plane_hash = _hash_json(canonical)
+        # Published catalog collections and nested contract dictionaries are
+        # immutable while their canonical serialization/hash stays unchanged.
+        for name in ("connections", "capability_contracts", "protocol_profiles", "cache_policies", "offerings"):
+            frozen = {}
+            for key, item in getattr(self, name).items():
+                changes = {f.name: freeze_json(getattr(item, f.name)) for f in fields(item)
+                           if isinstance(getattr(item, f.name), (dict, list))}
+                frozen[key] = replace(item, **changes)
+            setattr(self, name, freeze_json(frozen))
+        self.release_metadata = freeze_json(self.release_metadata)
+
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "ModelControlPlane":
@@ -562,7 +574,7 @@ class ModelControlPlane:
                 requires_file_adapter=True,
             ),
         ]
-        from .routing.gemini_supply_group import extend_gemini_supplies
+        from app.control_plane.supply_group import extend_gemini_supplies
 
         contracts, protocol_profiles, offerings = extend_gemini_supplies(
             contracts, protocol_profiles, offerings, settings,
@@ -578,13 +590,6 @@ class ModelControlPlane:
             release_metadata={"source": "builtin", "release_id": settings.model_control_plane_revision},
         )
 
-    def candidate_offerings(self, *, provider: str, model: str, deployment_id: str) -> list[ModelOffering]:
-        matches = [
-            item
-            for item in self.offerings.values()
-            if item.matches(provider=provider, model=model, deployment_id=deployment_id)
-        ]
-        return sorted(matches, key=lambda x: (-x.priority, x.offering_id, x.connection_id))
 
     def connection(self, connection_id: str) -> ConnectionSpec | None:
         return self.connections.get(connection_id)

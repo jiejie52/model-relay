@@ -6,14 +6,14 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from ..config import Settings
-from ..persistence.object_storage import StorageRegistry
-from ..providers.base import ProviderHTTPError
-from ..providers.http_wire import decode_entity
-from ..storage_paths import request_object_path_v2
-from ..supabase import SupabaseError
-from ..utils import utcnow
-from ..v2_repository import RelayV2Repository
+from app.config import Settings
+from app.persistence.object_storage import StorageRegistry
+from app.protocol_adapters.base import ProviderHTTPError
+from app.protocol_adapters.wire_projection.http_wire import decode_entity
+from app.storage_paths import request_object_path_v2
+from app.supabase import SupabaseError
+from app.utils import utcnow
+from app.v2_repository import RelayV2Repository
 
 
 class RawErrorRecorder:

@@ -8,34 +8,21 @@ from uuid import uuid4
 
 import httpx
 
-from ..config import Settings
-from ..core.raw_error import raw_body_inline_fields
-from ..providers.base import ProviderHTTPError, ProviderRequestError
-from ..storage_paths import relay_object_path
-from ..utils import utcnow
-from ..observability import (
-    elapsed_ms,
-    error as log_error,
-    info as log_info,
-    warning as log_warning,
-    now_ms,
-    exception_failure_class,
-)
-from ..v2_repository import RelayV2Repository
-from .fallback_storage import FallbackObjectStorage
-from .provider_files.base import MaterialFile
-from .provider_files.registry import ProviderFileRegistry
-from .gemini_transport import (
-    GeminiTransportPolicyError,
-    decide_gemini_transport,
-    external_url_binding,
-    project_gemini_external_url_filename,
-    project_gemini_input_content_type,
-)
-from .safe_fetch import MaterialFetchError, fetch_bytes
+from app.config import Settings
+from app.core.raw_error import raw_body_inline_fields
+from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.storage_paths import relay_object_path
+from app.utils import utcnow
+from app.observability import elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, exception_failure_class
+from app.v2_repository import RelayV2Repository
+from app.materials.fallback_storage import FallbackObjectStorage
+from app.materials.provider_files.base import MaterialFile
+from app.materials.provider_files.registry import ProviderFileRegistry
+from app.materials.gemini_transport import GeminiTransportPolicyError, decide_gemini_transport, external_url_binding, project_gemini_external_url_filename, project_gemini_input_content_type
+from app.materials.safe_fetch import MaterialFetchError, fetch_bytes
 
 if TYPE_CHECKING:
-    from ..routing.route_resolver import RouteBinding
+    from app.execution_plane.route_resolver import RouteBinding
 
 
 logger = logging.getLogger("model-relay-materials")

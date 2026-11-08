@@ -13,9 +13,9 @@ from typing import Any
 
 import httpx
 
-from ..core.cache_fingerprint import compute_lcp_diff, physical_chain
-from ..core.context_normalizer import normalize_native_payload, serialize_wire
-from . import info as log_info, warning as log_warning
+from app.core.cache_fingerprint import compute_lcp_diff, physical_chain
+from app.core.context_codec import normalize_native_payload, serialize_wire
+from app.observability import info as log_info, warning as log_warning
 
 logger = logging.getLogger("relay.http.wire")
 _current: ContextVar[dict[str, Any] | None] = ContextVar("relay_wire_context", default=None)
