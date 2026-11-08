@@ -6,6 +6,7 @@ from app.shared_contracts import ExecutionConflictError
 from app.execution_plane.structured_output import StructuredOutputError
 from app.protocol_adapters.base import ProviderRequestError
 from app.core.error_classification import error_source
+from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, execution_guard
 
 class RequestExecutionService:
     def __init__(self, runtime, errors, repo, settings):
@@ -23,7 +24,41 @@ class RequestExecutionService:
         fact = await self.runtime.execute(plan)
         return await self.committer.finalize(plan, fact)
 
+    async def execute_guarded(self, row, fence):
+        if fence is None:
+            return await self.execute_row(row, fence)
+        guard = ExecutionGuard(self.repo, row, fence, self.settings)
+
+        async def run():
+            with execution_guard(guard):
+                await guard.verify()
+                return await self.execute_row(row, fence)
+
+        execution = asyncio.create_task(run())
+        heartbeat = asyncio.create_task(guard.heartbeat())
+        try:
+            done, _ = await asyncio.wait((execution, heartbeat), return_when=asyncio.FIRST_COMPLETED)
+            if execution in done:
+                return await execution
+            guard.invalidate(guard.reason)
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            raise ExecutionLeaseLost(guard.reason)
+        finally:
+            execution.cancel()
+            heartbeat.cancel()
+            await asyncio.gather(execution, heartbeat, return_exceptions=True)
+
     async def record_failure(self, row, fence, exc):
+        if isinstance(exc, ExecutionLeaseLost):
+            # Only authoritative reconciliation may resolve an expired lease;
+            # this executor cannot use its stale fence to publish a terminal fact.
+            try:
+                await self.repo.reconcile_request(row["id"], tenant_id=row["tenant_id"],
+                                                  conversation_hash=row["conversation_hash"])
+            except Exception:
+                pass  # durable state remains recoverable after connectivity returns
+            return
         if isinstance(exc, ExecutionConflictError):
             # The execution right may have changed. Stale executors cannot
             # manufacture another right or overwrite another executor's facts.
@@ -40,7 +75,7 @@ class RequestExecutionService:
         unknown = state == "dispatch_started" and not contract_failure
         kwargs = dict(request_id=row["id"], session_id=row["session_id"], error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") == "relay-request/2.3":
+        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
             await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         else:
             await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None, lease_epoch=fence.epoch if fence else None)

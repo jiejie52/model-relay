@@ -65,6 +65,19 @@ class MaterialResolver:
             data = await self.read_object(obj)
         return ResolvedMaterial(material, obj, data)
 
+    async def resolve_frozen(self, binding, *, tenant_id, conversation_hash, with_bytes=False):
+        from app.protocol_adapters.base import ProviderRequestError
+        if not binding.get("object_id") or not binding.get("content_sha256"):
+            raise ProviderRequestError("MATERIAL_BINDING_INVALID", "Frozen fallback object identity is missing")
+        obj = await self.repo.get_object(str(binding["object_id"]), tenant_id=tenant_id, conversation_hash=conversation_hash)
+        if not obj or obj.get("sha256") != binding["content_sha256"]:
+            raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "Frozen fallback object identity changed")
+        data = await self.read_object(obj) if with_bytes else None
+        if data is not None and hashlib.sha256(data).hexdigest() != binding["content_sha256"]:
+            raise ProviderRequestError("MATERIAL_INTEGRITY_MISMATCH", "Frozen fallback bytes changed")
+        return ResolvedMaterial({"id": binding.get("material_id"), "content_type": binding.get("content_type"),
+            "filename": binding.get("filename"), "sha256": binding["content_sha256"]}, obj, data)
+
     async def read_object(self, obj: dict[str, Any]) -> bytes:
         location = ObjectLocation(
             storage_id=obj["storage_id"],

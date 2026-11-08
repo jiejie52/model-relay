@@ -395,6 +395,36 @@ class RelayV2Repository(RelayRepository):
             return None
         return value if value > 0 else None
 
+    async def verify_execution_fence(self, *, request_id, fence_owner, fence_epoch, allowed_states):
+        return bool(await self.backend.rpc("validate_request_execution_fence_v71", {
+            "p_request_id": request_id, "p_fence_owner": fence_owner,
+            "p_fence_epoch": fence_epoch, "p_allowed_states": allowed_states}))
+
+    async def start_request_execution(self, *, request_id, fence_owner, fence_epoch):
+        return bool(await self.backend.rpc("start_request_execution_v71", {
+            "p_request_id": request_id, "p_fence_owner": fence_owner, "p_fence_epoch": fence_epoch}))
+
+    async def mark_request_dispatch(self, *, request_id, fence_owner, fence_epoch, payload_hash):
+        return bool(await self.backend.rpc("mark_request_dispatch_v71", {
+            "p_request_id": request_id, "p_fence_owner": fence_owner, "p_fence_epoch": fence_epoch,
+            "p_payload_hash": payload_hash}))
+
+    async def verify_cache_operation_fence(self, *, operation_id, lease_owner, lease_epoch):
+        return bool(await self.backend.rpc("validate_cache_operation_fence_v71", {
+            "p_operation_id": operation_id, "p_lease_owner": lease_owner,
+            "p_lease_epoch": lease_epoch, "p_states": ["running"]}))
+
+    async def cache_operations_for_reconciliation(self, *, scope_hash, content_fingerprint):
+        return await self.backend.select("relay_cache_operations", filters={
+            "scope_hash": f"eq.{scope_hash}", "content_fingerprint": f"eq.{content_fingerprint}",
+            "operation_type": "eq.create", "state": "in.(unknown,running)"}, limit=10)
+
+    async def claim_cache_reconciliation(self, *, operation_id, request_id, fence_owner, fence_epoch):
+        rows = await self.backend.rpc("claim_cache_reconciliation_v71", {
+            "p_operation_id": operation_id, "p_request_id": request_id,
+            "p_fence_owner": fence_owner, "p_fence_epoch": fence_epoch})
+        return rows[0] if isinstance(rows, list) and rows else None
+
     async def renew_sync_request_fence(
         self, request_id: str, executor_id: str, executor_epoch: int, *, lease_seconds: int | None = None
     ) -> bool:
@@ -423,6 +453,10 @@ class RelayV2Repository(RelayRepository):
         except (TypeError, ValueError):
             return None
         return value if value > 0 else None
+
+    async def release_sync_commit_fence(self, request_id, executor_id, executor_epoch):
+        return bool(await self.backend.rpc("release_sync_commit_fence_v71", {
+            "p_request_id": request_id, "p_executor_id": executor_id, "p_executor_epoch": executor_epoch}))
 
     async def install_request_material_binding_v3(
         self, *, request_id: str, snapshot: list[dict[str, Any]], fence_owner: str, fence_epoch: int
@@ -669,13 +703,19 @@ class RelayV2Repository(RelayRepository):
         resource_id: str,
         provider_handle_ref: str,
         state: str,
+        request_id: str,
+        fence_owner: str,
+        fence_epoch: int,
     ) -> bool:
         result = await self.backend.rpc(
-            "invalidate_cache_resource_v31",
+            "invalidate_cache_resource_v71",
             {
                 "p_resource_id": resource_id,
                 "p_provider_handle_ref": provider_handle_ref,
                 "p_state": state,
+                "p_request_id": request_id,
+                "p_fence_owner": fence_owner,
+                "p_fence_epoch": fence_epoch,
             },
         )
         return bool(result)
@@ -698,7 +738,7 @@ class RelayV2Repository(RelayRepository):
             f"cache:{operation_type}:{scope_hash[:24]}:{content_fingerprint[:24]}"
         )
         result = await self.backend.rpc(
-            "claim_cache_operation_v3",
+            "claim_cache_operation_v71",
             {
                 "p_request_id": request_id,
                 "p_scope_hash": scope_hash,
@@ -706,6 +746,7 @@ class RelayV2Repository(RelayRepository):
                 "p_operation_type": operation_type,
                 "p_idempotency_key": idempotency_key,
                 "p_lease_owner": lease_owner,
+                "p_request_fence_epoch": lease_epoch,
                 "p_lease_seconds": max(60, int(getattr(self.settings, "cache_prepare_timeout_seconds", 60)) + 30),
             },
         )
@@ -738,7 +779,7 @@ class RelayV2Repository(RelayRepository):
         profile_hash: str,
         raw_result: dict[str, Any],
     ) -> dict[str, Any] | None:
-        op_epoch = int(raw_result.get("operation_epoch") or lease_epoch)
+        op_epoch = int(lease_epoch)
         result = await self.backend.rpc(
             "publish_cache_resource_v31",
             {

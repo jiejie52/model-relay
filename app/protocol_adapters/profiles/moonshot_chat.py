@@ -8,7 +8,8 @@ import httpx
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.wire_projection.http_wire import read_raw_response, decode_entity
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
-from app.observability.http_wire_logger import normalization_active, provider_transport
+from app.observability.http_wire_logger import normalization_active
+from app.runtime.transport_guard import provider_transport
 from app.core.context_codec import source_markers
 from app.config import Settings
 from app.core.idempotency import CANONICAL_REQUEST_VERSIONS
@@ -204,7 +205,14 @@ class MoonshotChatAdapter:
                         "MATERIAL_BINDING_INVALID",
                         f"Kimi text binding has no extraction artifact for {material_id}",
                     )
-                raw = await self.materials.read_object_id(str(extraction_object_id))
+                if context.snapshot.get("schema_version") == "relay-request/2.4":
+                    frozen_text = {**binding, "object_id": extraction_object_id,
+                        "content_sha256": metadata.get("extraction_sha256")}
+                    resolved = await self.materials.resolve_frozen(frozen_text, tenant_id=context.tenant_id,
+                        conversation_hash=context.conversation_hash, with_bytes=True)
+                    raw = resolved.data
+                else:
+                    raw = await self.materials.read_object_id(str(extraction_object_id))
                 text = raw.decode("utf-8", errors="strict")
                 begin, end = source_markers(material_id, filename, upgraded=normalization_active())
                 system_messages.append(

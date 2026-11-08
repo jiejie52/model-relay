@@ -3,7 +3,8 @@ from typing import Any
 
 import httpx
 
-from app.observability.http_wire_logger import affinity_hint, normalization_active, provider_transport
+from app.observability.http_wire_logger import affinity_hint, normalization_active
+from app.runtime.transport_guard import provider_transport
 from app.config import Settings
 from app.core.idempotency import CANONICAL_REQUEST_VERSIONS
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError, ProviderResult
@@ -247,7 +248,7 @@ class OpenAICompatibleResponsesProvider:
         implicit-prefix binding may supply the frozen key. 2.1/2.2 behavior is
         byte-for-byte unaffected by this hook.
         """
-        if str(snapshot.get("schema_version") or "") != "relay-request/2.3":
+        if str(snapshot.get("schema_version") or "") not in {"relay-request/2.3", "relay-request/2.4"}:
             return
         binding = snapshot.get("_relay_cache_execution")
         if not isinstance(binding, dict):

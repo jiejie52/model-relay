@@ -81,6 +81,7 @@ class ResponsesV2Adapter:
                 body_model=(str(result.raw_json.get("model")) if result.raw_json.get("model") else None),
                 protocol="responses",
                 channel_id=(str(snapshot.get("channel_id")) if snapshot.get("channel_id") else None),
+            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
             ),
         )
 
@@ -88,12 +89,17 @@ class ResponsesV2Adapter:
         items: list[Any] = []
         by_id = {str(x.get("material_id")): x for x in context.material_bindings}
         for material_id in context.material_ids:
-            resolved = await self.materials.resolve(
-                material_id,
-                tenant_id=context.tenant_id,
-                conversation_hash=context.conversation_hash,
-                with_bytes=False,
-            )
+            frozen = by_id.get(material_id) or {}
+            if context.snapshot.get("schema_version") == "relay-request/2.4":
+                resolved = await self.materials.resolve_frozen(frozen, tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash, with_bytes=False)
+            else:
+                resolved = await self.materials.resolve(
+                    material_id,
+                    tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash,
+                    with_bytes=False,
+                )
             mime = str(resolved.material.get("content_type") or "application/octet-stream")
             filename = str(resolved.material.get("filename") or material_id)
             frozen = by_id.get(material_id) or {}
@@ -121,7 +127,8 @@ class ResponsesV2Adapter:
                 "application/xml",
                 "text/markdown",
             }:
-                data = await self.materials.read_object(obj)
+                data = (await self.materials.resolve_frozen(frozen, tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash, with_bytes=True)).data if context.snapshot.get("schema_version") == "relay-request/2.4" else await self.materials.read_object(obj)
                 text = data.decode("utf-8", errors="replace")
                 items.append(
                     self.legacy.make_user_item(

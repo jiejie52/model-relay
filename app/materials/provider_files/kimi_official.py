@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from app.runtime.transport_guard import provider_transport
 
 from app.config import Settings
 from app.persistence.object_storage import StorageRegistry
@@ -102,7 +103,7 @@ class KimiOfficialFileAdapter:
             return {"state": "missing"}
         url = f"{self.settings.moonshot_root}/files/{file_id}"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot_files", url=self.settings.moonshot_root)) as client:
             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
                 raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_probe"})
                 status = response.status_code
@@ -127,7 +128,7 @@ class KimiOfficialFileAdapter:
             return
         url = f"{self.settings.moonshot_root}/files/{file_id}"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot_files", url=self.settings.moonshot_root)) as client:
             response = await client.delete(url, headers=self._headers(json_content=False))
             if response.status_code not in {200, 204, 404}:
                 raw = await response.aread()
@@ -145,7 +146,7 @@ class KimiOfficialFileAdapter:
     ) -> tuple[bytes, dict[str, str], int, dict[str, Any]]:
         url = f"{self.settings.moonshot_root}/files"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot_files", url=self.settings.moonshot_root)) as client:
             async with client.stream(
                 "POST",
                 url,
@@ -195,7 +196,7 @@ class KimiOfficialFileAdapter:
             raise ProviderRequestError("PROVIDER_FILE_PROCESSING_FAILED", f"Kimi file processing failed: {state}")
         deadline = asyncio.get_running_loop().time() + self.settings.kimi_file_processing_timeout_seconds
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot_files", url=self.settings.moonshot_root)) as client:
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(self.settings.kimi_file_poll_seconds)
                 url = f"{self.settings.moonshot_root}/files/{file_id}"
@@ -249,7 +250,7 @@ class KimiOfficialFileAdapter:
     ) -> tuple[bytes, str, bytes, dict[str, str], int]:
         url = f"{self.settings.moonshot_root}/files/{file_id}/content"
         timeout = httpx.Timeout(self.settings.material_ingress_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot_files", url=self.settings.moonshot_root)) as client:
             async with client.stream("GET", url, headers=self._headers(json_content=False)) as response:
                 raw = await read_raw_response(response, log_context={"provider": self.provider, "connection_id": self.connection_id, "phase": "kimi_files_content", "provider_file_id": file_id})
                 status = response.status_code

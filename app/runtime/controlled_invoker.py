@@ -23,12 +23,14 @@ from app.shared_contracts import ExecutionConflictError
 from app.runtime.contracts import ActualExecutionFact
 
 from app.runtime.condition_verifier import route_revision
+from app.runtime.execution_guard import ensure_execution_allowed
 
 class ControlledInvoker:
     def __init__(self, repo, providers, artifacts, cache, settings):
         self.repo, self.providers, self.artifacts, self.cache, self.settings = repo, providers, artifacts, cache, settings
 
     async def invoke_once_and_record(self, state):
+        await ensure_execution_allowed(states=("dispatch_started",))
         state.sealed_bundle.verify_integrity()
         affinity_headers = {key: state.wire["affinity_token"] for key in (
             state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
@@ -139,7 +141,7 @@ class ControlledInvoker:
         # Persist the upstream success body before any Relay parser/schema gate.
         # If validation fails, the original 2xx entity remains available for
         # diagnosis instead of being replaced by a synthetic Relay error.
-        if not state.is_v3:
+        if not state.is_v3 and state.fence is None:
             await self.repo.update_request(
                 state.request_row["id"],
                 {
@@ -378,6 +380,7 @@ class ControlledInvoker:
                 **{k: v for k, v in cache_usage.items() if k != "affinity_audit"},
             }
 
+        await ensure_execution_allowed(states=("dispatch_started",))
         result = replace(result, normalized_usage={**result.normalized_usage, **(cache_usage or {})})
         observation = {"cache_summary": cache_summary, "cache_usage": cache_usage,
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
@@ -392,7 +395,7 @@ class ControlledInvoker:
             "result": archived_result, "observation": observation,
         }), "application/json")
         marker = {"_relay_execution_fact": fact_object_id, "schema_version": "relay-result-pending-commit/1"}
-        if state.is_v3:
+        if state.fence is not None:
             stored = await self.repo.store_result_v3(
                 request_id=state.request_id, result_object_id=raw_object_id, output_object_id=output_object_id,
                 history_object_id=None, compact_result=marker, provider_response_id=result.response_id,

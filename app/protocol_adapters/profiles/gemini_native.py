@@ -9,7 +9,8 @@ import httpx
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.wire_projection.http_wire import decode_entity, observed_response_facts, read_raw_response
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
-from app.observability.http_wire_logger import normalization_active, provider_transport
+from app.observability.http_wire_logger import normalization_active
+from app.runtime.transport_guard import provider_transport
 from app.core.context_codec import serialize_wire
 from app.config import Settings
 from app.core.idempotency import CANONICAL_REQUEST_VERSIONS
@@ -190,6 +191,7 @@ class GeminiNativeAdapter:
                 body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
                 protocol="gemini_native",
                 channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
+            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
             ) | {
                 "cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details")),
                 "payload_stripped_bytes": stripped_bytes,

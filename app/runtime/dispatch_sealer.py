@@ -11,13 +11,23 @@ from app.utils import utcnow
 logger = logging.getLogger("model-relay-runtime")
 
 
-from app.runtime.contracts import SealedDispatchBundle
+from app.runtime.contracts import SealedDispatchBundle, dispatch_input_digest
 
 
 class AtomicDispatchSealer:
     def __init__(self, repo): self.repo = repo
 
     async def seal_before_dispatch(self, state):
+        inputs = dict(snapshot=state.snapshot, session=state.session, history=state.history,
+            material_ids=state.material_ids, material_bindings=state.material_bindings,
+            tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"],
+            request_id=state.request_id, session_id=state.session_id, context_plan=state.context_plan,
+            cache_execution_binding=state.cache_binding, execution_fence=state.fence.canonical() if state.fence else None,
+            provider_physical_plan=state.provider_physical_plan,
+            affinity_headers={key: state.wire["affinity_token"] for key in (
+                state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
+                if key and state.wire.get("affinity_token")})
+        prepared_payload_hash = dispatch_input_digest(**inputs)
         if state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
@@ -38,19 +48,6 @@ class AtomicDispatchSealer:
                     "Cache execution binding was rejected by the Request execution fence",
                 )
 
-            # This digest covers the exact frozen inputs supplied to the Adapter.
-            # Provider-specific byte-level payload builders can strengthen this
-            # to a native-wire digest without changing the dispatch transaction.
-            prepared_payload_hash = stable_hash(
-                {
-                    "schema_version": "relay-prepared-execution/1",
-                    "snapshot": state.snapshot,
-                    "history": state.history,
-                    "material_bindings": state.material_bindings,
-                    "provider_physical_plan_hash": (state.provider_physical_plan or {}).get("physical_plan_hash"),
-                    "cache_binding": state.cache_binding,
-                }
-            )
             sealed = await self.repo.seal_cache_and_dispatch_v3(
                 request_id=state.request_id,
                 binding_version=state.cache_binding_obj.binding_version,
@@ -67,25 +64,20 @@ class AtomicDispatchSealer:
             state.execution_snapshot = dict(state.snapshot)
             state.execution_snapshot["_relay_cache_execution"] = state.cache_binding
         else:
-            await self.repo.update_request(
-                state.request_row["id"],
-                {
+            if state.fence is not None:
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                if not await self.repo.mark_request_dispatch(request_id=state.request_id,
+                        fence_owner=state.fence.owner, fence_epoch=state.fence.epoch,
+                        payload_hash=prepared_payload_hash):
+                    raise ExecutionLeaseLost("Legacy fenced dispatch was rejected")
+            else:
+                # Preserve the historical optional-fence synchronous contract.
+                await self.repo.update_request(state.request_row["id"], {
                     "provider_dispatch_state": "dispatch_started",
-                    "started_at": state.request_row.get("started_at") or utcnow().isoformat(),
-                },
-            )
+                    "started_at": state.request_row.get("started_at") or utcnow().isoformat()})
 
 
-        state.sealed_bundle = SealedDispatchBundle(
-            snapshot=state.execution_snapshot or state.snapshot, session=state.session, history=state.history,
-            material_ids=state.material_ids, material_bindings=state.material_bindings,
-            tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"],
-            request_id=state.request_id, session_id=state.session_id, context_plan=state.context_plan,
-            cache_execution_binding=state.cache_binding, execution_fence=state.fence.canonical() if state.fence else None,
-            provider_physical_plan=state.provider_physical_plan, seal_id=state.request_id,
-            seal_hash=prepared_payload_hash if state.is_v3 else stable_hash(state.execution_snapshot),
-            affinity_headers={key: state.wire["affinity_token"] for key in (
-                state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
-                if key and state.wire.get("affinity_token")},
-        )
+        state.sealed_bundle = SealedDispatchBundle(**{**inputs, "snapshot": state.execution_snapshot or state.snapshot},
+            seal_id=state.request_id, seal_hash=prepared_payload_hash)
+        state.sealed_bundle.verify_integrity()
         return state.sealed_bundle

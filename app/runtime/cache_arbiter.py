@@ -129,6 +129,23 @@ class CacheRuntimeArbiter:
             }
         if controlled == "stateful_resource":
             controlled_plan = deepcopy(candidate_execution_plan(plan, controlled))
+            if snapshot.get("schema_version") == "relay-request/2.4" and plan.get("requested_mode") == "auto":
+                from app.runtime.cache_economics import estimate_ttl_bounded_future_reuses
+                economics = controlled_plan["mechanism_config"].get("auto_economics") or {}
+                try:
+                    observed = await self.stateful.repo.recent_session_cache_reuse_evidence(
+                        session_id=str(session["id"]), tenant_id=request_row["tenant_id"],
+                        conversation_hash=request_row["conversation_hash"],
+                        reuse_evidence_key=snapshot["reuse_evidence_key"])
+                except Exception:
+                    observed = {}  # unknown evidence never grants positive economics
+                prediction = estimate_ttl_bounded_future_reuses(policy=economics.get("forecast_policy") or {},
+                    evidence=observed, ttl_seconds=int(controlled_plan["mechanism_config"].get("ttl_seconds") or 3600))
+                economics.update(reuse_prediction=prediction, expected_future_reuses=prediction["expected_future_reuses"],
+                    observed_implicit_hit_rate=observed.get("observed_implicit_hit_rate"),
+                    observed_implicit_hit_rate_source=observed.get("observed_implicit_hit_rate_source"),
+                    observed_implicit_samples=observed.get("observed_implicit_samples", 0))
+                controlled_plan["mechanism_config"]["auto_economics"] = economics
             if not assessments.get("implicit_prefix", {}).get("eligible"):
                 economics = controlled_plan["mechanism_config"].get("auto_economics") or {}
                 economics.update(certified_implicit_alternative=False, trial_implicit_alternative=False)

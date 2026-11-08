@@ -8,6 +8,7 @@ from typing import Any
 CANONICAL_REQUEST_VERSIONS = {
     "relay-request/2.2",
     "relay-request/2.3",
+    "relay-request/2.4",
 }
 SUPPORTED_REQUEST_VERSIONS = {
     "relay-request/2.1",
@@ -95,7 +96,7 @@ def request_identity(snapshot: dict[str, Any]) -> str:
 
     identity.update(
         {
-            "options": snapshot.get("options") or {},
+            "options": (snapshot.get("effective_options") if version == "relay-request/2.4" else snapshot.get("options")) or {},
             "effective_options": snapshot.get("effective_options") or {},
             "capability_revision": snapshot.get("capability_revision"),
         }
@@ -108,7 +109,7 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     # the later CacheExecutionBinding.
     identity.update(
         {
-            "requested_think_level": snapshot.get("requested_think_level"),
+            **({"requested_think_level": snapshot.get("requested_think_level")} if version == "relay-request/2.3" else {}),
             "structured_output_guarantee": snapshot.get("structured_output_guarantee"),
             "offering_id": snapshot.get("offering_id"),
             "channel_id": snapshot.get("channel_id"),
@@ -135,4 +136,6 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     )
     if snapshot.get("requested_cache_mechanism_explicit"):
         identity["requested_cache_mechanism"] = snapshot.get("requested_cache_mechanism")
+    if version == "relay-request/2.4":
+        identity["execution_authorization"] = snapshot.get("execution_authorization") or {}
     return stable_hash(identity)

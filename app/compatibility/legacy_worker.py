@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 from app.observability import configure_logging
-from app.fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
+from app.compatibility.fusion_runtime import FusionRuntime, FusionRuntimeError, is_fusion_stage
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.profiles.openai_compatible import OpenAICompatibleResponsesProvider
 from app.protocol_adapters.registry import ProviderRegistry

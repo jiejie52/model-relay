@@ -21,6 +21,8 @@ from app.runtime.contracts import ActualExecutionFact
 from app.persistence.execution_artifacts import ExecutionArtifacts
 
 from app.protocol_adapters.v2_base import StandardizedProviderResult
+from app.runtime.execution_guard import ensure_execution_allowed
+from app.execution_plane.result_contract import validate_execution_observations
 
 class ResultCommitter:
     def __init__(self, repo, storage, settings, errors=None):
@@ -29,6 +31,7 @@ class ResultCommitter:
         self.errors = errors
 
     async def finalize(self, plan, fact):
+        await ensure_execution_allowed()
         if fact.request_id != str(plan.request_record["id"]):
             raise ExecutionConflictError("Execution fact belongs to another Request")
         if fact.raw_error_envelope is not None:
@@ -38,6 +41,14 @@ class ResultCommitter:
         request_row, session, snapshot = map(thaw_json, (plan.request_record, plan.session_record, plan.snapshot))
         request_id, session_id = str(request_row["id"]), str(request_row["session_id"])
         result = fact.standardized_result
+        contract_observation = None
+        if snapshot.get("schema_version") == "relay-request/2.4":
+            try:
+                contract_observation = validate_execution_observations(snapshot, result.observed or {})
+            except ProviderRequestError as exc:
+                setattr(exc, "provider_success_object_id", fact.provisional_raw_object_id)
+                setattr(exc, "provider_output_object_id", fact.provisional_output_object_id)
+                raise
         history = thaw_json(plan.history)
         observation = thaw_json(fact.execution_observation)
         wire = {"normalize": observation.get("normalize", False)}
@@ -45,7 +56,7 @@ class ResultCommitter:
         cumulative_history = snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn"
         fence = plan.execution_fence
         lease_owner, lease_epoch = (fence.owner, fence.epoch) if fence else (None, None)
-        is_v3 = snapshot.get("schema_version") == "relay-request/2.3"
+        is_v3 = snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}
         raw_object_id, output_object_id = fact.provisional_raw_object_id, fact.provisional_output_object_id
         execution_started_ms = now_ms()
         self._check_observed_contract(
@@ -110,6 +121,8 @@ class ResultCommitter:
         }
         if observation.get("cache_summary") is not None:
             compact_result["cache"] = observation["cache_summary"]
+        if contract_observation is not None:
+            compact_result["contract_observation"] = contract_observation
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:
             compact_result["text"] = truncate_utf8(
                 str(compact_result.get("text") or ""),
@@ -204,7 +217,9 @@ class ResultCommitter:
 
         expected_model = str(snapshot.get("model") or "").strip()
         actual_model = str(observed.get("actual_model") or "").strip()
-        mismatch = bool(expected_model and actual_model and expected_model.lower() != actual_model.lower())
+        allowed_models = ((snapshot.get("execution_authorization") or {}).get("allowed_actual_models") or [])
+        allowed = {expected_model.lower(), *(str(v).lower() for v in allowed_models)}
+        mismatch = bool(expected_model and actual_model and actual_model.lower() not in allowed)
         missing = bool(expected_model and not actual_model)
 
         fields = {
@@ -276,7 +291,7 @@ class ResultCommitter:
             history_object_id=row.get("provisional_history_object_id"), result_object_id=row["provisional_result_object_id"],
             output_object_id=row.get("provisional_output_object_id"), compact_result=thaw_json(marker),
             provider_response_id=row.get("provider_response_id"), expected_history_version=int(row["expected_history_version"]))
-        if row.get("request_identity_version") == "relay-request/2.3":
+        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
             ok = await self.repo.complete_request_v3(**kwargs, fence_owner=active_fence.owner, fence_epoch=active_fence.epoch)
         else:
             ok = await self.repo.complete_request(**kwargs, lease_owner=active_fence.owner if active_fence else None,
@@ -294,7 +309,7 @@ class ResultCommitter:
             return None
         kwargs = dict(request_id=str(row["id"]), session_id=str(row["session_id"]), error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") == "relay-request/2.3":
+        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
             return await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         return await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None,
                                           lease_epoch=fence.epoch if fence else None)

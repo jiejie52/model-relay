@@ -110,6 +110,7 @@ def observed_response_facts(
     body_model: str | None,
     channel_id: str | None,
     protocol: str,
+    evidence_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return upstream facts without changing Relay execution identity.
 
@@ -125,6 +126,17 @@ def observed_response_facts(
         "protocol": protocol,
         "channel_id": channel_id,
     }
+    # Only the frozen, certified protocol profile defines extra evidence fields.
+    # These are observations; authorization is checked by the execution plane.
+    for fact, header in (evidence_headers or {}).items():
+        if fact in {"paid_fallback", "native_constraint_enforced", "protocol_downgraded"}:
+            value = _header_bool(response_headers, header)
+        elif fact == "billing_tier":
+            value = _header_value(response_headers, header)
+            value = value.lower() if value and value.lower() in {"free", "paid"} else None
+        else:
+            continue
+        if value is not None: observed[fact] = value
     if str(channel_id or "").lower() != "aihubmix":
         return observed
 

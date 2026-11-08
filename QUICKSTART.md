@@ -1,4 +1,10 @@
-# Model Relay 4.3.2 快速部署补充
+# Model Relay 7.1.0 升级入口
+
+从 7.0.0 升级：暂停受理并排空在途任务，停止旧 Worker；在已有 SQL 010 后执行 `sql/011_execution_authority_closure.sql`；同步部署本包 API 与 Worker，再恢复受理。数据库迁移不改写历史 Request、Session 或缓存计划。
+
+启动方式沿用 `uvicorn app.api:app` 与 `python -m app.worker`。API / Worker 应报告 `7.1.0`，并加载相同的已发布配置。完整变更、失效恢复边界和回滚要求见 [RELEASE_NOTES_7.1.0.md](RELEASE_NOTES_7.1.0.md)。下面保留旧版部署记录，历史目录名及版本要求不作为本版部署入口。
+
+# Model Relay 4.3.2 快速部署补充（历史记录）
 
 > 4.3.2 修复 layout/7 在执行层没有进入 split inline-cache binding 的问题，并用新 layout/8 隔离旧 `cache_create_unknown` identity。
 

@@ -9,13 +9,14 @@ class QueueScheduler(RequestExecutionService):
         row = await self.repo.get_request(job["request_id"])
         if not row or row.get("status") in {"cancelled", "failed", "succeeded", "indeterminate"}: return
         fence = ExecutionFence(worker_id, int(job.get("lease_epoch") or 0), kind="async_job")
-        await self.repo.update_request(row["id"], {"status": "running"})
+        if not await self.repo.start_request_execution(request_id=str(row["id"]),
+                fence_owner=fence.owner, fence_epoch=fence.epoch):
+            return
         try:
-            await asyncio.wait_for(self.execute_row(row, fence), self.settings.worker_max_runtime_seconds)
+            await asyncio.wait_for(self.execute_guarded(row, fence), self.settings.worker_max_runtime_seconds)
         except Exception as exc:
             await self.record_failure(row, fence, exc)
 
     async def execute_claimed_job(self, job, fence):
         return await self.execute({**job, "lease_epoch": fence.epoch}, fence.owner)
 
-QueueExecutor = QueueScheduler

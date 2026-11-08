@@ -8,7 +8,8 @@ import httpx
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.wire_projection.http_wire import decode_entity, observed_response_facts, read_raw_response
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
-from app.observability.http_wire_logger import normalization_active, provider_transport
+from app.observability.http_wire_logger import normalization_active
+from app.runtime.transport_guard import provider_transport
 from app.core.context_codec import source_markers
 from app.config import Settings
 from app.materials.resolver import MaterialResolver
@@ -170,18 +171,24 @@ class ChatCompletionsV2Adapter:
                 body_model=(str(data.get("model")) if data.get("model") else None),
                 protocol="chat_completions",
                 channel_id=self.channel_id,
+            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
             ),
         )
 
     async def _material_text(self, context: SealedDispatchBundle) -> str:
         blocks: list[str] = []
         for material_id in context.material_ids:
-            resolved = await self.materials.resolve(
-                material_id,
-                tenant_id=context.tenant_id,
-                conversation_hash=context.conversation_hash,
-                with_bytes=True,
-            )
+            binding = next((b for b in context.material_bindings if str(b.get("material_id")) == material_id), {})
+            if context.snapshot.get("schema_version") == "relay-request/2.4":
+                resolved = await self.materials.resolve_frozen(binding, tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash, with_bytes=not bool(binding.get("projection_object_id")))
+            else:
+                resolved = await self.materials.resolve(
+                    material_id,
+                    tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash,
+                    with_bytes=True,
+                )
             mime = str(resolved.material.get("content_type") or "application/octet-stream").lower()
             filename = str(resolved.material.get("filename") or material_id)
             binding = next((b for b in context.material_bindings if str(b.get("material_id")) == material_id), {})

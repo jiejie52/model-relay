@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import hashlib
 from typing import Any
 from uuid import uuid4
 from app.persistence.object_storage import ObjectLocation
@@ -13,7 +14,11 @@ class ExecutionArtifacts:
     async def load_bytes(self, object_id, *, tenant_id, conversation_hash):
         obj = await self.repo.get_object(object_id, tenant_id=tenant_id, conversation_hash=conversation_hash)
         if not obj: raise LookupError(f"Object not found: {object_id}")
-        return await self.storage.get(obj["storage_id"]).get_bytes(ObjectLocation(obj["storage_id"], obj["bucket"], obj["object_key"]))
+        data = await self.storage.get(obj["storage_id"]).get_bytes(ObjectLocation(obj["storage_id"], obj["bucket"], obj["object_key"]))
+        if obj.get("sha256") and hashlib.sha256(data).hexdigest() != obj["sha256"]:
+            from app.shared_contracts import ExecutionConflictError
+            raise ExecutionConflictError("Stored execution object checksum mismatch")
+        return data
 
     async def load_json(
         self, object_id: str, *, tenant_id: str, conversation_hash: str
@@ -28,6 +33,9 @@ class ExecutionArtifacts:
         data = await self.storage.get(obj["storage_id"]).get_bytes(
             ObjectLocation(obj["storage_id"], obj["bucket"], obj["object_key"])
         )
+        if obj.get("sha256") and hashlib.sha256(data).hexdigest() != obj["sha256"]:
+            from app.shared_contracts import ExecutionConflictError
+            raise ExecutionConflictError("Stored execution object checksum mismatch")
         return json.loads(data.decode("utf-8"))
 
 

@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from app.config import Settings
-from app.control_plane.definitions import ModelControlPlane
+from app.control_plane.snapshot import ImmutableConfigSnapshot, verify_node_snapshot_compatibility
 from app.materials.provider_files.registry import ProviderFileRegistry
 from app.execution_plane.semantic_resolver import CAPABILITY_PROFILE_REVISION
 from app.observability import error as log_error, info as log_info, warning as log_warning
@@ -66,6 +66,7 @@ class RouteBinding:
     capability_requirements: dict[str, Any] = field(default_factory=dict)
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
+    execution_authorization: dict[str, Any] = field(default_factory=dict)
 
     def internal_metadata(self) -> dict[str, Any]:
         return {
@@ -98,6 +99,7 @@ class RouteBinding:
             "capability_requirements": self.capability_requirements,
             "observed_model_policy": self.observed_model_policy,
             "quota": self.quota,
+            **({"execution_authorization": self.execution_authorization} if self.execution_authorization else {}),
         }
 
 
@@ -137,16 +139,18 @@ class RouteResolver:
         self,
         *,
         settings: Settings,
-        catalog: RouteCatalog,
+        config_snapshot: ImmutableConfigSnapshot,
         providers: ProviderRegistry,
         provider_files: ProviderFileRegistry,
-        control_plane: ModelControlPlane | None = None,
     ) -> None:
         self.settings = settings
-        self.catalog = catalog
+        verify_node_snapshot_compatibility(config_snapshot)
+        if config_snapshot.route_catalog is None:
+            raise ValueError("Route resolution requires a published catalog in the config snapshot")
+        self.catalog = config_snapshot.route_catalog
         self.providers = providers
         self.provider_files = provider_files
-        self.control_plane = control_plane
+        self.config_snapshot = config_snapshot
 
     def _connection_is_enabled(self, connection_id: str) -> bool:
         checker = getattr(self.settings, "connection_is_enabled", None)
@@ -156,18 +160,18 @@ class RouteResolver:
         return connection_id in enabled
 
     def _connection_configuration(self, connection_id: str) -> tuple[bool, str | None]:
-        if self.control_plane is not None:
-            spec = self.control_plane.connection(connection_id)
+        if self.config_snapshot is not None:
+            spec = self.config_snapshot.connection(connection_id)
             if spec is not None:
-                return self.control_plane.connection_configuration(connection_id, self.settings)
+                return self.config_snapshot.connection_configuration(connection_id, self.settings)
         checker = getattr(self.settings, "connection_configuration", None)
         if callable(checker):
             return checker(connection_id)
         return True, None
 
     def _account_scope_hash(self, connection_id: str) -> str:
-        if self.control_plane is not None and self.control_plane.connection(connection_id) is not None:
-            return self.control_plane.account_scope_hash(connection_id, self.settings)
+        if self.config_snapshot is not None and self.config_snapshot.connection(connection_id) is not None:
+            return self.config_snapshot.account_scope_hash(connection_id, self.settings)
         return self.settings.connection_account_scope_hash(connection_id)
 
     def _connection_policy(self) -> str:
@@ -482,6 +486,7 @@ class RouteResolver:
                 "cache_contract_hash": cache_contract_hash,
                 "capability_requirements": req,
                 "observed_model_policy": selected.observed_model_policy,
+                **({"execution_authorization": selected.execution_authorization} if selected.execution_authorization else {}),
             }
             binding_hash = hashlib.sha256(
                 json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -517,6 +522,7 @@ class RouteResolver:
                 capability_requirements=req,
                 observed_model_policy=selected.observed_model_policy,
                 quota=dict(selected.quota),
+                execution_authorization=dict(selected.execution_authorization),
             )
             log_info(
                 logger,
@@ -736,6 +742,3 @@ class RouteResolver:
         )
 
 
-def candidate_offerings(snapshot, *, provider: str, model: str, deployment_id: str):
-    matches = [item for item in snapshot.offerings.values() if item.matches(provider=provider, model=model, deployment_id=deployment_id)]
-    return sorted(matches, key=lambda item: (-item.priority, item.offering_id, item.connection_id))

@@ -42,6 +42,10 @@ def normalization_active() -> bool:
     return (_current.get() or {}).get("normalize") is True
 
 
+def wire_phase() -> str | None:
+    return (_current.get() or {}).get("phase")
+
+
 def _headers(headers: httpx.Headers, redact: bool) -> list[tuple[str, str]]:
     entries = []
     for name, value in headers.multi_items():

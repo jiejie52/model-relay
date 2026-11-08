@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from app.materials.document_projection import DOCX, projection_authorized
 from app.observability import error as log_error, warning as log_warning
-from app.routing import RouteBinding
+from app.execution_plane.route_resolver import RouteBinding
 from app.storage_paths import request_object_path_v2
 from app.utils import json_bytes, utcnow
 

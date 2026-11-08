@@ -324,6 +324,7 @@ class CacheIntentResolver:
             return {
                 "price_schedule": dict(economics.get("price_schedule") or {}) if isinstance(economics.get("price_schedule"), dict) else {},
                 "reuse_prediction": prediction,
+                "forecast_policy": dict(economics),
                 "expected_future_reuses": prediction.get("expected_future_reuses", 0),
                 "max_new_resource_cost": economics.get("max_new_resource_cost"),
                 "safety_margin_ratio": economics.get("safety_margin_ratio", .20),

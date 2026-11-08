@@ -1,4 +1,12 @@
-# Model Relay 7.0.0
+# Model Relay 7.1.0
+
+以用户上传的 **7.0.0 完整源码包为唯一基线**，补全架构收敛、原子发送封存的最终执行权校验、Lease/Heartbeat 失效联动、不可变配置消费、有效语义身份、运行时成本观测与结果合同检查。
+
+**部署前在已有 010 之后执行 `sql/011_execution_authority_closure.sql`，API / Worker 同时升级。** 旧 `app/cache/`、`app/providers/`、`app/routing/`、`app/execution/` 及 `app/core/execution_runtime.py` 已删除；真正的 v1 业务实现收敛到 `app/compatibility/`。`python -m app.worker` 和离线配置 CLI 入口保留。
+
+新缓存合同请求使用 `relay-request/2.4`；既有 Request 身份算法及 Session 冻结合同继续沿用。`result_stored` 仅恢复提交，发送封存后失租不重发。变更及部署步骤见 [RELEASE_NOTES_7.1.0.md](RELEASE_NOTES_7.1.0.md)，实际验证范围见 [VALIDATION_7.1.0.md](VALIDATION_7.1.0.md)，文件级差异见 `CHANGE_MANIFEST_7.1.0.json`。以下为保留的历史版本说明。
+
+# Model Relay 7.0.0（历史说明）
 
 基于用户上传的 6.8.0 源码，按控制面、执行面、运行时和协议适配层拆分职责。执行面负责受理、计划、调度、合同校验与原子提交；运行时负责物理绑定、封存和实际执行事实。
 

@@ -65,7 +65,7 @@ class JobSubmitRequest(BaseModel):
     # opaque business data: it validates JSON-Schema syntax and maps it to the
     # provider transport, but never inspects domain property names. Current Dify
     # builders may also use payload.output_schema_mode + payload.output_schema;
-    # that compatibility form is resolved by app.structured_output.
+    # that compatibility form is resolved by the execution-plane schema parser.
     structured_output: dict[str, Any] = Field(default_factory=dict)
 
     metadata: dict[str, Any] = Field(default_factory=dict)

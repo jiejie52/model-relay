@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.control_plane.definitions import ModelControlPlane
 from app.control_plane.snapshot import get_active_config_snapshot, verify_node_snapshot_compatibility
 from app.runtime.engine import RelayRuntimeEngine
-from app.runtime.cache_materializer import CacheOrchestrator
+from app.runtime.cache_materializer import CacheMaterializer
 from app.control_plane.resource_registry import CacheResourceRegistry
 from app.runtime.resource_adapters.gemini_aihubmix import GeminiAIHubMixCacheResourceAdapter
 from app.core.raw_error import RawErrorRecorder
@@ -41,7 +41,7 @@ from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "7.0.0"
+WORKER_VERSION = "7.1.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -103,10 +103,9 @@ class RelayWorker:
         verify_node_snapshot_compatibility(self.config_snapshot)
         self.route_resolver = RouteResolver(
             settings=settings,
-            catalog=self.route_catalog,
+            config_snapshot=self.config_snapshot,
             providers=self.providers,
             provider_files=self.file_adapters,
-            control_plane=self.control_plane,
         )
         self.route_resolver.validate_catalog()
         self.cache_resources = CacheResourceRegistry()
@@ -115,7 +114,7 @@ class RelayWorker:
                 settings.aihubmix_gemini_connection_id,
                 GeminiAIHubMixCacheResourceAdapter(settings, sdk=self.gemini_sdk),
             )
-        self.cache_orchestrator = CacheOrchestrator(
+        self.cache_orchestrator = CacheMaterializer(
             self.repo, resource_registry=self.cache_resources
         )
         self.runtime = RelayRuntimeEngine(
@@ -427,42 +426,10 @@ class RelayWorker:
             lease_epoch=epoch,
             protocol_version=str(job.get("protocol_version") or "v2"),
         )
-        await self.repo.update_job(
-            job_id,
-            {
-                "status": "running",
-                "started_at": job.get("started_at") or utcnow().isoformat(),
-            },
-            lease_owner=self.worker_id,
-        )
-        stop = asyncio.Event()
-        heartbeat = asyncio.create_task(self._heartbeat(job_id, epoch, stop))
-        try:
-            await self.queue.execute(job, self.worker_id)
-            log_info(
-                logger,
-                "job_execution_returned",
-                worker_id=self.worker_id,
-                job_id=job_id,
-                request_id=job.get("request_id"),
-                duration_ms=elapsed_ms(started_ms),
-            )
-        finally:
-            stop.set()
-            heartbeat.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat
-
-    async def _heartbeat(self, job_id: str, lease_epoch: int, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=settings.job_heartbeat_seconds)
-                return
-            except asyncio.TimeoutError:
-                ok = await self.repo.renew_lease_v2(job_id, self.worker_id, lease_epoch)
-                if not ok:
-                    log_warning(logger, "lease_renew_failed", worker_id=self.worker_id, job_id=job_id, lease_epoch=lease_epoch)
-                    return
+        # QueueScheduler owns the execution task and its fail-closed heartbeat.
+        await self.queue.execute(job, self.worker_id)
+        log_info(logger, "job_execution_returned", worker_id=self.worker_id, job_id=job_id,
+                 request_id=job.get("request_id"), duration_ms=elapsed_ms(started_ms))
 
     async def _process_legacy(self, job: dict) -> None:
         # Fusion/legacy stage semantics are quarantined in the compatibility

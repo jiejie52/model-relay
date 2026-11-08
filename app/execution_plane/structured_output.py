@@ -1,2 +1,2 @@
-"""Canonical schema parsing and post-validation used by request acceptance and result commit."""
-from app.canonical_schema import *
+"""Canonical application-schema parsing and final validation."""
+from app.canonical_schema import (StructuredOutputError, StructuredOutputSpec, resolve_structured_output, validate_against_schema)

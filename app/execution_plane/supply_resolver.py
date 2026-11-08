@@ -11,12 +11,12 @@ def context_settings(value: Any) -> dict[str, str]:
 
 
 def _account_identity(resolver, connection_id: str) -> str:
-    spec = resolver.control_plane.connection(connection_id) if resolver.control_plane else None
+    spec = resolver.config_snapshot.connection(connection_id) if resolver.config_snapshot else None
     if spec is None:
         return resolver._account_scope_hash(connection_id)
     return stable_hash([
         spec.channel_id, spec.account_id, spec.metadata.get("region"),
-        resolver.control_plane.credential(connection_id, resolver.settings),
+        resolver.config_snapshot.credential(connection_id, resolver.settings),
     ])
 
 

@@ -8,6 +8,7 @@ import re
 from typing import Any, Protocol
 
 import httpx
+import asyncio
 
 from app.core.idempotency import stable_hash
 from app.protocol_adapters.error_observation import provider_http_error_observation, pseudonymize_provider_request_id, safe_exception_observation
@@ -16,6 +17,7 @@ from app.protocol_adapters.base import ProviderHTTPError
 from app.runtime.affinity import AffinityDriftDetected
 from app.observability.http_wire_logger import affinity_hint
 from app.shared_contracts import CacheDecisionError, ExecutionFence
+from app.runtime.execution_guard import cache_operation_guard, ensure_execution_allowed, ExecutionLeaseLost
 from app.runtime.cache_economics import evaluate_new_resource, evaluate_current_read_resource, evaluate_relative_cache_strategy, evaluate_v65_snapshot_cost
 
 
@@ -199,6 +201,7 @@ class StatefulResourceManager:
                             resource_id=str(existing["id"]),
                             provider_handle_ref=handle,
                             state="expired" if exc.status_code == 410 else "invalid",
+                            request_id=str(request_row["id"]), fence_owner=fence.owner, fence_epoch=fence.epoch,
                         )
                     continue
                 return self._provider_prepare_failure(plan, exc, "cache_resource_probe_failed")
@@ -220,7 +223,7 @@ class StatefulResourceManager:
                         resource_id=str(existing["id"]),
                         provider_handle_ref=handle,
                         state="expired",
-                    )
+                        request_id=str(request_row["id"]), fence_owner=fence.owner, fence_epoch=fence.epoch,                    )
                 continue
 
             growth_decision: dict[str, Any] | None = None
@@ -463,6 +466,7 @@ class StatefulResourceManager:
                              "assessment_spec_hash": stable_hash(spec)},
             }
 
+        spec_hash = stable_hash(spec)
         try:
             operation = await self.repo.create_cache_operation_intent(
                 request_id=str(request_row["id"]),
@@ -484,6 +488,13 @@ class StatefulResourceManager:
                 content_fingerprint=content_fingerprint,
                 error=safe_exception_observation(exc, phase="cache_create_claim"),
             )
+            if snapshot.get("schema_version") == "relay-request/2.4":
+                reconciled = await self._reconcile_known_create(request_row=request_row, fence=fence,
+                    scope_hash=scope_hash, content_fingerprint=content_fingerprint, adapter=adapter,
+                    snapshot=snapshot, spec=spec, spec_hash=spec_hash, reuse_key=reuse_key,
+                    prefix_version=prefix_version, token_count=token_count, plan=plan)
+                if reconciled is not None:
+                    return reconciled
             raced = await self.repo.find_compatible_cache_resources(
                 scope_hash=scope_hash,
                 reuse_key=reuse_key,
@@ -520,7 +531,19 @@ class StatefulResourceManager:
         # exception or a missing handle is recorded as unknown and is NOT a
         # license to POST create again in this execution.
         try:
-            observation = await adapter.create(spec=spec, operation=operation)
+            with cache_operation_guard(operation):
+                await ensure_execution_allowed(states=("not_sent",))
+                observation = await adapter.create(spec=spec, operation=operation)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self.repo.finish_cache_operation(operation_id=op_id,
+                    lease_owner=op_owner, lease_epoch=op_epoch, state="unknown",
+                    raw_result={"outcome": "cancelled_after_cache_dispatch", "recreate_permitted": False}))
+            except Exception:
+                pass
+            raise
+        except ExecutionLeaseLost:
+            raise
         except ProviderHTTPError as exc:
             error_observation = provider_http_error_observation(exc)
             state = "failed" if 400 <= int(exc.status_code) < 500 else "unknown"
@@ -730,7 +753,6 @@ class StatefulResourceManager:
             )
             return self._provider_prepare_failure(plan, exc, "cache_create_unknown")
 
-        spec_hash = stable_hash(spec)
         published = await self.repo.publish_cache_resource(
             operation_id=str(operation["op_id"]),
             lease_owner=str(operation.get("lease_owner") or fence.owner),
@@ -778,6 +800,49 @@ class StatefulResourceManager:
             growth_decision=prefix_growth_decision,
             creation_decision=cache_creation_decision,
         )
+
+    async def _reconcile_known_create(self, *, request_row, fence, scope_hash, content_fingerprint,
+                                     adapter, snapshot, spec, spec_hash, reuse_key, prefix_version, token_count, plan):
+        # Only GET a handle durably recorded for this exact operation. No list,
+        # name guessing, billing probe, or another POST create is permitted.
+        operations = await self.repo.cache_operations_for_reconciliation(
+            scope_hash=scope_hash, content_fingerprint=content_fingerprint)
+        for prior in operations:
+            raw = prior.get("raw_result") or {}
+            handle = str(raw.get("handle") or "")
+            if not re.fullmatch(r"cachedContents/[A-Za-z0-9._~-]+", handle):
+                continue
+            op = await self.repo.claim_cache_reconciliation(operation_id=str(prior["op_id"]),
+                request_id=str(request_row["id"]), fence_owner=fence.owner, fence_epoch=fence.epoch)
+            if op is None:
+                continue
+            try:
+                with cache_operation_guard(op):
+                    await ensure_execution_allowed(states=("not_sent",))
+                    observed = await adapter.get(handle=handle, operation=op)
+                if str(observed.get("handle") or "") != handle or self._observation_expiring(observed):
+                    raise RuntimeError("Recorded cache handle is not a proven usable resource")
+                observed = {**raw, **observed, "reconciled": True}
+                published = await self.repo.publish_cache_resource(operation_id=str(op["op_id"]),
+                    lease_owner=op["lease_owner"], lease_epoch=int(op["lease_epoch"]),
+                    tenant_id=request_row["tenant_id"], conversation_hash=request_row["conversation_hash"],
+                    session_id=str(request_row["session_id"]), offering_id=str(snapshot.get("offering_id") or ""),
+                    connection_id=str(snapshot["connection_id"]), scope_hash=scope_hash,
+                    content_fingerprint=content_fingerprint, reuse_key=reuse_key, prefix_version=prefix_version,
+                    token_count=token_count, spec_hash=spec_hash, provider_handle_ref=handle,
+                    expire_time=observed.get("expire_time"), profile_hash=str(plan.get("profile_hash") or ""), raw_result=observed)
+                if not published:
+                    raise ExecutionLeaseLost("Reconciled resource publication lost its fence")
+                return self._binding_from_resource(published, decision_reason="resource_reused_reconciled",
+                    cached_history_version=prefix_version, token_count=token_count, reuse_key=reuse_key,
+                    spec=spec, provider_observation=observed)
+            except ExecutionLeaseLost:
+                raise
+            except Exception as exc:
+                await self.repo.finish_cache_operation(operation_id=str(op["op_id"]), lease_owner=op["lease_owner"],
+                    lease_epoch=int(op["lease_epoch"]), state="unknown", raw_result={**raw, "reconcile_error": type(exc).__name__})
+                raise CacheDecisionError("CACHE_CREATE_UNKNOWN", "Recorded cache creation could not be reconciled; recreation is forbidden") from exc
+        return None
 
     async def _evaluate_prefix_growth(
         self,

@@ -32,7 +32,7 @@ class CacheIntentPlan:
     mechanism_config: dict[str, Any] = field(default_factory=dict)
     # A fallback is part of the frozen Request plan, not a runtime invention.
     # Only mechanisms certified or explicitly admitted for Auto trial by the
-    # frozen Supply and Profile may appear here. CacheOrchestrator may resolve one before dispatch is sealed.
+    # frozen Supply and Profile may appear here. CacheMaterializer may resolve one before dispatch is sealed.
     fallback_mechanisms: tuple[dict[str, Any], ...] = ()
     resolver_version: str = "relay-cache-resolver/3"
 

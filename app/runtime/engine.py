@@ -8,6 +8,7 @@ from app.runtime.cache_materializer import CacheMaterializer
 from app.core.raw_error import RawErrorRecorder
 from app.persistence.execution_artifacts import ExecutionArtifacts
 from app.observability import now_ms
+from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, ensure_execution_allowed, current_execution_guard, execution_guard
 
 class RelayRuntimeEngine:
     """Physical execution only; schedules and Session commits belong to the execution plane."""
@@ -24,21 +25,34 @@ class RelayRuntimeEngine:
         self.invoker = ControlledInvoker(repo, providers, self.artifacts, self.cache, settings)
 
     async def execute(self, plan):
+        if plan.execution_fence is not None and current_execution_guard() is None:
+            # Direct physical-runtime callers still need the live boundary checks;
+            # scheduling and heartbeat ownership stay in the execution plane.
+            with execution_guard(ExecutionGuard(self.repo, plan.request_record, plan.execution_fence, self.settings)):
+                return await self._execute(plan)
+        return await self._execute(plan)
+
+    async def _execute(self, plan):
         state = RuntimeState.from_plan(plan, now_ms())
         try:
             await self.verifier.verify(plan)
+            await ensure_execution_allowed(states=("not_sent",))
             await self.projector.prepare_scope(state)
             state.failure_stage = "material_bind"
             await self.bindings.bind_for_plan(state)
+            await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "cache_assessment"
             await self.projector.project(state)
             state.execution_snapshot = state.snapshot
             state.failure_stage = "cache_materialize"
             if state.is_v3: await self.cache.prepare_for_context(state)
+            await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "dispatch_seal"
             await self.sealer.seal_before_dispatch(state)
             state.failure_stage = "provider_http"
             return await self.invoker.invoke_once_and_record(state)
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             # asyncio cancellation is deliberately propagated to the scheduler.
             current = await self.repo.get_request(state.request_id) or state.request_row

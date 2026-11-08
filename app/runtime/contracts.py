@@ -3,6 +3,20 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from app.immutable import freeze_json, thaw_json
 
+
+def dispatch_input_digest(*, snapshot, session, history, material_ids, material_bindings,
+                          tenant_id, conversation_hash, request_id, session_id, context_plan,
+                          cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers):
+    from app.core.idempotency import stable_hash
+    return stable_hash({"schema_version": "relay-prepared-execution/2",
+        "snapshot": {k: v for k, v in snapshot.items() if k != "_relay_cache_execution"},
+        "session": session, "history": history, "material_ids": material_ids,
+        "material_bindings": material_bindings, "tenant_id": tenant_id,
+        "conversation_hash": conversation_hash, "request_id": request_id, "session_id": session_id,
+        "context_plan": context_plan, "cache_binding": cache_execution_binding,
+        "execution_fence": execution_fence, "provider_physical_plan": provider_physical_plan,
+        "affinity_headers": affinity_headers})
+
 @dataclass(frozen=True)
 class SealedDispatchBundle:
     snapshot: dict[str, Any]
@@ -41,14 +55,17 @@ class SealedDispatchBundle:
         from app.shared_contracts import ExecutionConflictError
         if not self.seal_id or not self.seal_hash or self.seal_id != self.request_id:
             raise ExecutionConflictError("Adapter dispatch requires an identified execution seal")
-        if self.snapshot.get("schema_version") == "relay-request/2.3":
-            snapshot = {k: v for k, v in self.snapshot.items() if k != "_relay_cache_execution"}
-            actual = stable_hash({"schema_version": "relay-prepared-execution/1", "snapshot": snapshot,
-                "history": self.history, "material_bindings": self.material_bindings,
-                "provider_physical_plan_hash": (self.provider_physical_plan or {}).get("physical_plan_hash"),
-                "cache_binding": self.cache_execution_binding})
-        else:
-            actual = stable_hash(self.snapshot)
+        if ("_relay_cache_execution" in self.snapshot
+                and self.snapshot["_relay_cache_execution"] != self.cache_execution_binding):
+            raise ExecutionConflictError("Snapshot cache projection differs from the sealed cache binding")
+        physical = self.provider_physical_plan
+        if physical is not None and physical.get("physical_plan_hash") != stable_hash(
+                {k: v for k, v in physical.items() if k != "physical_plan_hash"}):
+            raise ExecutionConflictError("Physical plan content differs from its digest")
+        actual = dispatch_input_digest(**{name: getattr(self, name) for name in (
+            "snapshot", "session", "history", "material_ids", "material_bindings", "tenant_id",
+            "conversation_hash", "request_id", "session_id", "context_plan", "cache_execution_binding",
+            "execution_fence", "provider_physical_plan", "affinity_headers")})
         if actual != self.seal_hash:
             raise ExecutionConflictError("Sealed adapter inputs do not match the atomic dispatch digest")
         return True
@@ -107,4 +124,4 @@ class RuntimeState:
         if session.get("context_policy") == "conversation": ids = list(session.get("material_manifest") or []) + ids
         return cls(plan, row, session, snapshot, thaw_json(plan.history), str(row["id"]), str(row["session_id"]),
                    list(dict.fromkeys(ids)), snapshot.get("provider")=="gemini" and snapshot.get("protocol", "gemini_native")=="gemini_native",
-                   snapshot.get("schema_version")=="relay-request/2.3", plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)
+                   snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)

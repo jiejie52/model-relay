@@ -1,11 +1,12 @@
 from __future__ import annotations
+from app.runtime.execution_guard import ensure_execution_allowed, ExecutionLeaseLost
 
 import base64
 import io
 import json
 from typing import Any
 
-from app.observability.http_wire_logger import provider_transport
+from app.runtime.transport_guard import provider_transport
 from app.config import Settings
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 
@@ -139,6 +140,7 @@ class GeminiAIHubMixGenAIClient:
         stream = io.BytesIO(data)
         stream.name = filename  # type: ignore[attr-defined]
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             file_obj = await self.client.aio.files.upload(
                 file=stream,
                 config=types.UploadFileConfig(
@@ -146,6 +148,8 @@ class GeminiAIHubMixGenAIClient:
                     mime_type=mime_type,
                 ),
             )
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_files_upload") from exc
         return self.remember_file(file_obj)
@@ -155,14 +159,20 @@ class GeminiAIHubMixGenAIClient:
         if cached is not None and not refresh:
             return cached
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             file_obj = await self.client.aio.files.get(name=name)
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_files_get") from exc
         return self.remember_file(file_obj)
 
     async def delete_file(self, *, name: str) -> None:
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             await self.client.aio.files.delete(name=name)
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             # The SDK raises a typed ClientError for an absent file. Preserve the
             # normal error unless the provider explicitly reports 404.
@@ -196,6 +206,7 @@ class GeminiAIHubMixGenAIClient:
             types_module=types,
         )
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             cache = await self.client.aio.caches.create(
                 model=model,
                 config=types.CreateCachedContentConfig(
@@ -209,29 +220,40 @@ class GeminiAIHubMixGenAIClient:
                     ttl=f"{int(ttl_seconds)}s",
                 ),
             )
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_cache_create") from exc
         return cache
 
     async def get_cache(self, *, name: str) -> Any:
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             return await self.client.aio.caches.get(name=name)
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_cache_get") from exc
 
     async def renew_cache(self, *, name: str, expire_at: str) -> Any:
         types = self._types()
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             return await self.client.aio.caches.update(
                 name=name,
                 config=types.UpdateCachedContentConfig(expire_time=expire_at),
             )
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_cache_renew") from exc
 
     async def delete_cache(self, *, name: str) -> None:
         try:
+            await ensure_execution_allowed(states=("not_sent",))
             await self.client.aio.caches.delete(name=name)
+        except ExecutionLeaseLost:
+            raise
         except Exception as exc:
             error = self._provider_error(exc, phase="gemini_cache_delete")
             if isinstance(error, ProviderHTTPError) and error.status_code == 404:
@@ -303,6 +325,8 @@ class GeminiAIHubMixGenAIClient:
                         )
                     try:
                         data = base64.b64decode(raw, validate=True)
+                    except ExecutionLeaseLost:
+                        raise
                     except Exception as exc:
                         raise ProviderRequestError(
                             "GEMINI_CACHE_INLINE_DATA",

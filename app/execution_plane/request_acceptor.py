@@ -8,6 +8,9 @@ from uuid import UUID, uuid4
 
 
 from app.core.idempotency import caller_intent_hash, request_identity, stable_hash
+from app.execution_plane.request_identity import semantic_intent_hash
+from app.control_plane.execution_authorization import execution_authorization
+from app.persistence.execution_artifacts import ExecutionArtifacts
 from app.runtime.affinity import session_affinity_token
 from app.execution_plane.cache_intent_planner import freeze_dual_track_plan
 from app.core.context_codec import canonical_structure, normalize_structured_output, freeze_history
@@ -164,6 +167,21 @@ class RequestAcceptor:
         # Cache-aware Requests must replay their original interpretation before any
         # current cache inventory, token measurement or policy is consulted.
         existing = await repo.find_request_by_idempotency(session_id, idempotency_key)
+        if existing and existing.get("request_identity_version") == "relay-request/2.4":
+            frozen = await ExecutionArtifacts(repo, services.storage, settings).load_json(
+                existing["request_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash)
+            try:
+                replay_options = resolve_model_options(provider=frozen["provider"], model=frozen["model"],
+                    options=body.options, provider_payload=body.provider_payload, think_level=body.think_level,
+                    capability_contract=frozen.get("capability_contract"))
+                replay_hash = semantic_intent_hash(public_intent, replay_options)
+            except (ModelOptionError, ValueError) as exc:
+                raise ExecutionRequestError(409, {"code": "IDEMPOTENCY_CONFLICT"}) from exc
+            if replay_hash != existing.get("caller_intent_hash"):
+                raise ExecutionRequestError(409, {"code": "IDEMPOTENCY_CONFLICT"})
+            if existing.get("execution_mode") == "sync" and existing.get("status") == "running" and existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}:
+                return await services.inline_scheduler.execute(existing)
+            return existing
         if existing and str(existing.get("request_identity_version") or "") == "relay-request/2.3":
             if str(existing.get("caller_intent_hash") or "") != public_intent_hash:
                 raise ExecutionRequestError(status_code=409, detail="IDEMPOTENCY_CONFLICT")
@@ -179,7 +197,7 @@ class RequestAcceptor:
                 model=existing.get("model"),
                 identity_version="relay-request/2.3",
             )
-            if (existing.get("provider_dispatch_state") == "result_stored"
+            if (existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}
                     and existing.get("execution_mode") == "sync"):
                 return await services.inline_scheduler.execute(existing)
             return existing
@@ -345,6 +363,9 @@ class RequestAcceptor:
             )
             raise ExecutionRequestError(status_code=422, detail=exc.public_detail()) from exc
 
+        if cache_contract_session:
+            public_intent_hash = semantic_intent_hash(public_intent, resolved_options)
+
         frozen_capability_revision = str(frozen_route.get("capability_revision") or "")
         frozen_contract = frozen_route.get("capability_contract")
         if (
@@ -374,6 +395,7 @@ class RequestAcceptor:
             )
 
         base_snapshot = {
+            "execution_authorization": dict(execution_authorization(frozen_route.get("execution_authorization"))),
             "session_id": str(session_id),
             "tenant_id": tenant_id,
             "conversation_hash": conversation_hash,
@@ -444,7 +466,7 @@ class RequestAcceptor:
                         except (ValueError, TypeError, AttributeError) as exc:
                             raise ExecutionRequestError(status_code=409, detail={"code": "HISTORY_INTEGRITY_MISMATCH"}) from exc
             plan_seed = dict(base_snapshot)
-            plan_seed["schema_version"] = "relay-request/2.3"
+            plan_seed["schema_version"] = "relay-request/2.4"
             supply_cache = frozen_route.get("cache_contract") or {}
             grok_mode = None
             if provider in {"grok", "xai"} or model.lower().startswith("grok-"):
@@ -495,50 +517,8 @@ class RequestAcceptor:
                 large_min_bytes=economics_policy.get("large_attachment_min_bytes", 1024 * 1024),
                 context_policy=str(session.get("context_policy") or "conversation"),
             )
-            if body.requested_cache_mode == "auto":
-                try:
-                    observed_reuse = await repo.recent_session_cache_reuse_evidence(
-                        session_id=str(session_id), tenant_id=tenant_id,
-                        conversation_hash=conversation_hash, reuse_evidence_key=evidence_key,
-                    )
-                except Exception as exc:
-                    # Only a frozen candidate hint; failures cannot authorize reuse.
-                    log_warning(logger, "cache_reuse_evidence_unavailable",
-                                session_id=str(session_id), error_type=type(exc).__name__)
-                # A ready resource may have been created by a Request that later
-                # failed before producing a successful response. Query the bounded
-                # Session inventory independently of historical success counts;
-                # the execution manager still proves exact fingerprint and handle
-                # compatibility before it can bind the resource.
-                cache_contract = frozen_route.get("cache_contract") if isinstance(frozen_route.get("cache_contract"), dict) else {}
-                contract_mechanisms = set(cache_contract.get("supported_mechanisms") or cache_contract.get("mechanisms") or [])
-                profile_cache = (
-                    frozen_route.get("protocol_profile", {}).get("cache")
-                    if isinstance(frozen_route.get("protocol_profile"), dict)
-                    else {}
-                )
-                profile_mechanisms = set(profile_cache.get("supported_mechanisms") or contract_mechanisms)
-                if "stateful_resource" in contract_mechanisms and "stateful_resource" in profile_mechanisms:
-                    try:
-                        scope_hash = repo.cache_scope_hash(
-                            tenant_id=tenant_id,
-                            conversation_hash=conversation_hash,
-                            session_id=str(session_id),
-                            offering_id=str(frozen_route.get("offering_id") or ""),
-                            account_scope_hash=str(frozen_route.get("account_scope_hash") or ""),
-                            protocol_profile_hash=str(frozen_route.get("protocol_profile_hash") or ""),
-                            affinity_epoch=(int(session.get("affinity_epoch") or 1) if frozen_route.get("channel_id") == "aihubmix"
-                                            or (frozen_route.get("protocol_profile", {}).get("cache") or {}).get("affinity_header") else 0),
-                        )
-                        observed_reuse["existing_resource_candidate"] = (
-                            await repo.ready_session_cache_resource_hint(
-                                scope_hash=scope_hash, connection_id=str(connection_id),
-                            )
-                        )
-                    except Exception as exc:
-                        # Never select a cache mechanism using unverified DB state.
-                        log_warning(logger, "cache_resource_hint_unavailable",
-                                    session_id=str(session_id), error_type=type(exc).__name__)
+            # The frozen plan authorizes candidates. Inventory and measured
+            # reuse/cost evidence are read only by the runtime arbiter.
             try:
                 cache_intent = CacheIntentResolver().resolve(
                     requested_mode=body.requested_cache_mode,
@@ -564,7 +544,7 @@ class RequestAcceptor:
                 contract=supply_cache, cache_policy=frozen_cache_policy,
             )
             snapshot = {
-                "schema_version": "relay-request/2.3",
+                "schema_version": "relay-request/2.4",
                 **base_snapshot,
                 "protocol_profile_id": frozen_route.get("protocol_profile_id"),
                 "protocol_profile_hash": frozen_route.get("protocol_profile_hash"),
@@ -607,7 +587,7 @@ class RequestAcceptor:
                 allowed_hashes.add(legacy_req_hash)
             if existing.get("request_hash") not in allowed_hashes:
                 raise ExecutionRequestError(status_code=409, detail="Idempotency-Key was already used for a different Request")
-            if (existing.get("provider_dispatch_state") == "result_stored"
+            if (existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}
                     and existing.get("execution_mode") == "sync"):
                 return await services.inline_scheduler.execute(existing)
             return existing
@@ -679,7 +659,7 @@ class RequestAcceptor:
                     idempotency_key=idempotency_key,
                     request_hash=req_hash,
                     caller_intent_hash=public_intent_hash,
-                    request_identity_version="relay-request/2.3",
+                    request_identity_version="relay-request/2.4",
                     execution_mode=body.execution.mode,
                     request_object_id=object_id,
                     context_plan_object_id=context_plan_object_id,

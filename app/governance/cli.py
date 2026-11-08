@@ -1,5 +1,5 @@
-"""Compatibility import; implementation lives in app.control_plane.governance.cli."""
-from app.control_plane.governance.cli import *  # noqa: F401,F403
+"""Public offline configuration CLI entrypoint."""
+from app.control_plane.governance.cli import main
 
 if __name__ == "__main__":
     main()

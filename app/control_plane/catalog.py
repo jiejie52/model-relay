@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
+from app.immutable import freeze_json
+from app.control_plane.execution_authorization import execution_authorization
 from fnmatch import fnmatchcase
 import hashlib
 import json
@@ -32,6 +34,7 @@ class RouteEntry:
     quota: dict[str, Any] = field(default_factory=dict)
     source: str = "legacy"
     unavailable_action: str = "try_next"  # try_next | reject_new_session
+    execution_authorization: dict[str, Any] = field(default_factory=dict)
 
     def matches(self, *, provider: str, model: str, deployment_id: str) -> bool:
         if self.provider.lower() != provider.lower():
@@ -67,16 +70,22 @@ class RouteCatalog:
     provider/model Session contract.
     """
 
+    def __setattr__(self, name, value):
+        if getattr(self, "_frozen", False):
+            raise TypeError("Published RouteCatalog cannot be mutated")
+        object.__setattr__(self, name, value)
+
     def __init__(
         self, *, revision: str, entries: list[RouteEntry],
         control_plane_hash: str | None = None,
         managed_groups: list[dict[str, str]] | None = None,
     ) -> None:
         self.revision = revision
-        self.entries = sorted(
-            entries,
+        self.entries = tuple(sorted(
+            [replace(item, **{f.name: freeze_json(getattr(item, f.name))
+                for f in fields(item) if isinstance(getattr(item, f.name), (dict, list))}) for item in entries],
             key=lambda item: (-item.priority, item.offering_id or "", item.connection_id),
-        )
+        ))
         self.control_plane_hash = control_plane_hash
         self.managed_groups = tuple(
             (item["provider"].lower(), item["model"].lower(), item["deployment_id"])
@@ -108,6 +117,7 @@ class RouteCatalog:
                     "quota": x.quota,
                     "source": x.source,
                     "unavailable_action": x.unavailable_action,
+                    **({"execution_authorization": x.execution_authorization} if x.execution_authorization else {}),
                 }
                 for x in self.entries
             ],
@@ -115,6 +125,7 @@ class RouteCatalog:
         self.catalog_hash = hashlib.sha256(
             json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+        self._frozen = True
 
     @classmethod
     def from_settings(
@@ -177,6 +188,7 @@ class RouteCatalog:
                     cache_policy=(cache_policy.canonical() if cache_policy else None),
                     observed_model_policy=offering.observed_model_policy,
                     quota=dict(offering.quota),
+                    execution_authorization=(dict(execution_authorization(offering.metadata["execution_authorization"])) if "execution_authorization" in offering.metadata else {}),
                     source=("managed_v2" if offering.metadata.get("managed_v2") is True else "control_plane"),
                     unavailable_action=str(offering.metadata.get("unavailable_action", "try_next")),
                 )
@@ -202,6 +214,7 @@ class RouteCatalog:
             model_pattern=model_pattern,
             connection_id=connection_id,
             priority=int(value.get("priority") or 100),
+            execution_authorization=(dict(execution_authorization(value["execution_authorization"])) if "execution_authorization" in value else {}),
             deployment_id=str(value.get("deployment_id") or default_deployment),
             requires_file_adapter=bool(value.get("requires_file_adapter", False)),
             offering_id=(str(value.get("offering_id")) if value.get("offering_id") else None),

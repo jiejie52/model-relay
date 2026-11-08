@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app.observability.http_wire_logger import provider_transport
+from app.runtime.transport_guard import provider_transport
 from app.config import Settings
 from app.core.idempotency import stable_hash
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError

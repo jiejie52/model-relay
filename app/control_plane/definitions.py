@@ -644,6 +644,13 @@ class ModelControlPlane:
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def _validate(self) -> None:
+        from app.control_plane.execution_authorization import execution_authorization, validate_response_evidence_headers
+        for offering in self.offerings.values():
+            if "execution_authorization" in offering.metadata:
+                execution_authorization(offering.metadata["execution_authorization"])
+        for profile in self.protocol_profiles.values():
+            if "response_evidence_headers" in profile.metadata:
+                validate_response_evidence_headers(profile.metadata["response_evidence_headers"])
         if self.status != "published":
             raise ValueError("Runtime control-plane snapshots must have status=published")
         managed_groups = self.release_metadata.get("managed_model_groups") or []

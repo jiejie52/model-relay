@@ -1347,8 +1347,18 @@ class MaterialBinder:
             reused_snapshot=existing_binding_snapshot is not None,
             duration_ms=elapsed_ms(binding_started_ms),
         )
+        if state.snapshot.get("schema_version") == "relay-request/2.4" and existing_binding_snapshot is None:
+            for item in state.material_bindings:
+                metadata = item.get("metadata") or {}
+                if item.get("purpose") == "file-extract":
+                    oid = metadata.get("extraction_object_id")
+                    obj = await self.repo.get_object(str(oid), tenant_id=state.request_row["tenant_id"],
+                        conversation_hash=state.request_row["conversation_hash"]) if oid else None
+                    if not obj or not obj.get("sha256"):
+                        raise ProviderRequestError("MATERIAL_BINDING_INVALID", "Extracted text has no immutable object identity")
+                    item["metadata"] = {**metadata, "extraction_sha256": obj["sha256"]}
         if existing_binding_snapshot is None:
-            if state.is_v3 and state.fence is not None:
+            if state.fence is not None:
                 installed = await self.repo.install_request_material_binding_v3(
                     request_id=state.request_id,
                     snapshot=state.material_bindings,
@@ -1367,4 +1377,3 @@ class MaterialBinder:
                 )
 
 
-BindingResolver = MaterialBinder

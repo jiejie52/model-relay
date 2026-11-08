@@ -526,4 +526,3 @@ class CacheMaterializer:
                 "Stateful cache preparation completed without a usable Provider cache handle",
             )
 
-CacheOrchestrator = CacheMaterializer

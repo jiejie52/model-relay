@@ -9,7 +9,7 @@ from app.runtime.affinity import session_affinity_token
 from app.execution_plane.supply_resolver import context_settings
 from app.observability import info as log_info, warning as log_warning
 from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_SESSION_PROJECTION_METADATA_KEY, frozen_session_projection_metadata_v9
-from app.routing import RouteResolutionError
+from app.execution_plane.route_resolver import RouteResolutionError
 from app.utils import stable_prompt_cache_key
 from app.v2_models import SessionCreateRequest
 

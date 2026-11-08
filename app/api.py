@@ -20,7 +20,7 @@ from app.security import require_owner_headers, require_relay_auth
 from app.storage_paths import job_object_path, session_material_prefix_path
 from app.supabase import SupabaseBackend, SupabaseError
 from app.utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
-from app.relay_gateway import router as dify_relay_gateway_router
+from app.compatibility.relay_gateway import router as dify_relay_gateway_router
 from app.api_v2.router import router as relay_v2_router
 from app.persistence.object_storage import StorageRegistry
 from app.persistence.supabase_storage import SupabaseObjectStorage
@@ -38,7 +38,7 @@ from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIC
 from app.control_plane.catalog import RouteCatalog
 from app.execution_plane.route_resolver import RouteResolver
 from app.runtime.engine import RelayRuntimeEngine
-from app.runtime.cache_materializer import CacheOrchestrator
+from app.runtime.cache_materializer import CacheMaterializer
 from app.control_plane.resource_registry import CacheResourceRegistry
 from app.runtime.resource_adapters.gemini_aihubmix import GeminiAIHubMixCacheResourceAdapter
 from app.core.raw_error import RawErrorRecorder
@@ -47,7 +47,7 @@ from app.observability import configure_logging, elapsed_ms, error as log_error,
 
 
 
-API_VERSION = "7.0.0"
+API_VERSION = "7.1.0"
 
 
 settings = get_settings()
@@ -198,10 +198,9 @@ async def lifespan(_: FastAPI):
     verify_node_snapshot_compatibility(config_snapshot)
     route_resolver = RouteResolver(
         settings=settings,
-        catalog=route_catalog,
+        config_snapshot=config_snapshot,
         providers=providers,
         provider_files=file_adapters,
-        control_plane=control_plane,
     )
     route_resolver.validate_catalog()
     cache_resources = CacheResourceRegistry()
@@ -210,7 +209,7 @@ async def lifespan(_: FastAPI):
             settings.aihubmix_gemini_connection_id,
             GeminiAIHubMixCacheResourceAdapter(settings, sdk=gemini_sdk),
         )
-    cache_orchestrator = CacheOrchestrator(repo, resource_registry=cache_resources)
+    cache_orchestrator = CacheMaterializer(repo, resource_registry=cache_resources)
     runtime = RelayRuntimeEngine(
         repo, storage_registry, providers, material_resolver, binding_resolver, settings,
         cache_orchestrator=cache_orchestrator,
