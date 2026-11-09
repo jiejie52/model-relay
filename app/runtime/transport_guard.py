@@ -4,9 +4,19 @@ Observability owns wire capture; the runtime owns permission to reach the
 underlying HTTP transport, after headers and request bytes have been prepared.
 """
 import httpx
+import asyncio
 
 from app.observability.http_wire_logger import provider_transport as diagnostic_transport, wire_phase
 from app.runtime.execution_guard import current_execution_guard, ensure_execution_allowed
+
+class FencedRequestStream(httpx.AsyncByteStream):
+    def __init__(self,inner,states):self.inner,self.states=inner,states
+    async def __aiter__(self):
+        async for chunk in self.inner:
+            await ensure_execution_allowed(states=self.states)
+            yield chunk
+        await ensure_execution_allowed(states=self.states)
+    async def aclose(self):await self.inner.aclose()
 
 
 class ExecutionFencedAsyncTransport(httpx.AsyncBaseTransport):
@@ -24,7 +34,31 @@ class ExecutionFencedAsyncTransport(httpx.AsyncBaseTransport):
                 raise ValueError("CONNECTION_HOST_FORBIDDEN")
         states = ("dispatch_started",) if wire_phase() == "inference" else ("not_sent",)
         await ensure_execution_allowed(states=states)
-        return await self.wrapped.handle_async_request(request)
+        guard=current_execution_guard()
+        if guard is None:return await self.wrapped.handle_async_request(request)
+        request.stream=FencedRequestStream(request.stream,states)
+        sender=asyncio.create_task(self.wrapped.handle_async_request(request))
+        async def watch_authority():
+            from app.runtime.execution_guard import current_cache_operation
+            if current_cache_operation() is None:
+                await guard.lost.wait()
+                return
+            while not guard.lost.is_set():
+                try:await asyncio.wait_for(guard.lost.wait(),.5)
+                except asyncio.TimeoutError:await ensure_execution_allowed(states=states)
+        lost=asyncio.create_task(watch_authority())
+        try:
+            await asyncio.wait((sender,lost),return_when=asyncio.FIRST_COMPLETED)
+            if guard.lost.is_set():
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                sender.cancel()
+                await asyncio.gather(sender,return_exceptions=True)
+                raise ExecutionLeaseLost(guard.reason)
+            return await sender
+        finally:
+            lost.cancel()
+            if not sender.done():sender.cancel()
+            await asyncio.gather(lost,sender,return_exceptions=True)
 
     async def aclose(self):
         await self.wrapped.aclose()

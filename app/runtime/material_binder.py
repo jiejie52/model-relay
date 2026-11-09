@@ -326,11 +326,17 @@ class MaterialBinder:
                 if binding.get("representation") != GEMINI_FILES_REPRESENTATION:
                     raise ProviderRequestError("GEMINI_CACHE_FILE_REF_FORBIDDEN", "File URI mode requires a native file binding")
                 selected.append(dict(binding))
+            from app.materials.cache_selector import select_materials_for_cache
+            limit=cache_budget_bytes if cache_budget_bytes is not None else self.fallback.settings.relay_inline_cache_budget_bytes
+            sizes={str(mid):int((by_id[str(mid)].get('metadata') or {}).get('size_bytes') or 0) for mid in candidates}
+            admitted=select_materials_for_cache({str(mid):{'content_type':(by_id[str(mid)].get('metadata') or {}).get('mime_type','')} for mid in candidates},
+                sizes,[str(mid) for mid in candidates],limit,explicit_cache_material_mode=explicit_cache_material_mode,material_bindings=by_id)
+            selected=[by_id[mid] for mid in admitted]
             return {"schema_version": "relay-gemini-cache-material-plan/4", "projection_version": "gemini-cache-file-uri/1",
-                "explicit_cache_material_mode": explicit_cache_material_mode, "cache_material_ids": [str(x) for x in candidates],
+                "explicit_cache_material_mode": explicit_cache_material_mode, "cache_material_ids": list(admitted),
                 "cache_material_bindings": selected, "inline_material_ids": [],
-                "files_api_cache_material_ids": [str(x) for x in candidates],
-                "inference_only_session_material_ids": [], "cache_candidate_exclusion_reason":
+                "files_api_cache_material_ids": list(admitted),
+                "inference_only_session_material_ids": [str(x) for x in candidates if str(x) not in admitted], "cache_candidate_exclusion_reason":
                     "request_material_content_boundary_not_equivalent" if session.get("context_policy") == "explicit" and material_ids else None}
         rows: list[dict[str, Any]] = []
         for material_id in material_ids:

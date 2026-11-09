@@ -24,7 +24,7 @@ class SessionManager:
     def __init__(self, services):
         self.services = services
 
-    async def create(self, body: SessionCreateRequest, idempotency_key: str):
+    async def create(self, body: SessionCreateRequest, idempotency_key: str, *, _excluded=None):
         services = self.services
         repo = services.repo
         settings = services.settings
@@ -58,7 +58,10 @@ class SessionManager:
             return existing
 
         try:
-            route, route_group, route_pin_state = services.route_resolver.resolve_on_session_create(body)
+            from app.execution_plane.admission import qualify_candidates
+            failures=await qualify_candidates(services,body)
+            failures.update(_excluded or {})
+            route, route_group, route_pin_state = services.route_resolver.resolve_on_session_create(body,qualification_failures=failures)
             services.route_resolver.handle_legacy_hint(
                 client_hint=body.connection_id,
                 resolved=route,
@@ -122,7 +125,10 @@ class SessionManager:
         affinity_token = session_affinity_token(settings, {
             "tenant_id": body.tenant_id, "id": str(session_id), "connection_id": route.connection_id,
         }, 1)
-        row = await repo.create_session(
+        from app.execution_plane.admission import reservation_scope
+        if route.quota.get('max_active_sessions') or route.quota.get('budget_limit_units'):
+            session_metadata['_relay_admission']={'scope':reservation_scope(services.route_resolver.config_snapshot,route.connection_id)}
+        row_data = (
             {
                 "id": str(session_id),
                 "tenant_id": body.tenant_id,
@@ -152,6 +158,16 @@ class SessionManager:
                 "expires_at": repo.default_session_expiry().isoformat(),
             }
         )
+        try:
+            row=await repo.create_session(row_data)
+        except Exception as exc:
+            from app.v2_repository import AdmissionUnavailable
+            if not isinstance(exc,AdmissionUnavailable): raise
+            excluded={**(_excluded or {}),route.offering_id:exc.reason}
+            return await self.create(body,idempotency_key,_excluded=excluded)
+        if str(row['id']) != str(session_id):
+            log_info(logger,'session_idempotent_reuse',session_id=row['id'],connection_id=row['connection_id'])
+            return row
         log_info(
             logger,
             "session_route_frozen",
@@ -160,6 +176,7 @@ class SessionManager:
             model=route.model,
             route_revision=route.route_revision,
             route_binding_hash=route.route_binding_hash,
+            qualification_failures=failures,
             connection_id=route.connection_id,
             adapter_version=route.inference_adapter_version,
             file_adapter_version=route.file_adapter_version,

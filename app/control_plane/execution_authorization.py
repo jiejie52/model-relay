@@ -5,18 +5,23 @@ from app.immutable import freeze_json
 def execution_authorization(value=None):
     raw = dict(value or {})
     allowed = {"allow_provider_fallback", "allow_paid_fallback", "paid_fallback_budget_ref",
-               "allowed_actual_models", "require_native_constraint_evidence", "on_unknown_billing", "expected_billing_tier"}
+               "allowed_actual_models", "require_native_constraint_evidence", "on_unknown_billing", "expected_billing_tier", "evidence_source_mode"}
     if set(raw) - allowed:
         raise ValueError("Unknown execution authorization field")
     result = {"allow_provider_fallback": False, "allow_paid_fallback": False,
         "paid_fallback_budget_ref": None, "allowed_actual_models": [],
-        "require_native_constraint_evidence": False, "on_unknown_billing": "audit", "expected_billing_tier": None, **raw}
+        "require_native_constraint_evidence": False, "on_unknown_billing": "audit", "expected_billing_tier": None,
+        "evidence_source_mode":"gateway_headers", **raw}
+    if result['evidence_source_mode'] not in ('gateway_headers','first_party_native_payload'):
+        raise ValueError('Invalid evidence source mode')
     for key in ("allow_provider_fallback", "allow_paid_fallback", "require_native_constraint_evidence"):
         if type(result[key]) is not bool: raise ValueError("Execution authorization flags must be boolean")
     if result["on_unknown_billing"] not in {"audit", "reject"}:
         raise ValueError("Invalid unknown billing policy")
-    if result["expected_billing_tier"] not in {None, "free", "paid"}:
+    if result["expected_billing_tier"] not in {None, "free", "paid", "official_direct"}:
         raise ValueError("Invalid frozen billing tier")
+    if result['expected_billing_tier']=='official_direct' and result['evidence_source_mode']!='first_party_native_payload':
+        raise ValueError('Official direct provenance requires first-party evidence')
     if not isinstance(result["allowed_actual_models"], (list, tuple)) or any(
             not isinstance(v, str) or not v.strip() for v in result["allowed_actual_models"]):
         raise ValueError("Allowed actual models must be explicit model names")

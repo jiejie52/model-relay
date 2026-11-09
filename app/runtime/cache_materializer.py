@@ -510,6 +510,8 @@ class CacheMaterializer:
                 "affinity_epoch": state.wire.get("affinity_epoch"),
                 "affinity_token_hash": stable_hash(state.wire.get("affinity_token")) if state.wire.get("affinity_token") else None,
             })
+        from app.control_plane.cache_contracts import explicit_cache_material_mode
+        state.cache_binding_obj=replace(state.cache_binding_obj,explicit_cache_material_mode=explicit_cache_material_mode(state.snapshot.get('cache_contract')))
         state.cache_binding = state.cache_binding_obj.canonical(include_provider_handle=True)
         if state.cache_binding_obj.mechanism == "stateful_resource" and not str(state.cache_binding_obj.provider_handle or "").strip():
             log_error(

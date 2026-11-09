@@ -30,6 +30,11 @@ class AtomicDispatchSealer:
         expected_identity = (state.session.get("metadata") or {}).get("_relay_route", {}).get("connection_identity_hash")
         if expected_identity and state.snapshot.get("connection_identity_hash") != expected_identity:
             raise ProviderRequestError("CONNECTION_IDENTITY_MISMATCH", "Dispatch inputs changed the frozen connection")
+        from app.runtime.contracts import frozen_connection_fields
+        spec,scope=frozen_connection_fields(state.snapshot,(state.session.get('metadata') or {}).get('_relay_route'))
+        if spec and (state.plan.connection_spec_hash!=spec or state.plan.account_scope_id!=scope):
+            raise ProviderRequestError('CONNECTION_IDENTITY_MISMATCH','Dispatch connection differs from FrozenExecutionPlan')
+        inputs.update(connection_spec_hash=spec,account_scope_id=scope)
         prepared_payload_hash = dispatch_input_digest(**inputs)
         if state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash

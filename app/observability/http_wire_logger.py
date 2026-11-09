@@ -23,6 +23,16 @@ _ROUTER_HEADERS = (
     "x-aihubmix-request-id", "x-aihubmix-router-sticky", "x-aihubmix-router-resolved-model",
     "x-aihubmix-router-fallback", "x-aihubmix-router-reason",
 )
+SENSITIVE_QUERY_KEYS={'key','api_key','apikey','access_token','sig','signature','token','upload_id','x-goog-signature','x-goog-credential','x-amz-signature','x-amz-credential'}
+
+def sanitize_wire_url(raw_url, *, drop_query=False):
+    from urllib.parse import urlsplit,urlunsplit,parse_qsl,urlencode
+    parts=urlsplit(str(raw_url))
+    host=parts.hostname or ''
+    if ':' in host:host='['+host+']'
+    if parts.port:host+=':'+str(parts.port)
+    query='' if drop_query else urlencode([(k,'[redacted]' if k.lower() in SENSITIVE_QUERY_KEYS else v) for k,v in parse_qsl(parts.query,keep_blank_values=True)])
+    return urlunsplit((parts.scheme,host,parts.path,query,''))
 
 
 @contextmanager
@@ -140,7 +150,7 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if dump_path and head is not None and tail is not None:
                 facts.update(body_head_hex=head.hex(), body_tail_hex=tail.hex())
             log_info(logger, "provider_http_wire", direction=direction, method=request.method,
-                     url=str(request.url.copy_with(query=None, username=None, password=None)),
+                     url=sanitize_wire_url(request.url,drop_query=True),
                      headers=_headers(headers, self.settings.relay_http_wire_log_redact_auth),
                      status=status, body_complete=complete, wire_dump_path=dump_path,
                      request_id=ctx.get("request_id"), session_id=ctx.get("session_id"),

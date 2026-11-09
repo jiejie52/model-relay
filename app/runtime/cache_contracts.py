@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from app.core.idempotency import stable_hash
-from app.control_plane.cache_contracts import CacheMode, CacheMechanism, CacheResolutionStatus
+from app.control_plane.cache_contracts import CacheMode, CacheMechanism, CacheResolutionStatus, ExplicitCacheMaterialMode, explicit_cache_material_mode
 
 @dataclass(frozen=True)
 class CacheExecutionBinding:
@@ -20,6 +20,10 @@ class CacheExecutionBinding:
     material_binding_hash: str | None = None
     projection_version: str = "relay-cache-projection/1"
     metadata: dict[str, Any] = field(default_factory=dict)
+    explicit_cache_material_mode: ExplicitCacheMaterialMode = 'inline_bytes_only'
+
+    def __post_init__(self):
+        explicit_cache_material_mode({'explicit_cache_material_mode':self.explicit_cache_material_mode})
 
     def canonical(self, *, include_provider_handle: bool = True) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -40,6 +44,8 @@ class CacheExecutionBinding:
         }
         if include_provider_handle:
             value["provider_handle"] = self.provider_handle
+        if self.explicit_cache_material_mode!='inline_bytes_only':
+            value['explicit_cache_material_mode']=self.explicit_cache_material_mode
         return value
 
     @property

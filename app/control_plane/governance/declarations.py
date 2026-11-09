@@ -164,9 +164,10 @@ def validate_supply(plane, supply, evidence):
     if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc): raise ValueError("Certification is expired")
     authorization = supply.metadata.get("execution_authorization", {})
     headers = profile.metadata.get("response_evidence_headers", {})
-    if authorization.get("require_native_constraint_evidence") and not headers.get("native_constraint_enforced"):
+    first_party=(authorization.get('evidence_source_mode')=='first_party_native_payload' and profile.metadata.get('evidence_source_mode')=='first_party_native_payload' and connection.protocol=='gemini_native')
+    if authorization.get("require_native_constraint_evidence") and not first_party and not headers.get("native_constraint_enforced"):
         raise ValueError("Native evidence policy has no certified evidence mapping")
-    if authorization.get("on_unknown_billing") == "reject" and authorization.get("expected_billing_tier") is not None and not headers.get("billing_tier"):
+    if authorization.get("on_unknown_billing") == "reject" and authorization.get("expected_billing_tier") is not None and not first_party and not headers.get("billing_tier"):
         raise ValueError("Billing evidence policy has no certified evidence mapping")
     if not required.issubset(evidence.get("capabilities", [])): raise ValueError("Supply capability certification is incomplete")
     return evidence["evidence_ref"]

@@ -79,6 +79,9 @@ def execution_guard(guard):
 def current_execution_guard():
     return _active_guard.get()
 
+def current_cache_operation():
+    return _active_operation.get()
+
 
 @contextmanager
 def cache_operation_guard(operation):

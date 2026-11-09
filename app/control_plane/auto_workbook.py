@@ -109,6 +109,8 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
                 record['signature']=hmac.new(secret.encode(),encode(record),'sha256').hexdigest()
                 try: await asyncio.wait_for(backend.storage_put(path,encode(record)),settings.configuration_io_timeout_seconds)
                 except Exception: result={'status':'pending','reason':'validation_evidence_storage_unavailable'}
+        if result.get('status')=='pending' and str(result.get('reason','')).startswith('upstream_http_'):
+            result={**result,'status':'unavailable'}
         return supply.offering_id,{**{k:v for k,v in result.items() if k not in ('signature','fingerprint','expires_at')},**location}
     async def bounded(supply):
         try: return await asyncio.wait_for(qualify(supply),settings.configuration_probe_timeout_seconds+settings.configuration_io_timeout_seconds)
@@ -117,7 +119,7 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
     results=dict(await asyncio.gather(*(bounded(s) for s in plane.offerings.values() if s.offering_id in targets)))
     report['supplies']=[{'offering_id':sid,**record} for sid,record in sorted(results.items())]
     report['ready_supplies']=sum(r['status']=='ready' for r in results.values())
-    report['pending_supplies']=sum(r['status']=='pending' for r in results.values())
+    report['pending_supplies']=sum(r['status'] in ('pending','unavailable') for r in results.values())
     contracts=dict(plane.capability_contracts); supplies=[]
     for supply in plane.offerings.values():
         if supply.offering_id in results:
@@ -127,13 +129,13 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
                 cache={**contract.cache,'verification_status':'verified','mechanism_profiles':{
                     k:{**v,'verification_status':'verified'} for k,v in contract.cache.get('mechanism_profiles',{}).items()}}
                 contracts[contract.contract_id]=replace(contract,cache=cache)
-            supply=replace(supply,enabled=supply.enabled and ready,metadata={**supply.metadata,
+            supply=replace(supply,metadata={**supply.metadata,
                 'deployment_validation_state':results[supply.offering_id]['status'],
                 'deployment_validation_reason':results[supply.offering_id].get('reason')})
         supplies.append(supply)
     active=ModelControlPlane(revision=plane.revision,connections=plane.connections.values(),capability_contracts=contracts.values(),
         protocol_profiles=plane.protocol_profiles.values(),cache_policies=plane.cache_policies.values(),offerings=supplies,release_metadata=dict(plane.release_metadata))
-    if any(r['status']=='pending' for r in results.values()): report['state']='partial'
+    if any(r['status'] in ('pending','unavailable') for r in results.values()): report['state']='partial'
     if not archive_ok: report['state']='pending'
     if archive_ok:
         raw=encode(serialize(active))
@@ -145,10 +147,10 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
                 if record['status']=='ready': record.update(status='pending',reason='snapshot_archive_unavailable')
             report['supplies']=[{'offering_id':sid,**record} for sid,record in sorted(results.items())]
             report['ready_supplies']=0
-            report['pending_supplies']=sum(r['status']=='pending' for r in results.values())
+            report['pending_supplies']=sum(r['status'] in ('pending','unavailable') for r in results.values())
             active=ModelControlPlane(revision=active.revision,connections=active.connections.values(),capability_contracts=active.capability_contracts.values(),
                 protocol_profiles=active.protocol_profiles.values(),cache_policies=active.cache_policies.values(),
-                offerings=[replace(s,enabled=False,metadata={**s.metadata,
+                offerings=[replace(s,metadata={**s.metadata,
                     'deployment_validation_state':results[s.offering_id]['status'],
                     'deployment_validation_reason':results[s.offering_id].get('reason')}) if s.offering_id in targets else s
                     for s in active.offerings.values()],release_metadata=dict(active.release_metadata))

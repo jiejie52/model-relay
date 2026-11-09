@@ -141,6 +141,7 @@ class GeminiGenAIClient:
             raise
         except Exception as exc:
             raise self._provider_error(exc, phase="gemini_files_upload") from exc
+        await ensure_execution_allowed(states=('not_sent',))
         return self.remember_file(file_obj)
 
     async def get_file(self, *, name: str, refresh: bool = False) -> Any:

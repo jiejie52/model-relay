@@ -416,6 +416,7 @@ class RequestAcceptor:
             "provider": provider,
             "connection_id": connection_id,
             "connection_identity_hash": frozen_route.get("connection_identity_hash"),
+            **({k:frozen_route[k] for k in ('connection_contract_version','connection_spec_hash','account_scope_id')} if frozen_route.get('connection_contract_version')==2 else {}),
             "upstream_model": frozen_route.get("upstream_model"),
             "model": model,
             "offering_id": frozen_route.get("offering_id") if frozen_route else None,

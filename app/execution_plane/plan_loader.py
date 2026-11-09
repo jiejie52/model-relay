@@ -16,7 +16,7 @@ class ExecutionPlanLoader:
         if not isinstance(snapshot, dict):
             raise ExecutionConflictError("Stored Request snapshot is not an object")
         frozen_route = (session.get("metadata") or {}).get("_relay_route") or {}
-        for field in ("connection_identity_hash", "upstream_model"):
+        for field in ("connection_identity_hash", "upstream_model",'connection_contract_version','connection_spec_hash','account_scope_id'):
             if frozen_route.get(field) and snapshot.get(field) != frozen_route[field]:
                 raise ExecutionConflictError("Stored Request differs from its frozen connection contract")
         if row.get("request_hash") and request_identity(snapshot) != row["request_hash"]:

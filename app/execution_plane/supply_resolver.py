@@ -15,12 +15,11 @@ def _account_identity(resolver, connection_id: str) -> str:
     if spec is None:
         return resolver._account_scope_hash(connection_id)
     return stable_hash([
-        spec.channel_id, spec.account_id, spec.metadata.get("region"),
-        resolver.config_snapshot.credential(connection_id, resolver.settings),
+        spec.channel_id, spec.account_id, spec.project_id, spec.region,
     ])
 
 
-def resolve_supply_group(resolver, request, initial, policy):
+def resolve_supply_group(resolver, request, initial, policy, *, qualification_failures=None):
     from app.execution_plane.route_resolver import RouteResolutionError
 
     if not initial.supply_group_id:
@@ -39,6 +38,7 @@ def resolve_supply_group(resolver, request, initial, policy):
                 provider=initial.provider, model=initial.model, purpose="session",
                 requirements=request.capability_requirements.model_dump(mode="json"),
                 offering_id=entry.offering_id,
+                qualification_failures=qualification_failures,
             )
         except RouteResolutionError:
             if entry.unavailable_action == "reject_new_session":

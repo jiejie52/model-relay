@@ -11,6 +11,12 @@ def validate_execution_observations(snapshot, observed):
     if policy["expected_billing_tier"] == "free" and billing == "paid": paid = True
     native = observed.get("native_constraint_enforced")
     guarantee = snapshot.get("structured_output_guarantee")
+    if policy['evidence_source_mode']=='first_party_native_payload' and observed.get('evidence_source_mode')!='first_party_native_payload':
+        raise ProviderRequestError('UPSTREAM_EVIDENCE_SOURCE_UNOBSERVED','First-party native evidence is missing')
+    if policy['expected_billing_tier']=='official_direct' and billing not in (None,'official_direct'):
+        raise ProviderRequestError('UPSTREAM_EVIDENCE_SOURCE_MISMATCH','Direct connection provenance did not match')
+    if policy['expected_billing_tier'] in ('free','paid') and billing not in ('free','paid') and policy['on_unknown_billing']=='reject':
+        raise ProviderRequestError('UPSTREAM_BILLING_UNOBSERVED','Connection provenance is not evidence of a free or paid billing tier')
     if fallback is True and not policy["allow_provider_fallback"]:
         raise ProviderRequestError("UPSTREAM_FALLBACK_NOT_AUTHORIZED", "The frozen supply did not authorize upstream fallback")
     if paid is True and not policy["allow_paid_fallback"]:

@@ -1,3 +1,15 @@
+# Model Relay 8.6.0
+
+以 8.5.0 为基线落实代码评审的五项缺口：统一 fileUri 缓存预算、原生直连证据、材料可达性、上传流围栏与 URL 脱敏、强类型连接指纹及跨合同编译校验。没有新增 SQL 或依赖。部署与兼容边界见 [UPGRADE_8.6.0.md](UPGRADE_8.6.0.md)，逐项对应见 [REVIEW_RESOLUTION_8.6.0.md](REVIEW_RESOLUTION_8.6.0.md)，验证明细见 ACCEPTANCE_8.6.0.json。
+
+以下保留历史说明，以本版升级文档为准。
+
+# Model Relay 8.5.0
+
+以 8.4.0 为基线补齐供应资格、优先级和 Session 冻结闭环。Pending 不再从策略目录消失，严格执行拒绝回退；材料、租户、区域参与候选资格，供应组及首次固定状态完整传递。可选会话配额与准入预算通过 SQL 012 原子预留。部署方式及限制见 [UPGRADE_8.5.0.md](UPGRADE_8.5.0.md)，改动见 [RELEASE_NOTES_8.5.0.md](RELEASE_NOTES_8.5.0.md)。
+
+以下保留 8.4.0 历史说明，以本版升级说明为准。
+
 # Model Relay 8.4.0
 
 以用户指定的 8.1.0 完整源码包为基线。使用方式：修改 config/model_management_v2.xlsx，在 API 和 Worker 配置凭据引用对应的密钥，然后重新部署。Excel 是唯一作者入口；两端自动解析、校验、执行必要的受控验证、编译并保存不可变运行配置，不要求手工生成 published.json、approval.json 或 active.json。

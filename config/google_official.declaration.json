@@ -135,7 +135,8 @@
         "affinity_policy": {
           "enabled": false
         },
-        "response_evidence_headers": {}
+        "response_evidence_headers": {},
+        "evidence_source_mode": "first_party_native_payload"
       }
     }
   ],
@@ -172,8 +173,10 @@
         "execution_authorization": {
           "allow_provider_fallback": false,
           "allow_paid_fallback": false,
-          "on_unknown_billing": "audit",
-          "require_native_constraint_evidence": false
+          "on_unknown_billing": "reject",
+          "expected_billing_tier": "official_direct",
+          "evidence_source_mode": "first_party_native_payload",
+          "require_native_constraint_evidence": true
         }
       }
     }

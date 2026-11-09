@@ -39,12 +39,15 @@ class GeminiFileAdapter:
         self.sdk = sdk or GeminiAIHubMixGenAIClient(settings, connection=connection)
 
     async def prepare(self, material: MaterialFile, *, generation: int) -> ProviderFileResult:
+        from app.runtime.execution_guard import ensure_execution_allowed
+        await ensure_execution_allowed(states=('not_sent',))
         file_obj = await self.sdk.upload_file(
             data=material.data,
             filename=material.filename,
             mime_type=material.content_type,
         )
         file_obj = await self._wait_until_active(file_obj)
+        await ensure_execution_allowed(states=('not_sent',))
 
         file_name = str(getattr(file_obj, "name", "") or "")
         file_uri = str(getattr(file_obj, "uri", "") or "")

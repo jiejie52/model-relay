@@ -68,10 +68,13 @@ class RouteBinding:
     quota: dict[str, Any] = field(default_factory=dict)
     execution_authorization: dict[str, Any] = field(default_factory=dict)
     connection_identity_hash: str | None = None
+    connection_spec_hash: str | None = None
+    account_scope_id: str | None = None
     upstream_model: str | None = None
 
     def internal_metadata(self) -> dict[str, Any]:
         return {
+            **({'connection_contract_version':2,'connection_spec_hash':self.connection_spec_hash,'account_scope_id':self.account_scope_id} if self.connection_spec_hash else {}),
             **({"connection_identity_hash": self.connection_identity_hash} if self.connection_identity_hash else {}),
             **({"upstream_model": self.upstream_model} if self.upstream_model else {}),
             "provider": self.provider,
@@ -286,6 +289,7 @@ class RouteResolver:
         purpose: str,
         requirements: dict[str, Any] | None = None,
         offering_id: str | None = None,
+        qualification_failures: dict[str, str] | None = None,
     ) -> RouteBinding:
         provider_raw = str(provider or "").strip().lower()
         provider_n = _PROVIDER_ALIASES.get(provider_raw, provider_raw)
@@ -356,6 +360,15 @@ class RouteResolver:
                     )
 
             for entry in candidates:
+                supply = self.config_snapshot.supplies.get(entry.offering_id, {}) if self.config_snapshot else {}
+                state = (supply.get('metadata') or {}).get('deployment_validation_state')
+                if state and state != 'ready':
+                    rejections.append((entry, 'supply_not_ready', (supply.get('metadata') or {}).get('deployment_validation_reason')))
+                    continue
+                failure = (qualification_failures or {}).get(entry.offering_id)
+                if failure:
+                    rejections.append((entry, 'admission_ineligible', failure))
+                    continue
                 if channel_allowlist and str(entry.channel_id or "").lower() not in channel_allowlist:
                     rejections.append((entry, "channel_not_allowed", None))
                     continue
@@ -479,6 +492,7 @@ class RouteResolver:
             connection_identity = stable_hash({"connection": connection_spec.identity_hash, "protocol_profile": protocol_profile or {}}) if connection_spec else None
             supply_metadata = (self.config_snapshot.supplies.get(selected.offering_id, {}).get("metadata") or {}) if self.config_snapshot else {}
             canonical = {
+                **({'connection_contract_version':2,'connection_spec_hash':connection_spec.identity_hash,'account_scope_id':scope_hash} if connection_spec else {}),
                 **({"upstream_model": supply_metadata["upstream_model"]} if supply_metadata.get("upstream_model") else {}),
                 **({"connection_identity_hash": connection_identity} if connection_identity else {}),
                 "provider": provider_n,
@@ -516,6 +530,8 @@ class RouteResolver:
                 model=model_n,
                 connection_id=selected.connection_id,
                 connection_identity_hash=connection_identity,
+                connection_spec_hash=connection_spec.identity_hash if connection_spec else None,
+                account_scope_id=scope_hash if connection_spec else None,
                 upstream_model=upstream_model,
                 route_revision=self.catalog.revision,
                 route_binding_hash=binding_hash,
@@ -625,18 +641,16 @@ class RouteResolver:
             )
             raise
 
-    def resolve_on_session_create(self, request: Any) -> tuple[RouteBinding, dict[str, Any] | None, str]:
+    def resolve_on_session_create(self, request: Any, *, qualification_failures=None) -> tuple[RouteBinding, dict[str, Any] | None, str]:
         from app.execution_plane.supply_resolver import context_settings, resolve_supply_group
 
         policy = context_settings(request.context_policy)
         initial = self.resolve(
             provider=request.provider, model=request.model, purpose="session",
             requirements=request.capability_requirements.model_dump(mode="json"),
+            qualification_failures=qualification_failures,
         )
-        if self.config_snapshot and self.config_snapshot.connections[initial.connection_id].credential_ref:
-            return initial, None, "pinned"
-        selected, _, _ = resolve_supply_group(self, request, initial, policy)
-        return selected, None, "pinned"
+        return resolve_supply_group(self, request, initial, policy, qualification_failures=qualification_failures)
 
     def materialize_on_first_request(self, session: dict[str, Any], request: Any) -> dict[str, Any]:
         from app.execution_plane.supply_resolver import materialize_supply_group
@@ -685,6 +699,8 @@ class RouteResolver:
                 internal_reason=detail or reason,
             )
         mapping = {
+            'supply_not_ready': ('ROUTE_SUPPLY_NOT_READY','Supply is not ready; check configuration diagnostics'),
+            'admission_ineligible': ('ROUTE_ADMISSION_DENIED','No supply satisfies admission requirements'),
             "connection_disabled": (
                 "ROUTE_CONNECTION_DISABLED",
                 "All otherwise eligible routes are disabled by the current connection policy",

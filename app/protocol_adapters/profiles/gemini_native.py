@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.protocol_adapters.native_evidence import native_response_facts
 from app.protocol_adapters.wire_projection.http_wire import decode_entity, observed_response_facts, read_raw_response
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
 from app.observability.http_wire_logger import normalization_active
@@ -185,13 +186,13 @@ class GeminiNativeAdapter:
             history_entry={"transport_history": transport_history},
             http_status=status,
             provider_request_id=self._request_id(response_headers),
-            observed=observed_response_facts(
+            observed=native_response_facts(data,payload,context,self.connection,observed_response_facts(
                 response_headers,
                 body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
                 protocol="gemini_native",
                 channel_id=str(context.snapshot.get("channel_id") or self.connection.spec.channel_id),
             evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
-            ) | {
+            )) | {
                 "cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details")),
                 "payload_stripped_bytes": stripped_bytes,
             },

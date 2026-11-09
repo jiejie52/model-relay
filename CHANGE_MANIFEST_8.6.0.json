@@ -1,0 +1,212 @@
+{
+  "version": "8.6.0",
+  "baseline": {
+    "filename": "model-relay-8.5.0-source.zip",
+    "sha256": "5d994fb6eeaa0083d4cf18e4851b0432596e4172537d4a9992eb5d87591bec16",
+    "files": 198
+  },
+  "modified_files": [
+    {
+      "path": "README.md",
+      "baseline_sha256": "72fce429f65707b4d2a5c7c764b4e45c8e2c5b425749f65fab3b395e5052f0e7",
+      "sha256": "c6d067844a858985a0b27410ac98d6d591341f823cb58ce13e887110153be952"
+    },
+    {
+      "path": "app/api.py",
+      "baseline_sha256": "828844380e5472cd364a2286455fa527ed5a3723ccda8c33ee7530b802a5352b",
+      "sha256": "b6c506878376f258b3eb051598373f0cc4fb0cfb04f6b2c619b56dd77cec6ed9"
+    },
+    {
+      "path": "app/control_plane/cache_contracts.py",
+      "baseline_sha256": "35ff2d50ed7cc1ecb2af82df9f1e2cdca161ed6928d8e0382cb237bc5ad388df",
+      "sha256": "ce372dc347ffc7b8605c2c7c550fafbde53cec5d38e7040c2f72c87236b911bd"
+    },
+    {
+      "path": "app/control_plane/definitions.py",
+      "baseline_sha256": "ea92f6638468c4a8787eb6e606561da227e0f98196f24f63289cf22bb3cba109",
+      "sha256": "eee6ec8ea013dc05e32d794f16b826d5f3bdc3ea081466252ae6fadb40518062"
+    },
+    {
+      "path": "app/control_plane/execution_authorization.py",
+      "baseline_sha256": "605a1b877c91d6bb280db830d5795ff28ded70da28ff2529d97960f554bb4e7c",
+      "sha256": "b8c02683253aaa6d550482df4c365d79bba97fe3ea73a203ca91d3ee214f7f60"
+    },
+    {
+      "path": "app/control_plane/governance/declarations.py",
+      "baseline_sha256": "e9c4df431dd3b4f77dec5d4acf7e0ec9569c153655a56c445569486f580d49d1",
+      "sha256": "36eefa03ac309c68333161ff7320fe1984fc64841f45fea8277e3d73ae773668"
+    },
+    {
+      "path": "app/control_plane/governance/snapshot_compiler.py",
+      "baseline_sha256": "b1f693312da3730a998119aeadb130e0c2ccb2447caf39e9eb4927c3a003e855",
+      "sha256": "48eb8757be09a1bc4a4172dfaa770aa97566a59c7b85449dd9c089196988416e"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "baseline_sha256": "2d83bb16a7adfa5bf00c0f482b6571fd94727950a701495aacb8b44868886906",
+      "sha256": "b9964c62313174f7babf2bad093ce86f6eef0a836d74b8cffe4491f264a4a58c"
+    },
+    {
+      "path": "app/execution_plane/acceptance_support.py",
+      "baseline_sha256": "65524839a96af11c6936c5daa4858cb2b8b3aac04961b9498f8c4ea568fd2704",
+      "sha256": "a16140bd2656f56c92101c7a3df8f6db442b237e0db1a52a7c8738b9f627716c"
+    },
+    {
+      "path": "app/execution_plane/admission.py",
+      "baseline_sha256": "a75b26475a853518fe4159931165b3a7bce6420703c28fd4184b66681270f09e",
+      "sha256": "345ab1f6ba6d32106bc9db83b1df509dafc05d6d435678102372b7b0656e406f"
+    },
+    {
+      "path": "app/execution_plane/contracts.py",
+      "baseline_sha256": "8863416b046dea3fa7cdc49d97618f442af941f7f6abad050893dca359110edb",
+      "sha256": "aa495431dfe15cc6a062f19f064b7912ba9a7a5cb66a22e42f12c4fc5530caee"
+    },
+    {
+      "path": "app/execution_plane/plan_loader.py",
+      "baseline_sha256": "945070a1b365bc2fcfc050bc80d789978709e27ced3e96029779202b3a5c1520",
+      "sha256": "733826b3aec8c65a6b4eb689208abfcd9bc5ebeec6a3f340e213d561b4ef40d9"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "baseline_sha256": "2d62d79b56022bad15134177cadeba561485a9320ff6f908bfa24b67f8b2a9d6",
+      "sha256": "bbdb1fbbc0f40b8cf88bc754ab0a19da8d902d3b360e07ba1ebe8df535af86cc"
+    },
+    {
+      "path": "app/execution_plane/result_contract.py",
+      "baseline_sha256": "915d572b3ae5563aa9d1a6bffc74ea74fbb222f6c1d8186f3c58375b984455e8",
+      "sha256": "868a5bee0ab7a27bd0442da2a37ceab62d621aae82d7dd7af70e819659dcc665"
+    },
+    {
+      "path": "app/execution_plane/route_resolver.py",
+      "baseline_sha256": "77a9e5b69b9072cfd23822d9a1233eae8410a80c8c39c667f8edf8ded58585c4",
+      "sha256": "88a29e7314d4e1d711abd8f48e0540e4d0ac76bb37f62cd95f2fff1be3fde538"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "baseline_sha256": "b8dc5d913e80665b79559740bda7ac529498b7161d2fc6c58ba7071cbd042e6f",
+      "sha256": "6fddf0822b32a6d8c415776fc28d25b523fa4175c6d75bb0d4c266956b6910ae"
+    },
+    {
+      "path": "app/materials/cache_selector.py",
+      "baseline_sha256": "74ad1e1e2cd0c1ba6f236a6e3dbdd04280c35d19a68d53eaeec7ecaaf816e61e",
+      "sha256": "feeff0dbaa9afafbc6b07f7348092bbec1d5bca1c4113ddcc03866a738ff1da2"
+    },
+    {
+      "path": "app/materials/provider_files/gemini_files.py",
+      "baseline_sha256": "f4ee7f0a19c4f74652addcec53f49b84284f86b53c51162ee86444f4d1f6a900",
+      "sha256": "f2c2ae0592b513a327ade64b052aed4dfe9be4de0fd1695b1beaf51bfebfd768"
+    },
+    {
+      "path": "app/observability/http_wire_logger.py",
+      "baseline_sha256": "b1e28d5d23cad290e36a3764ea845824cee40b956dd8d92766d428f9c3714850",
+      "sha256": "bc670b15aedfc02e64f63ae18764f160851f9a2b66de8fb654ba9ce8844e86f6"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_genai_sdk.py",
+      "baseline_sha256": "a42403510eb503f84564d70dd5e9c39232b8fe939b25745180ec0875c9daf2be",
+      "sha256": "cb77d078eeb8d60778f56d4c68e329d4227c195b0c5e19d4ce9084c936a16a56"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_native.py",
+      "baseline_sha256": "ed4f1d2fcda28b3360448de212ec93f8fa6fed0c52f4e9c3ddb10ffb7dcd4602",
+      "sha256": "4b93b09591348b5577a93066032c697b3310946cf563d2273d5f57d2a8fbfdc5"
+    },
+    {
+      "path": "app/runtime/cache_contracts.py",
+      "baseline_sha256": "b7da47c1db017eb3365fd1c951b2694773c3e31a184be469a2cd092166ace128",
+      "sha256": "09ce4d8c1c5f1741df4ca5ac3850deced6b87cff24a30c4d0380a80f01b777b7"
+    },
+    {
+      "path": "app/runtime/cache_materializer.py",
+      "baseline_sha256": "34ecc4857ac692bd3540043211dafafd92b5059850879288211bf0ce80f45e05",
+      "sha256": "354f4645ee960fb70ae076857d5e7d5a546c4be72e85b2d4d47c91f945222918"
+    },
+    {
+      "path": "app/runtime/condition_verifier.py",
+      "baseline_sha256": "c5b6aa33fc6e564ccfa10d1d22be44b672da2638451728b2bbc92d1c9e4a6eb7",
+      "sha256": "85f0bc075c76d48bdf1521ab2c9d86a24a05376999321323d249bcde446cec46"
+    },
+    {
+      "path": "app/runtime/connection_scope.py",
+      "baseline_sha256": "ba0fc7cc8beb4b5497fd67ac09c43a1e9f2fcf624334b92bf7ffd5614db1afbd",
+      "sha256": "6b3abbd5920f63532cb9faa4659b10a5d2cf60b36ab90f5bcff7e451db2e1d62"
+    },
+    {
+      "path": "app/runtime/contracts.py",
+      "baseline_sha256": "c9c9e09732f928faa91f03bc2fb6bba7d8b890b0630fc5c445b5ff9aafb0d2e8",
+      "sha256": "1660641a4cc12447a573a44216e00f1e8c26ad15b856e4c0c74baabdc71a5800"
+    },
+    {
+      "path": "app/runtime/dispatch_sealer.py",
+      "baseline_sha256": "c6ec2fe5fc90d920c4e24ddcd060b0a9209bf5de84f74decab6e1d7d3c38e8c3",
+      "sha256": "78382e550214d0510c0d8d1357baee581a6e4c20adf541df6690bb99607cbd9d"
+    },
+    {
+      "path": "app/runtime/execution_guard.py",
+      "baseline_sha256": "cbf7c5000383b2ca00c9386af99b96af42780d4c05f9ebb98fd7a1e3242df9bd",
+      "sha256": "a99cedd027045322db1327fa0cf10808231e90ffd1026e151c9fafa793e5400d"
+    },
+    {
+      "path": "app/runtime/material_binder.py",
+      "baseline_sha256": "302aa65c25810fa810bfdf84f787117d7dcdf6d55247c9d03daae4434ef1e26b",
+      "sha256": "c79c0c5b9389a6bef195ac448d866574eaa95a9c9d68506de6ca846afe34c420"
+    },
+    {
+      "path": "app/runtime/transport_guard.py",
+      "baseline_sha256": "ef96fe9376fbde38c0296235dbb742edd30e97c3c055ae0144e4612d22b88cb9",
+      "sha256": "96ec8c2382853ac7b636f879a30b654d2cf4d54bc0002db00bb60830ae419b16"
+    },
+    {
+      "path": "config/README.md",
+      "baseline_sha256": "a30e95f6d96d63206d76003dd4b6ccec6fe7878f725d207a00366fb44d98b74a",
+      "sha256": "99a5939cc6e5a20095ad6fc87de76d19f86cb67c63717f662283acc104f3c3ea"
+    },
+    {
+      "path": "config/google_official.declaration.json",
+      "baseline_sha256": "fdadd4a3f3429afc0cf2ace17584d46ac6ab8857d7cf3463f89ff21356f33f33",
+      "sha256": "0598e603743728083d7723ff19ac353a6e0bd27f7624c081e69a5e7d783583b9"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "baseline_sha256": "b6b1ee56b2f25f3d10d2e5b21e5f8f5e16df85b855a7cb908c1b70324c86d071",
+      "sha256": "f143d2fd159b5c61e85dab76362af184abffc077a2a85c775767dcdc0e1f1f22"
+    }
+  ],
+  "added_files": [
+    {
+      "path": "ACCEPTANCE_8.6.0.json",
+      "sha256": "b66d8e8c4804bb05b052ff323b3c1adbe0f73b1f77e23f36543c3d9875af4c3b"
+    },
+    {
+      "path": "REVIEW_RESOLUTION_8.6.0.md",
+      "sha256": "796f1049afeecd076803c972b0413c31d1507874958774751ef89ebfba83dc7c"
+    },
+    {
+      "path": "UPGRADE_8.6.0.md",
+      "sha256": "b3e5453212814b76b723379fb2ea4a44b960ea79209680c394e458f5d98a5fba"
+    },
+    {
+      "path": "app/execution_plane/material_reachability.py",
+      "sha256": "1732bd79287cca7d5e1dd1f0aa7fe685e39a424cdf36f337d1dcbe62868afa7d"
+    },
+    {
+      "path": "app/protocol_adapters/native_evidence.py",
+      "sha256": "2f251044269fb49b5f96e3013f00203f57ef879f74035b3fe7f8ac625bc4fee9"
+    },
+    {
+      "path": "app/shared_connection_contract.py",
+      "sha256": "d3711de2bff85bdb28b2cf8e941f46bd19a8eb5be540f92c80d3c04c1340011d"
+    },
+    {
+      "path": "CHANGE_MANIFEST_8.6.0.json",
+      "sha256": null
+    }
+  ],
+  "deleted_files": [],
+  "unchanged_files": 165,
+  "final_file_count": 205,
+  "SQL_unchanged": true,
+  "dependencies_unchanged": true,
+  "controlled_checks_passed": 128,
+  "production_certification": false
+}

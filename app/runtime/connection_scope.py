@@ -20,6 +20,9 @@ class ScopedAdapter:
         async def invoke(*args, **kwargs):
             if name == "execute" and args:
                 bundle = args[0]
+                bundle.verify_integrity()
+                if bundle.connection_spec_hash and (bundle.connection_spec_hash!=self.connection.spec.identity_hash or bundle.account_scope_id!=self.connection.account_scope_hash):
+                    raise ValueError('CONNECTION_SPEC_OR_SCOPE_MISMATCH')
                 expected = bundle.snapshot.get("connection_identity_hash")
                 if expected and expected != self.connection.identity_hash:
                     raise ValueError("CONNECTION_IDENTITY_MISMATCH")

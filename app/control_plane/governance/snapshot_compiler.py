@@ -172,6 +172,8 @@ def build_candidate(
         contract = base.contract(original.capability_contract_id)
         if not connection or not profile or not contract or profile.protocol != connection.protocol:
             raise DeclarationError(f"model {model} channel {channel}: registered protocol contract unavailable")
+        from app.control_plane.cache_contracts import validate_supply_cache_transport
+        validate_supply_cache_transport(connection,contract,requires_file_adapter=original.requires_file_adapter)
         physical_key = model, deployment, original.connection_id
         previous_channel = seen_physical_supplies.get(physical_key)
         if previous_channel is not None and previous_channel != channel:

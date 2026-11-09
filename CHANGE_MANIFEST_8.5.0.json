@@ -1,0 +1,96 @@
+{
+  "version": "8.5.0",
+  "baseline": {
+    "filename": "model-relay-8.4.0-source.zip",
+    "sha256": "5e11bbb585ab7f7d30b6b102c91d7b9a11b9672fb701d3c09e441f56db27d3fa",
+    "files": 192
+  },
+  "modified": [
+    {
+      "path": "README.md",
+      "before": "1277965b7c3f966fbf773836eded9bf85a11fc69badbb8e40c19a0f448da0ac5",
+      "after": "72fce429f65707b4d2a5c7c764b4e45c8e2c5b425749f65fab3b395e5052f0e7"
+    },
+    {
+      "path": "app/api.py",
+      "before": "1690c2a16a57980489cdeb037d93303cb86062fa07eef94ac27892447b56a7a5",
+      "after": "828844380e5472cd364a2286455fa527ed5a3723ccda8c33ee7530b802a5352b"
+    },
+    {
+      "path": "app/control_plane/auto_workbook.py",
+      "before": "f1250696a24b6a4552b11a7fe8a83c593530aff66f4a7104f23a0fa2bbfd2949",
+      "after": "009fd4991a0fa17e591dbdc2083950557c603261564e99f53ccff3a12e624733"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "before": "9ce94cd2368b21a37db47a1c0b5979a8cd858fa032c06579955ae15796634467",
+      "after": "2d83bb16a7adfa5bf00c0f482b6571fd94727950a701495aacb8b44868886906"
+    },
+    {
+      "path": "app/execution_plane/route_resolver.py",
+      "before": "a6c6ecba6085c2ec7d01a656d8d9925ff5d83051ac273deeb8d1695653485fb0",
+      "after": "77a9e5b69b9072cfd23822d9a1233eae8410a80c8c39c667f8edf8ded58585c4"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "before": "9a4e954e43212fb4ce03f5e276d6a1fa609b8734a8be460bbf321647eb571aab",
+      "after": "b8dc5d913e80665b79559740bda7ac529498b7161d2fc6c58ba7071cbd042e6f"
+    },
+    {
+      "path": "app/execution_plane/session_manager.py",
+      "before": "56b94ace719f442e2663b5123e5b07ea8615aab240207adda149176b82c327b1",
+      "after": "92b8bac0f8b922894c576bd019737a35786da4c08de17fa7aca859b363cb411e"
+    },
+    {
+      "path": "app/execution_plane/supply_resolver.py",
+      "before": "ec467fab3d24f74af5c89faff875669b7c9308247641d741cc6ccd8709bd85e5",
+      "after": "14ee33be31d5dc8e97458f406f598357fad86b7388d74e9b022f2ad51a7016fd"
+    },
+    {
+      "path": "app/v2_repository.py",
+      "before": "7c520725d58fae6d05e5e5d4ae936c0d43b1bace1be46aa8c17c03db83be8e4b",
+      "after": "1899be5394c7cbbf2f5c9524348ce9990a79636a3ae0b5d6032deff7fdcec390"
+    },
+    {
+      "path": "config/README.md",
+      "before": "9533078dd6a8bc3c699b526036495454076825cdbaae947a25e8bab1fc10b303",
+      "after": "a30e95f6d96d63206d76003dd4b6ccec6fe7878f725d207a00366fb44d98b74a"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "before": "2600891015481ea118cd336b7bc4edc3022032ba747044335b8fd32f6420d297",
+      "after": "b6b1ee56b2f25f3d10d2e5b21e5f8f5e16df85b855a7cb908c1b70324c86d071"
+    }
+  ],
+  "added": [
+    {
+      "path": "ACCEPTANCE_8.5.0.json",
+      "sha256": "cb225f692c3a35928cf6d01614f5f079a3954bb3af74339ec33b7c433115f93d"
+    },
+    {
+      "path": "RELEASE_NOTES_8.5.0.md",
+      "sha256": "1499d41f280010634d698822cccc6406e34a51838552728e7868b47e69ef59e4"
+    },
+    {
+      "path": "UPGRADE_8.5.0.md",
+      "sha256": "2d20f7e810aba97669555d3f772af95963e291719a1ecc91b5b63961088500b4"
+    },
+    {
+      "path": "app/execution_plane/admission.py",
+      "sha256": "a75b26475a853518fe4159931165b3a7bce6420703c28fd4184b66681270f09e"
+    },
+    {
+      "path": "sql/012_session_admission.sql",
+      "sha256": "b286b24caf9e6669ba86882890406a4e35deb0c2549a587dfb50036f75a8a059"
+    },
+    {
+      "path": "CHANGE_MANIFEST_8.5.0.json",
+      "sha256": null
+    }
+  ],
+  "deleted": [],
+  "preserved_unchanged": 181,
+  "final_files": 198,
+  "runtime_and_original_sql_unchanged": true,
+  "requirements_unchanged": true
+}

@@ -162,9 +162,9 @@ async def _validate_materials_for_route(
                 connection_id=route.connection_id,
                 account_scope_hash=file_adapter.account_scope_hash,
             )
-            if desired_binding and str(desired_binding.get("state") or desired_binding.get("processing_state") or "").lower() in {
-                "active", "ready", "processed"
-            }:
+            from app.execution_plane.material_reachability import binding_reachable
+            if binding_reachable(desired_binding,connection_id=route.connection_id,account_scope_hash=file_adapter.account_scope_hash,
+                    transports=contract.get('metadata',{}).get('material_transport',{}).get('supported_material_transports',[])):
                 continue
 
         fallback = await repo.get_material_fallback(material_id)
@@ -198,7 +198,7 @@ async def _validate_materials_for_route(
         raise ExecutionRequestError(
             status_code=409,
             detail={
-                "code": "ROUTE_BINDING_MISMATCH",
+                "code": "MATERIAL_UNREACHABLE_FOR_SCOPE",
                 "message": "Material is not bound to the Session route and has no fallback bytes for rebinding",
                 "material_id": material_id,
                 "recovery": "MATERIAL_REUPLOAD_REQUIRED",

@@ -3,12 +3,18 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from app.immutable import freeze_json, thaw_json
 
+from app.shared_connection_contract import frozen_connection_fields
+
 
 def dispatch_input_digest(*, snapshot, session, history, material_ids, material_bindings,
                           tenant_id, conversation_hash, request_id, session_id, context_plan,
-                          cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers):
+                          cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers,
+                          connection_spec_hash=None,account_scope_id=None):
     from app.core.idempotency import stable_hash
-    return stable_hash({"schema_version": "relay-prepared-execution/2",
+    spec,scope=frozen_connection_fields(snapshot,(session.get('metadata') or {}).get('_relay_route'))
+    if connection_spec_hash is not None and connection_spec_hash!=spec or account_scope_id is not None and account_scope_id!=scope:
+        raise ValueError('Dispatch identity differs from frozen snapshot')
+    return stable_hash({**({'connection_spec_hash':spec,'account_scope_id':scope} if spec else {}),"schema_version": "relay-prepared-execution/2",
         "snapshot": {k: v for k, v in snapshot.items() if k != "_relay_cache_execution"},
         "session": session, "history": history, "material_ids": material_ids,
         "material_bindings": material_bindings, "tenant_id": tenant_id,
@@ -35,8 +41,16 @@ class SealedDispatchBundle:
     seal_id: str = ""
     seal_hash: str = ""
     affinity_headers: dict[str, str] = field(default_factory=dict)
+    connection_spec_hash: str = field(default='',kw_only=True)
+    account_scope_id: str = field(default='',kw_only=True)
 
     def __post_init__(self):
+        spec,scope=frozen_connection_fields(self.snapshot,(self.session.get('metadata') or {}).get('_relay_route'))
+        if not isinstance(self.connection_spec_hash,str) or not isinstance(self.account_scope_id,str):raise TypeError('Connection identity fields must be strings')
+        if self.connection_spec_hash and self.connection_spec_hash!=spec or self.account_scope_id and self.account_scope_id!=scope:
+            raise ValueError('Sealed bundle connection identity mismatch')
+        object.__setattr__(self,'connection_spec_hash',spec)
+        object.__setattr__(self,'account_scope_id',scope)
         for name in ("snapshot", "session", "history", "material_ids", "material_bindings", "context_plan", "cache_execution_binding", "execution_fence", "provider_physical_plan", "affinity_headers"):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
 
@@ -65,7 +79,7 @@ class SealedDispatchBundle:
         actual = dispatch_input_digest(**{name: getattr(self, name) for name in (
             "snapshot", "session", "history", "material_ids", "material_bindings", "tenant_id",
             "conversation_hash", "request_id", "session_id", "context_plan", "cache_execution_binding",
-            "execution_fence", "provider_physical_plan", "affinity_headers")})
+            "execution_fence", "provider_physical_plan", "affinity_headers","connection_spec_hash","account_scope_id")})
         if actual != self.seal_hash:
             raise ExecutionConflictError("Sealed adapter inputs do not match the atomic dispatch digest")
         return True

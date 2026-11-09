@@ -1,3 +1,15 @@
+# 8.6.0 Excel 配置入口
+
+协议配置 J–L 增加可选证据来源、预期计费层级及原生约束证据要求。官方 Profile 使用 first_party_native_payload / official_direct / 是；聚合 Profile 使用独立网关证据配置。其余供应与缓存启停意图不变。详见 ../UPGRADE_8.6.0.md。
+
+以下为保留的历史说明。
+
+# 8.5.0 Excel 配置入口
+
+供应配置 G–L 新增可选供应组、租户、区域与会话准入预留字段。空值沿用原配置；启用配额或预算前执行 SQL 012。Pending 保留顺位及拒绝回退权威但不可执行。详细语义及验证限制以 ../UPGRADE_8.5.0.md 为准。
+
+以下为保留的 8.4.0 说明。
+
 # 8.4.0 Excel 唯一配置入口
 
 修改 model_management_v2.xlsx 后重新部署 API 与 Worker 即可。环境映射决定由 Excel 接管的提供方范围；其余提供方暂保留 8.1.0 兼容种子。连接、协议、能力和供应全部由新增配置页引用，不依赖外部 supply-registry JSON 或 Python 内置供应登记。

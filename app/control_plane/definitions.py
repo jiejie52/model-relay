@@ -703,6 +703,14 @@ class ModelControlPlane:
                     f"Offering {offering.offering_id!r} references unknown cache policy {offering.cache_policy_id!r}"
                 )
             policy = offering.observed_model_policy.lower()
+            from app.control_plane.cache_contracts import validate_supply_cache_transport
+            validate_supply_cache_transport(self.connections[offering.connection_id],self.capability_contracts[offering.capability_contract_id],requires_file_adapter=offering.requires_file_adapter)
+            auth=offering.metadata.get('execution_authorization',{})
+            if auth.get('evidence_source_mode')=='first_party_native_payload':
+                profile=self.protocol_profiles.get(offering.protocol_profile_id)
+                if (not profile or profile.protocol!='gemini_native' or profile.metadata.get('evidence_source_mode')!='first_party_native_payload'
+                        or not profile.metadata.get('allowed_hosts') or profile.metadata.get('affinity_policy',{}).get('enabled')):
+                    raise ValueError('First-party evidence requires a native direct profile with authorized hosts and no gateway affinity')
             if policy not in {"ignore", "audit", "strict"}:
                 raise ValueError(
                     f"Offering {offering.offering_id!r} observed_model_policy must be ignore, audit or strict"

@@ -10,7 +10,9 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/8.4.0'
+COMPILER_VERSION = 'relay-excel/8.6.0'
+SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
+PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据')
 SCHEMAS = {
  '环境映射': ('环境','部署ID','管理提供方'),
  '连接配置': ('连接ID','渠道名称','渠道ID','协议族','账号ID','项目ID','区域','REST端点','上传端点','SDK端点','API版本','鉴权方式','凭据引用'),
@@ -27,6 +29,16 @@ def extension_rows(wb):
         ws = wb[name]
         if tuple(ws.cell(5,i).value for i in range(1,len(fields)+1)) != fields:
             raise DeclarationError(name+'!第5行: 表头与配置格式不符')
+        if name == '供应配置':
+            extras = tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(SUPPLY_OPTIONAL)+1))
+            while extras and extras[-1] is None: extras=extras[:-1]
+            if extras != SUPPLY_OPTIONAL[:len(extras)]: raise DeclarationError('供应配置: 可选表头顺序错误')
+            fields=fields+extras
+        if name == '协议配置':
+            extras=tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(PROFILE_OPTIONAL)+1))
+            while extras and extras[-1] is None:extras=extras[:-1]
+            if extras!=PROFILE_OPTIONAL[:len(extras)]:raise DeclarationError('协议配置: 可选证据表头顺序错误')
+            fields=fields+extras
         ws.reset_dimensions()
         rows=[]
         for row, values in enumerate(ws.iter_rows(min_row=6,max_col=len(fields),values_only=True),6):
@@ -107,8 +119,14 @@ def compile_workbook(content, settings):
         for key,field in [('actual_model','实际模型响应头'),('native_constraint_enforced','原生约束响应头'),('billing_tier','计费层级响应头')]:
             header=value(row,field,True)
             if header: evidence[key]=header
+        source=value(row,'证据来源',True) or 'gateway_headers'
+        if source not in ('gateway_headers','first_party_native_payload'):fail(row,'证据来源','未知模式')
+        required=value(row,'要求原生约束证据',True) or '否'
+        if required not in ('是','否'):fail(row,'要求原生约束证据','只能填写是或否')
+        if source=='first_party_native_payload' and (value(row,'协议族')!='gemini_native' or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
         profiles[pid]=ModelControlPlane._profile_from_mapping({'profile_id':pid,'revision':COMPILER_VERSION,'protocol':value(row,'协议族'),
-            'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence}})
+            'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
+                'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
     bindings={}
     for row in ext['供应配置']:
@@ -197,16 +215,34 @@ def compile_workbook(content, settings):
             'mechanism_preference':mechanisms,'auto_prepare_failure':'uncached_same_context' if cache['自动准备失败时']=='原文无缓存继续' else 'fail',
             'metadata':{'default_mode':{'关闭':'off','自动':'auto','强制':'on'}[cache['默认策略']] if mechanisms else 'off','allow_force':cache['可选强制']=='是'}})
         sid='excel:'+stable_hash([model,env,channel])[:24]
+        quota={}
+        for field,key in [('最大活跃会话','max_active_sessions'),('预留预算上限','budget_limit_units'),('每会话预留预算','reserve_units')]:
+            n=number(binding,field,optional=True,minimum=1)
+            if n is not None: quota[key]=n
+        if bool(quota.get('budget_limit_units')) != bool(quota.get('reserve_units')): fail(binding,'预算','上限和每会话预留必须同时填写')
+        quota.update({key:parts(binding.get(field)) for field,key in [('允许租户','allowed_tenants'),('允许区域','allowed_regions')] if binding.get(field)})
         supplies[sid]=ModelControlPlane._offering_from_mapping({'offering_id':sid,'provider':provider,'model_pattern':model,
+            'supply_group_id':value(binding,'供应组ID',True),'quota':quota,
             'connection_id':connection.connection_id,'capability_contract_id':cap_id,'protocol_profile_id':profile_id,'cache_policy_id':policy_id,
             'deployment_id':deployment,'priority':10000-row['顺位'],'enabled':enabled,
             'requires_file_adapter':'provider_files_api' in contract.metadata['material_transport']['supported_material_transports'],
             'observed_model_policy':'strict','metadata':{'managed_v2':True,'upstream_model':row['渠道侧模型名'],
                 'unavailable_action':'reject_new_session' if row['不可用时']=='拒绝新会话' else 'try_next',
-                'execution_authorization':{'allow_provider_fallback':False,'allow_paid_fallback':False,'on_unknown_billing':'audit','require_native_constraint_evidence':False}}},deployment)
+                'execution_authorization':{'allow_provider_fallback':False,'allow_paid_fallback':False,
+                    'evidence_source_mode':profile.metadata.get('evidence_source_mode','gateway_headers'),
+                    'expected_billing_tier':profile.metadata.get('expected_billing_tier'),
+                    'on_unknown_billing':'reject' if profile.metadata.get('expected_billing_tier') else 'audit',
+                    'require_native_constraint_evidence':profile.metadata.get('require_native_constraint_evidence',False)}}},deployment)
         targets[sid]={'sheet':'渠道优先级','row':row['_row'],'model':model,'channel':channel,
             'connection_id':connection.connection_id,'channel_id':connection.channel_id,'protocol':connection.protocol,
             'endpoint':connection.rest_base_url or connection.base_url}
+    group_scopes={}
+    for s in supplies.values():
+        if not s.supply_group_id: continue
+        c=connections[s.connection_id]
+        scope=(s.provider,s.model_pattern,s.deployment_id,c.channel_id,c.account_id,c.project_id,c.region,stable_hash(dict(s.quota)))
+        old=group_scopes.setdefault(s.supply_group_id,scope)
+        if old!=scope: raise DeclarationError('供应组不能跨模型、部署、渠道、账号、项目、区域或准入预算作用域')
     metadata={'source':'excel-auto','compiler_version':COMPILER_VERSION,'workbook_sha256':sha256(content).hexdigest(),
         'configuration_hash':stable_hash([sha256(content).hexdigest(),COMPILER_VERSION,settings.deployment_id]),'managed_model_groups':list(groups.values())}
     plane=ModelControlPlane(revision='excel-'+metadata['configuration_hash'][:20],connections=connections.values(),capability_contracts=contracts.values(),

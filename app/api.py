@@ -43,7 +43,7 @@ from app.observability import configure_logging, elapsed_ms, error as log_error,
 
 
 
-API_VERSION = "8.4.0"
+API_VERSION = "8.6.0"
 
 
 settings = get_settings()

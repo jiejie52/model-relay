@@ -9,7 +9,36 @@ import json
 from app.repository import RelayRepository
 
 
+class AdmissionUnavailable(RuntimeError):
+    def __init__(self,reason): self.reason=reason;super().__init__(reason)
+
 class RelayV2Repository(RelayRepository):
+    async def create_session(self,row):
+        from app.supabase import SupabaseError
+        quota=(row.get('metadata',{}).get('_relay_route') or {}).get('quota') or {}
+        try:
+            if quota.get('max_active_sessions') or quota.get('budget_limit_units'):
+                result=await self.backend.rpc('create_relay_session_admitted',{'p_row':row})
+                return result[0] if isinstance(result,list) else result
+            return await super().create_session(row)
+        except SupabaseError as exc:
+            message=exc.body
+            if 'IDEMPOTENCY_CONFLICT' in message:
+                from app.execution_plane.services import ExecutionRequestError
+                raise ExecutionRequestError(409,{'code':'IDEMPOTENCY_CONFLICT'}) from exc
+            if ('create_relay_session_admitted' in message and ('PGRST202' in message or '42883' in message)):
+                from app.execution_plane.services import ExecutionRequestError
+                raise ExecutionRequestError(503,{'code':'ADMISSION_SCHEMA_NOT_INSTALLED','migration':'012_session_admission.sql'}) from exc
+            if 'SESSION_QUOTA_EXHAUSTED' in message or 'SESSION_BUDGET_EXHAUSTED' in message:
+                raise AdmissionUnavailable('session_capacity_exhausted') from exc
+            if exc.status_code==409:
+                existing=await self.find_session_by_idempotency(row['tenant_id'],row['idempotency_key'])
+                if existing and existing.get('session_hash')==row['session_hash']: return existing
+                if existing:
+                    from app.execution_plane.services import ExecutionRequestError
+                    raise ExecutionRequestError(409,{'code':'IDEMPOTENCY_CONFLICT'}) from exc
+            raise
+
     async def find_session_by_idempotency(
         self, tenant_id: str, idempotency_key: str
     ) -> dict[str, Any] | None:
