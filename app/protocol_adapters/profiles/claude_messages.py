@@ -66,7 +66,7 @@ class ClaudeMessagesV2Adapter:
                 "Claude Messages requires the frozen capability contract to provide max_output_tokens",
             )
         payload: dict[str, Any] = {
-            "model": str(context.snapshot["model"]),
+            "model": str(context.snapshot.get("upstream_model") or context.snapshot["model"]),
             "max_tokens": int(options["max_output_tokens"]),
             "messages": messages,
         }

@@ -14,6 +14,7 @@ class RelayRuntimeEngine:
     """Physical execution only; schedules and Session commits belong to the execution plane."""
     def __init__(self, repo, storage, providers, materials, bindings, settings, cache_orchestrator=None):
         self.repo, self.storage, self.settings = repo, storage, settings
+        self.providers = providers
         self.artifacts = ExecutionArtifacts(repo, storage, settings)
         self.errors = RawErrorRecorder(repo, storage, settings)
         self.verifier = ConditionVerifier(repo, providers)
@@ -25,6 +26,15 @@ class RelayRuntimeEngine:
         self.invoker = ControlledInvoker(repo, providers, self.artifacts, self.cache, settings)
 
     async def execute(self, plan):
+        from app.runtime.connection_scope import connection_scope
+        identity = plan.snapshot.get("connection_identity_hash")
+        route = (plan.session_record.get("metadata") or {}).get("_relay_route") or {}
+        if not identity and route.get("account_scope_hash") and hasattr(self.providers, "frozen_identity"):
+            identity = self.providers.frozen_identity(plan.snapshot["connection_id"], route)
+        with connection_scope(identity):
+            return await self._execute_with_connection(plan)
+
+    async def _execute_with_connection(self, plan):
         if plan.execution_fence is not None and current_execution_guard() is None:
             # Direct physical-runtime callers still need the live boundary checks;
             # scheduling and heartbeat ownership stay in the execution plane.

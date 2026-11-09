@@ -5,7 +5,7 @@ from app.protocol_adapters.base import ProviderRequestError
 
 def validate_execution_observations(snapshot, observed):
     policy = execution_authorization(snapshot.get("execution_authorization"))
-    fallback = observed.get("aihubmix_fallback")
+    fallback = observed.get("provider_fallback", observed.get("aihubmix_fallback"))
     paid = observed.get("paid_fallback")
     billing = observed.get("billing_tier")
     if policy["expected_billing_tier"] == "free" and billing == "paid": paid = True

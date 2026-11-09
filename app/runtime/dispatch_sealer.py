@@ -27,6 +27,9 @@ class AtomicDispatchSealer:
             affinity_headers={key: state.wire["affinity_token"] for key in (
                 state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
                 if key and state.wire.get("affinity_token")})
+        expected_identity = (state.session.get("metadata") or {}).get("_relay_route", {}).get("connection_identity_hash")
+        if expected_identity and state.snapshot.get("connection_identity_hash") != expected_identity:
+            raise ProviderRequestError("CONNECTION_IDENTITY_MISMATCH", "Dispatch inputs changed the frozen connection")
         prepared_payload_hash = dispatch_input_digest(**inputs)
         if state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash

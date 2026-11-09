@@ -1,0 +1,51 @@
+{
+  "version": "8.1.0",
+  "baseline": "model-relay-8.0.0-source.zip",
+  "baseline_sha256": "15f8a3dda871aaa3af4f593cc6a53fe8426604e6d87a014acdbd6981d287cbaf",
+  "baseline_file_count": 181,
+  "deleted_files": [],
+  "hidden_files_unchanged": true,
+  "sql_unchanged": true,
+  "requirements_unchanged": true,
+  "workbook_cell_changes": 6,
+  "validation_checks_passed": 10,
+  "self_digest_excluded": true,
+  "files": [
+    {
+      "path": "README.md",
+      "change": "modified",
+      "old_sha256": "1dc6383f4a18857e4ce4e720e891e2e0d112054e7e771c0459a156b03ce95562",
+      "new_sha256": "44334457f12027dd06244fb19ecb7903173575817ed8d775ed6ee6e803b0b003"
+    },
+    {
+      "path": "RELEASE_NOTES_8.1.0.md",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "bf55199c4d424d80fdd523d330cdfb41563dd81d63a6bb9f8b56ae232701e3ab"
+    },
+    {
+      "path": "VALIDATION_8.1.0.md",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "0d31b3482f3942c3933ef9b02869d38014de45e55c817ef57f80da64b31af6c0"
+    },
+    {
+      "path": "app/api.py",
+      "change": "modified",
+      "old_sha256": "cca5932f2b13f8f8b34e923daf524df5859383d2e10e9bc3baeb3040400c33fb",
+      "new_sha256": "296b854e5268aa523f9657e534244f6ad3e6e6bf8ff535fce815cdf176b28ca2"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "change": "modified",
+      "old_sha256": "9881fc7ab0fcb3b32660c067fd55ad19bfbe99bc7678c46d9b8d8ffd1979afc2",
+      "new_sha256": "99189bb841627e2089c562ad763ab513c7dba2be59fa00e5c66ec0897163c951"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "change": "modified",
+      "old_sha256": "8fb2d1d1f1aa2e93952b45d6b214e99cc14ab43419998775151bd8f5e8eee820",
+      "new_sha256": "47e18514f5af25a4d74da699c921bf72be2045ce5bbcf136f0df5f44b1c18734"
+    }
+  ]
+}

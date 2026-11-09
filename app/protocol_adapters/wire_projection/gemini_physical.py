@@ -192,7 +192,7 @@ def build_gemini_physical_cache_plan(
             "The Session is not frozen to a supported Gemini physical cache layout",
         )
 
-    model = str(snapshot.get("model") or "").strip()
+    model = str(snapshot.get("upstream_model") or snapshot.get("model") or "").strip()
     if not model:
         raise ProviderRequestError("MODEL_REQUIRED", "Gemini physical projection requires a frozen model")
 
@@ -519,7 +519,7 @@ def _build_gemini_physical_cache_plan_v9(
     atomic. Request-only materials are candidates only for explicit-context
     Sessions; resource lookup remains fenced by the Session cache scope.
     """
-    model = str(snapshot.get("model") or "").strip()
+    model = str(snapshot.get("upstream_model") or snapshot.get("model") or "").strip()
     upgraded = int((snapshot.get("cache_upgrade") or {}).get("version") or 0) >= 2
     cache_contract = snapshot.get("cache_contract") or {}
     allow_tool_cache = upgraded and cache_contract.get("enable_payload_stripping") is True
@@ -585,19 +585,17 @@ def _build_gemini_physical_cache_plan_v9(
                 "MATERIAL_BINDING_MISSING",
                 f"Frozen Gemini inline cache binding missing for Material {material_id}",
             )
-        if str(binding.get("representation") or binding.get("binding_kind") or "") != "gemini_inline_data":
-            raise ProviderRequestError(
-                "GEMINI_CACHE_FILE_REF_FORBIDDEN",
-                "Layout/9 CachedContent accepts Relay inlineData only; Gemini File and External URL references are inference-only",
-            )
+        file_mode = cache_contract.get("explicit_cache_material_mode") == "file_uri_allowed"
+        representation = str(binding.get("representation") or binding.get("binding_kind") or "")
+        allowed_representation = "gemini_file_uri" if file_mode else "gemini_inline_data"
+        if representation != allowed_representation:
+            raise ProviderRequestError("GEMINI_CACHE_FILE_REF_FORBIDDEN", "Binding representation violates frozen cache contract")
         part = project_material_part(binding, material_id=material_id)
-        if "inlineData" not in part:
-            raise ProviderRequestError(
-                "GEMINI_CACHE_FILE_REF_FORBIDDEN",
-                "Layout/9 CachedContent accepts inlineData only",
-            )
+        kind = "fileData" if file_mode else "inlineData"
+        if kind not in part:
+            raise ProviderRequestError("GEMINI_CACHE_FILE_REF_FORBIDDEN", "Material Part violates cache source mode")
         cached_parts.append(part)
-        descriptor = _material_descriptor(material_id, binding, part_kind="inlineData")
+        descriptor = _material_descriptor(material_id, binding, part_kind=kind)
         cached_material_descriptors.append(descriptor)
         occurrence_mapping.append(
             {

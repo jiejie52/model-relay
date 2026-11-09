@@ -15,6 +15,10 @@ class ExecutionPlanLoader:
         snapshot = await self.artifacts.load_json(row["request_object_id"], tenant_id=row["tenant_id"], conversation_hash=row["conversation_hash"])
         if not isinstance(snapshot, dict):
             raise ExecutionConflictError("Stored Request snapshot is not an object")
+        frozen_route = (session.get("metadata") or {}).get("_relay_route") or {}
+        for field in ("connection_identity_hash", "upstream_model"):
+            if frozen_route.get(field) and snapshot.get(field) != frozen_route[field]:
+                raise ExecutionConflictError("Stored Request differs from its frozen connection contract")
         if row.get("request_hash") and request_identity(snapshot) != row["request_hash"]:
             raise ExecutionConflictError("Stored Request identity changed")
         for key, digest in (("context_plan", "context_plan_hash"), ("cache_plan", "plan_hash")):

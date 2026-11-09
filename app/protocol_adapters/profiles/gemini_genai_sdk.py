@@ -11,7 +11,7 @@ from app.config import Settings
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 
 
-class GeminiAIHubMixGenAIClient:
+class GeminiGenAIClient:
     """Small testable wrapper around the official ``google-genai`` SDK.
 
     Layout/5 uses the SDK for the historical Files -> CachedContent path.
@@ -28,37 +28,20 @@ class GeminiAIHubMixGenAIClient:
         self,
         settings: Settings,
         *,
+        connection=None,
         client: Any | None = None,
         types_module: Any | None = None,
     ) -> None:
-        if settings.aihubmix_api_key is None:
-            raise RuntimeError("AIHUBMIX_API_KEY is required for Gemini google-genai SDK")
+        if connection is None:
+            from app.compatibility.connection_config import legacy_runtime
+            connection = legacy_runtime(settings, "gemini_native")
+        self.connection = connection
         self.settings = settings
-        self.base_url = self._normalize_aihubmix_base_url(
-            settings.aihubmix_gemini_sdk_base_url
-        )
+        self.base_url = connection.sdk_base
         self._client = client
         self._types_module = types_module
-        self._files_by_name: dict[str, Any] = {}
-        self._files_by_uri: dict[str, Any] = {}
-
-
-    @staticmethod
-    def _normalize_aihubmix_base_url(value: str) -> str:
-        """Return the google-genai gateway root expected by AIHubMix.
-
-        AIHubMix documents the native SDK base as ``https://aihubmix.com/gemini``.
-        4.2.0 accidentally documented the site root.  Keep one narrow compatibility
-        shim for that exact legacy value so an existing Railway variable does not
-        keep routing Files/Cache SDK calls to the object-upload frontend.  Custom
-        proxy URLs are otherwise preserved verbatim.
-        """
-        base = str(value or "").strip().rstrip("/")
-        if not base:
-            raise RuntimeError("AIHUBMIX_GEMINI_SDK_BASE_URL is required")
-        if base.lower() == "https://aihubmix.com":
-            return "https://aihubmix.com/gemini"
-        return base
+        self._files_by_name = {}
+        self._files_by_uri = {}
 
     def _types(self) -> Any:
         if self._types_module is not None:
@@ -67,7 +50,7 @@ class GeminiAIHubMixGenAIClient:
             from google.genai import types
         except ImportError as exc:  # pragma: no cover - deployment dependency guard
             raise RuntimeError(
-                "google-genai is required for the current AIHubMix Gemini cache layout"
+                "google-genai is required for the Gemini SDK execution"
             ) from exc
         self._types_module = types
         return types
@@ -79,21 +62,27 @@ class GeminiAIHubMixGenAIClient:
             from google import genai
         except ImportError as exc:  # pragma: no cover - deployment dependency guard
             raise RuntimeError(
-                "google-genai is required for the current AIHubMix Gemini cache layout"
+                "google-genai is required for the Gemini SDK execution"
             ) from exc
         types = self._types()
 
         # The current SDK calls this field ``base_url``. Keep retries explicit:
         # cache/file side effects are fenced and reconciled by Relay, not by an
         # opaque SDK retry loop.
+        import httpx
+        class AsyncOnlyTransport(httpx.BaseTransport):
+            def handle_request(self, request):
+                raise RuntimeError("Synchronous SDK network calls are not authorized")
         http_options = types.HttpOptions(
             base_url=self.base_url,
-            api_version="v1beta",
+            api_version=self.connection.api_version,
+            headers=self.connection.headers(),
             retry_options=types.HttpRetryOptions(attempts=1),
-            async_client_args={"transport": provider_transport(self.settings, "gemini", url=self.base_url, always=True)},
+            client_args={"trust_env": False, "transport": AsyncOnlyTransport()},
+            async_client_args={"trust_env": False, "transport": provider_transport(self.settings, "gemini", url=self.base_url, always=True, connection=self.connection)},
         )
         self._client = genai.Client(
-            api_key=self.settings.aihubmix_api_key.get_secret_value(),
+            api_key=self.connection.secret,
             http_options=http_options,
         )
         return self._client
@@ -306,6 +295,10 @@ class GeminiAIHubMixGenAIClient:
                             "GEMINI_CACHE_FILE_REF_MISSING",
                             f"No frozen Gemini File reference matches cached URI {uri!r}",
                         )
+                    if self.connection.spec.credential_ref:
+                        sdk_parts.append(types_module.Part.from_uri(file_uri=uri,
+                            mime_type=str(file_data.get("mimeType") or file_data.get("mime_type") or ref.get("mime_type") or "application/octet-stream")))
+                        continue
                     name = str(ref.get("name") or "")
                     file_obj = self.cached_file(name=name, uri=uri)
                     if file_obj is None:
@@ -347,7 +340,7 @@ class GeminiAIHubMixGenAIClient:
                     f"Unsupported Gemini cached part keys: {sorted(part.keys())}",
                 )
 
-            if role == "user":
+            if role == "user" and not self.connection.spec.credential_ref:
                 # Keep raw File objects in the PartUnion list. google-genai's
                 # content transformer converts File -> Part.from_uri while
                 # preserving the single UserContent boundary.
@@ -543,3 +536,6 @@ class GeminiAIHubMixGenAIClient:
                 upstream_exception_type=type(exc).__name__,
             )
         return ProviderRequestError("GEMINI_GENAI_SDK_ERROR", f"{phase}: {exc}")
+
+# Historical import name, one implementation.
+GeminiAIHubMixGenAIClient = GeminiGenAIClient

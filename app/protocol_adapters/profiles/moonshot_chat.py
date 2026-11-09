@@ -34,14 +34,19 @@ class MoonshotChatAdapter:
         settings: Settings,
         materials: MaterialResolver,
         repo: RelayV2Repository,
+        *, connection=None,
     ) -> None:
+        if connection is None:
+            from app.compatibility.connection_config import legacy_runtime
+            connection = legacy_runtime(settings, "moonshot_chat")
+        self.connection = connection
         self.settings = settings
         self.materials = materials
         self.repo = repo
 
     async def execute(self, context: SealedDispatchBundle) -> StandardizedProviderResult:
         context.verify_integrity()
-        if self.settings.moonshot_api_key is None:
+        if not self.connection.secret:
             raise ProviderRequestError(
                 "CONNECTION_NOT_CONFIGURED",
                 "moonshot_official is enabled but MOONSHOT_API_KEY is not configured",
@@ -71,7 +76,7 @@ class MoonshotChatAdapter:
         messages.append(user_message)
 
         payload: dict[str, Any] = {
-            "model": context.snapshot["model"],
+            "model": context.snapshot.get("upstream_model") or context.snapshot["model"],
             "messages": messages,
             "stream": False,
         }
@@ -94,7 +99,7 @@ class MoonshotChatAdapter:
                     },
                 }
 
-        url = f"{self.settings.moonshot_root}/chat/completions"
+        url = self.connection.api_url("chat/completions")
         timeout = httpx.Timeout(
             connect=self.settings.upstream_connect_timeout_seconds,
             read=None,
@@ -102,7 +107,7 @@ class MoonshotChatAdapter:
             pool=self.settings.upstream_pool_timeout_seconds,
         )
         headers = self._headers()
-        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot", url=url)) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "moonshot", url=url, connection=self.connection)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "kimi", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 response_status = response.status_code
@@ -169,11 +174,9 @@ class MoonshotChatAdapter:
             },
             http_status=response_status,
             provider_request_id=self._request_id(response_headers),
-            observed={
-                "actual_model": (str(data.get("model")) if data.get("model") else None),
-                "protocol": "moonshot_chat",
-                "channel_id": context.snapshot.get("channel_id") or "moonshot_official",
-            },
+            observed=observed_response_facts(response_headers, body_model=data.get("model"), protocol="moonshot_chat",
+                channel_id=context.snapshot.get("channel_id") or self.connection.spec.channel_id,
+                evidence_headers=(context.snapshot.get("protocol_profile") or {}).get("metadata", {}).get("response_evidence_headers")),
         )
 
     async def _material_parts(
@@ -291,9 +294,8 @@ class MoonshotChatAdapter:
         return str(model or "").strip().lower().startswith("kimi-k3")
 
     def _headers(self) -> dict[str, str]:
-        assert self.settings.moonshot_api_key is not None
         return {
-            "Authorization": f"Bearer {self.settings.moonshot_api_key.get_secret_value()}",
+            **self.connection.headers(),
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Accept-Encoding": "identity",

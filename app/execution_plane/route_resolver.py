@@ -67,9 +67,13 @@ class RouteBinding:
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
     execution_authorization: dict[str, Any] = field(default_factory=dict)
+    connection_identity_hash: str | None = None
+    upstream_model: str | None = None
 
     def internal_metadata(self) -> dict[str, Any]:
         return {
+            **({"connection_identity_hash": self.connection_identity_hash} if self.connection_identity_hash else {}),
+            **({"upstream_model": self.upstream_model} if self.upstream_model else {}),
             "provider": self.provider,
             "model": self.model,
             "connection_id": self.connection_id,
@@ -462,7 +466,13 @@ class RouteResolver:
                 hashlib.sha256(json.dumps(cache_contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
                 if cache_contract else None
             )
+            connection_spec = self.config_snapshot.connection(selected.connection_id) if self.config_snapshot else None
+            from app.core.idempotency import stable_hash
+            connection_identity = stable_hash({"connection": connection_spec.identity_hash, "protocol_profile": protocol_profile or {}}) if connection_spec else None
+            supply_metadata = (self.config_snapshot.supplies.get(selected.offering_id, {}).get("metadata") or {}) if self.config_snapshot else {}
             canonical = {
+                **({"upstream_model": supply_metadata["upstream_model"]} if supply_metadata.get("upstream_model") else {}),
+                **({"connection_identity_hash": connection_identity} if connection_identity else {}),
                 "provider": provider_n,
                 "model": model_n,
                 "connection_id": selected.connection_id,
@@ -491,10 +501,14 @@ class RouteResolver:
             binding_hash = hashlib.sha256(
                 json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
+            offering = self.config_snapshot.supplies.get(selected.offering_id, {}) if self.config_snapshot else {}
+            upstream_model = (offering.get("metadata") or {}).get("upstream_model")
             binding = RouteBinding(
                 provider=provider_n,
                 model=model_n,
                 connection_id=selected.connection_id,
+                connection_identity_hash=connection_identity,
+                upstream_model=upstream_model,
                 route_revision=self.catalog.revision,
                 route_binding_hash=binding_hash,
                 account_scope_hash=scope_hash,
@@ -611,7 +625,10 @@ class RouteResolver:
             provider=request.provider, model=request.model, purpose="session",
             requirements=request.capability_requirements.model_dump(mode="json"),
         )
-        return resolve_supply_group(self, request, initial, policy)
+        if self.config_snapshot and self.config_snapshot.connections[initial.connection_id].credential_ref:
+            return initial, None, "pinned"
+        selected, _, _ = resolve_supply_group(self, request, initial, policy)
+        return selected, None, "pinned"
 
     def materialize_on_first_request(self, session: dict[str, Any], request: Any) -> dict[str, Any]:
         from app.execution_plane.supply_resolver import materialize_supply_group

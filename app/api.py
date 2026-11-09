@@ -28,26 +28,22 @@ from app.materials.ingress import MaterialIngress
 from app.execution_plane.semantic_resolver import CAPABILITY_PROFILE_REVISION
 from app.materials.fallback_storage import FallbackObjectStorage
 from app.runtime.material_binder import MaterialBinder
-from app.materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
+from app.materials.provider_files import ProviderFileRegistry
 from app.materials.resolver import MaterialResolver
 from app.protocol_adapters.registry import ProviderRegistry
 from app.protocol_adapters.factory import register_protocol_adapters
-from app.protocol_adapters.profiles.moonshot_chat import MoonshotChatAdapter
-from app.protocol_adapters.profiles.gemini_native import GeminiNativeAdapter
-from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from app.control_plane.catalog import RouteCatalog
 from app.execution_plane.route_resolver import RouteResolver
 from app.runtime.engine import RelayRuntimeEngine
 from app.runtime.cache_materializer import CacheMaterializer
 from app.control_plane.resource_registry import CacheResourceRegistry
-from app.runtime.resource_adapters.gemini_aihubmix import GeminiAIHubMixCacheResourceAdapter
 from app.core.raw_error import RawErrorRecorder
 from app.execution_plane.schedulers.inline_scheduler import InlineScheduler
 from app.observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
 
 
 
-API_VERSION = "7.1.0"
+API_VERSION = "8.1.0"
 
 
 settings = get_settings()
@@ -149,50 +145,15 @@ async def lifespan(_: FastAPI):
     storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
     material_resolver = MaterialResolver(repo, storage_registry, settings)
     fallback_storage = FallbackObjectStorage(repo, storage_registry, settings)
-    gemini_sdk = (
-        GeminiAIHubMixGenAIClient(settings)
-        if settings.connection_is_active(settings.aihubmix_gemini_connection_id)
-        else None
-    )
     file_adapters = ProviderFileRegistry()
-    if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
-        file_adapters.register(
-            settings.aihubmix_gemini_connection_id,
-            GeminiAIHubMixFileAdapter(settings, sdk=gemini_sdk),
-        )
-    if settings.connection_is_active(settings.moonshot_connection_id):
-        file_adapters.register(
-            settings.moonshot_connection_id,
-            KimiOfficialFileAdapter(settings, repo, storage_registry),
-        )
     material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
     binding_resolver = MaterialBinder(repo, fallback_storage, file_adapters)
     control_plane = ModelControlPlane.from_settings(settings)
     providers = ProviderRegistry(settings)
-    providers.validate_enabled_connections()
-    register_protocol_adapters(
-        settings=settings,
-        control_plane=control_plane,
-        providers=providers,
-        materials=material_resolver,
-        repo=repo,
-    )
-    if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
-        providers.register_v2(
-            settings.aihubmix_gemini_connection_id,
-            GeminiNativeAdapter(settings),
-            provider="gemini",
-            protocol="gemini_native",
-            channel_id="aihubmix",
-        )
-    if settings.connection_is_active(settings.moonshot_connection_id):
-        providers.register_v2(
-            settings.moonshot_connection_id,
-            MoonshotChatAdapter(settings, material_resolver, repo),
-            provider="kimi",
-            protocol="moonshot_chat",
-            channel_id="moonshot_official",
-        )
+    cache_resources = CacheResourceRegistry()
+    connection_assembly = register_protocol_adapters(settings=settings, control_plane=control_plane,
+        providers=providers, materials=material_resolver, repo=repo, file_adapters=file_adapters,
+        cache_resources=cache_resources, storage=storage_registry)
     route_catalog = RouteCatalog.from_settings(settings, control_plane=control_plane)
     config_snapshot = get_active_config_snapshot(settings, control_plane=control_plane, catalog=route_catalog)
     verify_node_snapshot_compatibility(config_snapshot)
@@ -203,12 +164,6 @@ async def lifespan(_: FastAPI):
         provider_files=file_adapters,
     )
     route_resolver.validate_catalog()
-    cache_resources = CacheResourceRegistry()
-    if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
-        cache_resources.register(
-            settings.aihubmix_gemini_connection_id,
-            GeminiAIHubMixCacheResourceAdapter(settings, sdk=gemini_sdk),
-        )
     cache_orchestrator = CacheMaterializer(repo, resource_registry=cache_resources)
     runtime = RelayRuntimeEngine(
         repo, storage_registry, providers, material_resolver, binding_resolver, settings,
@@ -232,7 +187,8 @@ async def lifespan(_: FastAPI):
     app.state.route_resolver = route_resolver
     app.state.shared_runtime = runtime
     app.state.cache_resource_registry = cache_resources
-    app.state.gemini_genai_sdk = gemini_sdk
+    app.state.connection_assembly = connection_assembly
+    app.state.gemini_genai_sdk = None
     app.state.cache_orchestrator = cache_orchestrator
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
@@ -264,9 +220,7 @@ async def lifespan(_: FastAPI):
         notifier = getattr(app.state, "worker_wake_notifier", None)
         if notifier is not None:
             await notifier.close()
-        sdk_client = getattr(app.state, "gemini_genai_sdk", None)
-        if sdk_client is not None:
-            await sdk_client.close()
+        await connection_assembly.close()
         await backend.close()
 
 

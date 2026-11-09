@@ -28,7 +28,7 @@ def execution_authorization(value=None):
 
 def validate_response_evidence_headers(value):
     import re
-    if not isinstance(value, dict) or set(value) - {"paid_fallback", "billing_tier", "native_constraint_enforced", "protocol_downgraded"}:
+    if not isinstance(value, dict) or set(value) - {"paid_fallback", "billing_tier", "native_constraint_enforced", "protocol_downgraded", "actual_model", "provider_fallback", "json_repaired"}:
         raise ValueError("Unknown response evidence mapping")
     for header in value.values():
         if not isinstance(header, str) or not re.fullmatch(r"[a-zA-Z0-9-]{1,100}", header):

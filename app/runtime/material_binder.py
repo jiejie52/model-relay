@@ -56,6 +56,7 @@ class MaterialBinder:
         # identities instead of silently switching generations. The frozen
         # snapshot must still belong to the Session's private route.
         adapter = self.file_adapters.maybe_get(connection_id)
+        files_only = (transport_policy or {}).get("supported_material_transports") == ["provider_files_api"]
         if existing_snapshot:
             for item in existing_snapshot:
                 frozen_connection = str(item.get("connection_id") or "")
@@ -124,13 +125,15 @@ class MaterialBinder:
                         f"Relay has no authoritative byte size for material {material.get('id')}",
                     )
                 sizes.append(int(raw_size))
+            configured_transport = (transport_policy or {}).get("supported_material_transports")
             gemini_decision = decide_gemini_request_transport(
                 material_sizes=sizes,
-                threshold_bytes=int((transport_policy or {}).get("threshold_bytes") or
+                threshold_bytes=int((transport_policy or {}).get("external_url_max_total_bytes", (transport_policy or {}).get("threshold_bytes")) or
                     getattr(self.fallback.settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)),
                 threshold_inclusive=bool((transport_policy or {}).get("threshold_inclusive", False)),
+                supported_material_transports=configured_transport,
             )
-            if gemini_inline_cache_strategy:
+            if gemini_inline_cache_strategy and not configured_transport:
                 gemini_inline_cache_ids = set(
                     select_gemini_inline_cache_material_ids(
                         material_rows=materials,
@@ -138,7 +141,7 @@ class MaterialBinder:
                         inline_limit_bytes=gemini_decision.threshold_bytes,
                     )
                 )
-            else:
+            elif not configured_transport:
                 # Layout/2-5 Sessions keep the historical Files-first request
                 # behavior. Layout/7 is also intentionally routed through this
                 # compatibility branch in 4.3.2 so already-frozen 4.3.1 Sessions
@@ -198,6 +201,17 @@ class MaterialBinder:
                         from app.materials.resolver import MaterialResolver
                         data = await MaterialResolver(self.repo, self.fallback.storage, self.fallback.settings).read_bound_text(
                             projected, tenant_id=tenant_id, conversation_hash=conversation_hash)
+                        if files_only:
+                            result = await adapter.prepare(MaterialFile(material_id=material_id, tenant_id=tenant_id,
+                                conversation_hash=conversation_hash, filename=str(projected.get("filename") or material_id)+".txt",
+                                content_type="text/plain", size_bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), data=data),
+                                generation=int(material.get("binding_generation") or 0)+1)
+                            native = dict(result.binding)
+                            projected.update({k: v for k,v in native.items() if k not in {"metadata", "content_sha256", "content_type", "filename"}})
+                            projected["binding_kind"] = GEMINI_FILES_REPRESENTATION
+                            projected["binding_generation"] = native["generation"]
+                            snapshots.append(projected)
+                            continue
                         projected.update(representation=GEMINI_INLINE_CACHE_REPRESENTATION,
                                          binding_kind=GEMINI_INLINE_CACHE_REPRESENTATION,
                                          inline_data=base64.b64encode(data).decode("ascii"))
@@ -233,7 +247,12 @@ class MaterialBinder:
             )
 
             if gemini_decision is not None:
-                if gemini_inline_cache_strategy:
+                if configured_transport and gemini_decision.mode == "inline_cache_no_files":
+                    binding = await self._ensure_gemini_split_request_binding(material=material, binding=binding,
+                        adapter=adapter, connection_id=connection_id, tenant_id=tenant_id,
+                        conversation_hash=conversation_hash, decision=gemini_decision, cache_inline=False,
+                        request_id=request_id, session_id=session_id)
+                elif gemini_inline_cache_strategy and not configured_transport:
                     binding = await self._ensure_gemini_split_request_binding(
                         material=material,
                         binding=binding,
@@ -257,6 +276,7 @@ class MaterialBinder:
                         decision=gemini_decision,
                         request_id=request_id,
                         session_id=session_id,
+                        allow_external_fallback=not files_only,
                     )
             elif not self._binding_usable(binding):
                 binding = await self._refresh_generic_binding(
@@ -268,6 +288,8 @@ class MaterialBinder:
                     conversation_hash=conversation_hash,
                 )
 
+            if files_only and binding.get("representation") != GEMINI_FILES_REPRESENTATION:
+                raise ProviderRequestError("MATERIAL_TRANSPORT_FORBIDDEN", "Supply requires a native Provider file binding")
             snapshots.append(self._snapshot(material, binding))
         return snapshots
 
@@ -283,6 +305,7 @@ class MaterialBinder:
         session_id: str | None = None,
         enable_projection_reuse: bool = False,
         cache_budget_bytes: int | None = None,
+        explicit_cache_material_mode: str = "inline_bytes_only",
     ) -> dict[str, Any]:
         """Build the cache-only Gemini material projection.
 
@@ -293,6 +316,22 @@ class MaterialBinder:
         readable as a frozen historical layout.
         """
 
+        if explicit_cache_material_mode == "file_uri_allowed":
+            candidates = list(session.get("material_manifest") or []) if session.get("context_policy") == "conversation" else []
+            by_id = {str(b.get("material_id")): b for b in material_bindings}
+            selected = []
+            for mid in candidates:
+                binding = by_id.get(str(mid))
+                if binding is None: raise ProviderRequestError("MATERIAL_BINDING_MISSING", "Cache material has no frozen binding")
+                if binding.get("representation") != GEMINI_FILES_REPRESENTATION:
+                    raise ProviderRequestError("GEMINI_CACHE_FILE_REF_FORBIDDEN", "File URI mode requires a native file binding")
+                selected.append(dict(binding))
+            return {"schema_version": "relay-gemini-cache-material-plan/4", "projection_version": "gemini-cache-file-uri/1",
+                "explicit_cache_material_mode": explicit_cache_material_mode, "cache_material_ids": [str(x) for x in candidates],
+                "cache_material_bindings": selected, "inline_material_ids": [],
+                "files_api_cache_material_ids": [str(x) for x in candidates],
+                "inference_only_session_material_ids": [], "cache_candidate_exclusion_reason":
+                    "request_material_content_boundary_not_equivalent" if session.get("context_policy") == "explicit" and material_ids else None}
         rows: list[dict[str, Any]] = []
         for material_id in material_ids:
             row = await self.repo.get_material(
@@ -785,6 +824,7 @@ class MaterialBinder:
         decision: GeminiTransportDecision,
         request_id: str | None,
         session_id: str | None,
+        allow_external_fallback: bool = True,
     ) -> dict[str, Any]:
         """Resolve the inference binding with Gemini Files as the only primary.
 
@@ -805,7 +845,7 @@ class MaterialBinder:
         )
 
         if (
-            self._binding_usable(binding)
+            allow_external_fallback and self._binding_usable(binding)
             and representation == GEMINI_EXTERNAL_URL_REPRESENTATION
             and bool(binding_metadata.get("files_api_fallback"))
         ):
@@ -865,6 +905,7 @@ class MaterialBinder:
                 generation=generation,
             )
         except Exception as exc:
+            if not allow_external_fallback: raise
             # 4.0: Files remains the primary. Supabase is only the frozen
             # inference fallback after Files upload failure; CachedContent never
             # receives this External URL. The cache projection may instead use
@@ -1099,6 +1140,8 @@ class MaterialBinder:
         decision: GeminiTransportDecision,
     ) -> None:
         material_id = str(material["id"])
+        if decision.source == "frozen_supply_contract":
+            return  # Retained canonical bytes may still be needed by another connection.
         fallback = await self.repo.get_material_fallback(material_id)
         if not fallback:
             await self.repo.update_material(material_id, {"durability": "provider_bound", "object_id": None})

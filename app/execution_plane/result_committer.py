@@ -217,7 +217,8 @@ class ResultCommitter:
 
         expected_model = str(snapshot.get("model") or "").strip()
         actual_model = str(observed.get("actual_model") or "").strip()
-        allowed_models = ((snapshot.get("execution_authorization") or {}).get("allowed_actual_models") or [])
+        allowed_models = list((snapshot.get("execution_authorization") or {}).get("allowed_actual_models") or [])
+        if snapshot.get("upstream_model"): allowed_models.append(snapshot["upstream_model"])
         allowed = {expected_model.lower(), *(str(v).lower() for v in allowed_models)}
         mismatch = bool(expected_model and actual_model and actual_model.lower() not in allowed)
         missing = bool(expected_model and not actual_model)

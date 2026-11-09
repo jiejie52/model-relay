@@ -25,17 +25,16 @@ from app.protocol_adapters.wire_projection.gemini_wire import project_current_us
 class GeminiNativeAdapter:
     """Gemini native generateContent over AIHubMix Gemini Native Proxy."""
 
-    adapter_version = "gemini-native-aihubmix/8"
+    adapter_version = "gemini-native/9"
     _PROTECTED = {"contents", "systemInstruction", "cachedContent", "model"}
     _CACHED_INFERENCE_FORBIDDEN = {"systemInstruction", "tools", "toolConfig"}
 
-    def __init__(self, settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        if not settings.aihubmix_gemini_base_url:
-            raise RuntimeError("AIHUBMIX_GEMINI_BASE_URL is required for Gemini native")
-        if settings.aihubmix_api_key is None:
-            raise RuntimeError("AIHUBMIX_API_KEY is required for Gemini native")
-        self.settings = settings
-        self.base_url = settings.aihubmix_gemini_base_url.rstrip("/")
+    def __init__(self, settings: Settings, *, connection=None, transport=None):
+        if connection is None:
+            from app.compatibility.connection_config import legacy_runtime
+            connection = legacy_runtime(settings, "gemini_native")
+        self.connection, self.settings = connection, settings
+        self.base_url = connection.rest_base
         self._transport = transport
 
     async def execute(self, context: SealedDispatchBundle) -> StandardizedProviderResult:
@@ -88,10 +87,10 @@ class GeminiNativeAdapter:
                     full[key] = value
             stripped_bytes = max(0, len(serialize_wire(full))-len(serialize_wire(payload)))
 
-        model = str(context.snapshot["model"])
-        url = f"{self.base_url}/v1beta/models/{model}:generateContent"
+        model = str(context.snapshot.get("upstream_model") or context.snapshot["model"])
+        url = self.connection.api_url(f"models/{model}:generateContent")
         headers = {
-            "x-goog-api-key": self.settings.aihubmix_api_key.get_secret_value(),
+            **self.connection.headers(),
             "Content-Type": "application/json",
             "Accept": "application/json",
             "Accept-Encoding": "identity",
@@ -102,7 +101,7 @@ class GeminiNativeAdapter:
             write=self.settings.upstream_write_timeout_seconds,
             pool=self.settings.upstream_pool_timeout_seconds,
         )
-        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url)) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=True, transport=provider_transport(self.settings, "gemini", self._transport, url, connection=self.connection)) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 raw = await read_raw_response(response, log_context={"request_id": context.request_id, "session_id": context.session_id, "provider": "gemini", "connection_id": context.snapshot.get("connection_id"), "model": context.snapshot.get("model")})
                 status = response.status_code
@@ -190,7 +189,7 @@ class GeminiNativeAdapter:
                 response_headers,
                 body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
                 protocol="gemini_native",
-                channel_id=str(context.snapshot.get("channel_id") or "aihubmix"),
+                channel_id=str(context.snapshot.get("channel_id") or self.connection.spec.channel_id),
             evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
             ) | {
                 "cache_tokens_details": usage_meta.get("cacheTokensDetails", usage_meta.get("cache_tokens_details")),
@@ -418,7 +417,14 @@ class GeminiNativeAdapter:
             if "max_output_tokens" in options:
                 generation["maxOutputTokens"] = options["max_output_tokens"]
             think_level = str(snapshot.get("think_level") or "auto").lower()
-            if think_level in {"low", "medium", "high"}:
+            thinking = (snapshot.get("capability_contract") or {}).get("thinking") or {}
+            if thinking.get("wire_strategy") == "gemini_thinking_budget":
+                budgets = thinking.get("budget_map") or {}
+                budget = budgets.get(think_level)
+                if type(budget) is not int or budget < -1:
+                    raise ProviderRequestError("THINKING_BUDGET_UNEXPRESSIBLE", "Frozen thinking intent has no legal budget projection")
+                generation["thinkingConfig"] = {"thinkingBudget": budget}
+            elif think_level in {"low", "medium", "high"}:
                 generation["thinkingConfig"] = {"thinkingLevel": think_level.upper()}
             if not generation:
                 payload.pop("generationConfig", None)

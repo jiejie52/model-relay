@@ -25,7 +25,7 @@ class ImmutableConfigSnapshot:
         for name in ("supplies", "capabilities", "protocols", "cache_policies"):
             object.__setattr__(self, name, freeze_json(dict(getattr(self, name))))
         object.__setattr__(self, "connections", freeze_json({k: ConnectionSpec(
-            **{**v.canonical(), "metadata": freeze_json(v.metadata)}) for k, v in self.connections.items()}))
+            **{**v.canonical(), "metadata": freeze_json(v.metadata), "sdk_endpoint_options": freeze_json(v.sdk_endpoint_options)}) for k, v in self.connections.items()}))
         if self.route_catalog is not None and self.catalog_hash != self.route_catalog.catalog_hash:
             raise ValueError("Snapshot route catalog digest mismatch")
 
@@ -35,26 +35,20 @@ class ImmutableConfigSnapshot:
     def credential(self, connection_id, settings):
         spec = self.connection(connection_id)
         if spec is None: return None
-        if spec.channel_id == "aihubmix":
-            return settings.aihubmix_api_key.get_secret_value() if settings.aihubmix_api_key else None
-        if connection_id == settings.moonshot_connection_id:
-            return settings.moonshot_api_key.get_secret_value() if settings.moonshot_api_key else None
-        return (os.getenv(spec.credential_env) or None) if spec.credential_env else None
+        from app.control_plane.connections import resolve_credential
+        return resolve_credential(spec, settings)
 
     def connection_configuration(self, connection_id, settings):
         spec = self.connection(connection_id)
-        if spec is None: return settings.connection_configuration(connection_id)
-        if not spec.base_url: return False, "connection base_url is not configured"
-        if spec.protocol in SUPPORTED_PROTOCOLS and not self.credential(connection_id, settings):
-            return False, "connection credential is not configured"
+        if spec is None: return False, "connection is not declared"
+        if not (spec.rest_base_url or spec.base_url): return False, "connection endpoint is not configured"
+        if not self.credential(connection_id, settings): return False, "connection credential is not configured"
         return True, None
 
     def account_scope_hash(self, connection_id, settings):
+        from app.control_plane.connections import scope_identity
         spec = self.connection(connection_id)
-        if spec is None: return settings.connection_account_scope_hash(connection_id)
-        material = "|".join([spec.connection_id, spec.channel_id, spec.account_id or "", spec.base_url or "",
-                             self.credential(connection_id, settings) or "unconfigured"])
-        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return scope_identity(spec, settings) if spec else settings.connection_account_scope_hash(connection_id)
 
 def get_active_config_snapshot(settings, *, control_plane=None, catalog=None):
     plane = control_plane or ModelControlPlane.from_settings(settings)

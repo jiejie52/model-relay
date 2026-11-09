@@ -52,6 +52,7 @@ class ResponsesV2Adapter:
                     }
                 )
 
+        if snapshot.get("upstream_model"): snapshot["model"] = snapshot["upstream_model"]
         result = await self.legacy.execute(
             snapshot,
             session=context.session,

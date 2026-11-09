@@ -49,6 +49,18 @@ def main() -> None:
     candidate.add_argument("--supply-registry", help="Trusted, certified supply registry JSON")
     candidate.add_argument("--revision", required=True)
     candidate.add_argument("--out", required=True)
+    cert = commands.add_parser("certification-input", help="Prepare unsigned draft certification identities; grants no traffic")
+    cert.add_argument("--source", required=True)
+    cert.add_argument("--out", required=True)
+    declaration = commands.add_parser("declaration", help="Compile independent connection and supply declarations")
+    declaration.add_argument("--source", required=True)
+    declaration.add_argument("--certifications", help="Controlled certification records keyed by offering_id")
+    declaration.add_argument("--revision", required=True)
+    declaration.add_argument("--out", required=True)
+    activate = commands.add_parser("activate", help="Atomically switch deployment pointer; restart nodes to load")
+    activate.add_argument("--pointer", required=True)
+    activate.add_argument("--release", required=True)
+    activate.add_argument("--expected-current-sha256", required=True, help="Empty string for first activation")
     publish = commands.add_parser("publish", help="Bind external operator approval to a frozen JSON release")
     publish.add_argument("--candidate", required=True)
     publish.add_argument("--approval", required=True, help="Approval record from controlled deployment workflow")
@@ -58,6 +70,17 @@ def main() -> None:
         result = parse_v2_declarations(args.workbook)
         print(json.dumps({"status": result["status"], "models": len(result["models"]),
             "routes": len(result["routes"]), "caches": len(result["caches"])}, ensure_ascii=False))
+    elif args.command == "activate":
+        from app.control_plane.governance.releases import activate_release
+        print(json.dumps(activate_release(pointer=args.pointer, release_path=args.release,
+            expected_sha256=args.expected_current_sha256)))
+    elif args.command == "certification-input":
+        from app.control_plane.governance.declarations import certification_request
+        _new_output(args.out, certification_request(_json_file(args.source), settings=Settings()))
+    elif args.command == "declaration":
+        from app.control_plane.governance.declarations import build_declaration_candidate
+        _new_output(args.out, build_declaration_candidate(_json_file(args.source), settings=Settings(), revision=args.revision,
+            certifications=_json_file(args.certifications) if args.certifications else None))
     elif args.command == "candidate":
         settings = Settings()  # uses deployment's existing .env; no network access
         result = build_candidate(args.workbook, settings=settings,

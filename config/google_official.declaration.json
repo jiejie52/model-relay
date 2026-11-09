@@ -1,0 +1,183 @@
+{
+  "connections": [
+    {
+      "connection_id": "gemini_google_official_prod",
+      "channel_id": "google_official",
+      "protocol": "gemini_native",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "rest_base_url": "https://generativelanguage.googleapis.com",
+      "sdk_endpoint_options": {
+        "base_url": "https://generativelanguage.googleapis.com"
+      },
+      "api_version": "v1beta",
+      "upload_base_url": "https://generativelanguage.googleapis.com/upload/v1beta",
+      "auth_type": "x_goog_api_key_header",
+      "credential_ref": "GOOGLE_GEMINI_API_KEY",
+      "provider": "gemini",
+      "account_id": "REPLACE_WITH_ACCOUNT",
+      "project_id": "REPLACE_WITH_PROJECT",
+      "region": "global"
+    }
+  ],
+  "capability_contracts": [
+    {
+      "contract_id": "gemini-2.5-pro-google-official-capability",
+      "revision": "8.0.0-draft",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1
+        }
+      },
+      "thinking": {
+        "mode": "budget",
+        "accepted_levels": [
+          "auto",
+          "low",
+          "medium",
+          "high"
+        ],
+        "wire_strategy": "gemini_thinking_budget",
+        "budget_map": {
+          "auto": -1,
+          "low": 1024,
+          "medium": 8192,
+          "high": 32768
+        }
+      },
+      "structured_output": {
+        "mode": "native_json_schema"
+      },
+      "input_modalities": [
+        "text",
+        "image",
+        "document"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ]
+      }
+    }
+  ],
+  "protocol_profiles": [
+    {
+      "profile_id": "gemini-native-google-official",
+      "revision": "8.0.0-draft",
+      "protocol": "gemini_native",
+      "cache": {
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "composite_mode": "mutually_exclusive",
+        "token_count_connection_id": "gemini_google_official_prod",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified"
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified"
+          }
+        }
+      },
+      "metadata": {
+        "adapter_type": "gemini_native",
+        "allowed_hosts": [
+          "generativelanguage.googleapis.com"
+        ],
+        "affinity_policy": {
+          "enabled": false
+        },
+        "response_evidence_headers": {}
+      }
+    }
+  ],
+  "cache_policies": [
+    {
+      "policy_id": "google-official-session-cache",
+      "revision": "8.0.0-draft",
+      "scope": "session",
+      "mechanism_preference": [
+        "stateful_resource",
+        "implicit_prefix"
+      ],
+      "metadata": {
+        "default_mode": "auto",
+        "allow_force": true
+      }
+    }
+  ],
+  "offerings": [
+    {
+      "offering_id": "gemini-2.5-pro-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-2.5-pro",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-2.5-pro-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 10,
+      "requires_file_adapter": true,
+      "enabled": false,
+      "metadata": {
+        "unavailable_action": "try_next",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    }
+  ],
+  "schema_version": "relay-supply-declarations/1",
+  "revision": "google-official-draft"
+}

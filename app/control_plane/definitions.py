@@ -27,8 +27,25 @@ class ConnectionSpec:
     account_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    rest_base_url: str | None = None
+    upload_base_url: str | None = None
+    sdk_endpoint_options: dict[str, Any] = field(default_factory=dict)
+    api_version: str | None = None
+    auth_type: str | None = None
+    credential_ref: str | None = None
+    project_id: str | None = None
+    region: str | None = None
+    provider: str | None = None
+
+    @property
+    def identity_hash(self) -> str:
+        return _hash_json(self.canonical())
+
     def canonical(self) -> dict[str, Any]:
-        return {
+        extra = {name: getattr(self, name) for name in (
+            "rest_base_url", "upload_base_url", "sdk_endpoint_options", "api_version", "auth_type",
+            "credential_ref", "project_id", "region", "provider") if getattr(self, name)}
+        return {**extra,
             "connection_id": self.connection_id,
             "channel_id": self.channel_id,
             "protocol": self.protocol,
@@ -278,6 +295,13 @@ class ModelControlPlane:
     @classmethod
     def from_settings(cls, settings: Settings) -> "ModelControlPlane":
         base = cls._builtin(settings)
+        pointer = getattr(settings, "model_control_plane_release_pointer", None)
+        if pointer:
+            if settings.model_control_plane_file or settings.model_control_plane_json:
+                raise ValueError("Release pointer conflicts with direct snapshot configuration")
+            published = json.loads(Path(pointer).read_text())
+            settings = settings.model_copy(update={"model_control_plane_file": published["path"],
+                "model_control_plane_file_sha256": published["sha256"], "model_control_plane_release_pointer": None})
         raw = str(getattr(settings, "model_control_plane_json", None) or "").strip()
         filename = str(getattr(settings, "model_control_plane_file", None) or "").strip()
         if filename and raw:
@@ -313,6 +337,11 @@ class ModelControlPlane:
             raise ValueError("Control plane release metadata must be an object")
         if metadata.get("managed_model_groups") and not filename:
             raise ValueError("Published managed model groups require a pinned JSON snapshot file")
+        if metadata.get("source") == "supply-declarations":
+            if not filename or not all(metadata.get(k) for k in ("candidate_sha256", "approved_by", "approval_ref", "declarations_sha256")):
+                raise ValueError("Supply declarations require an approved pinned file")
+            if metadata.get("base_control_plane_hash") != base.control_plane_hash:
+                raise ValueError("Supply declaration base does not match this node")
         if metadata.get("source") == "v2-workbook":
             if not filename:
                 raise ValueError("V2 workbook releases require the pinned MODEL_CONTROL_PLANE_FILE path")
@@ -322,6 +351,9 @@ class ModelControlPlane:
                 raise ValueError("V2 workbook release lacks required governance approval metadata")
             if metadata["base_control_plane_hash"] != base.control_plane_hash:
                 raise ValueError("V2 workbook release was compiled against a different base control plane")
+        if any(x.get("credential_ref") for x in parsed.get("connections", [])) and (
+                not filename or metadata.get("source") not in {"v2-workbook", "supply-declarations"}):
+            raise ValueError("Managed connections require an approved pinned release")
         mode = str(parsed.get("mode") or "merge").strip().lower()
         if mode not in {"merge", "replace"}:
             raise ValueError("MODEL_CONTROL_PLANE_JSON mode must be merge or replace")
@@ -574,7 +606,7 @@ class ModelControlPlane:
                 requires_file_adapter=True,
             ),
         ]
-        from app.control_plane.supply_group import extend_gemini_supplies
+        from app.compatibility.supply_seed import extend_gemini_supplies
 
         contracts, protocol_profiles, offerings = extend_gemini_supplies(
             contracts, protocol_profiles, offerings, settings,
@@ -607,41 +639,21 @@ class ModelControlPlane:
         spec = self.connections.get(connection_id)
         if spec is None:
             return None
-        if spec.channel_id == "aihubmix":
-            return settings.aihubmix_api_key.get_secret_value() if settings.aihubmix_api_key else None
-        if connection_id == settings.moonshot_connection_id:
-            return settings.moonshot_api_key.get_secret_value() if settings.moonshot_api_key else None
-        if spec.credential_env:
-            return os.getenv(spec.credential_env) or None
-        return None
+        from app.control_plane.connections import resolve_credential
+        return resolve_credential(spec, settings)
 
-    def connection_configuration(self, connection_id: str, settings: Settings) -> tuple[bool, str | None]:
+    def connection_configuration(self, connection_id, settings):
         spec = self.connections.get(connection_id)
-        if spec is None:
-            return settings.connection_configuration(connection_id)
-        if not spec.base_url:
-            return False, "connection base_url is not configured"
-        if spec.protocol in {"responses", "chat_completions", "claude_messages", "gemini_native", "moonshot_chat"}:
-            if not self.credential(connection_id, settings):
-                label = spec.credential_env or ("AIHUBMIX_API_KEY" if spec.channel_id == "aihubmix" else "credential")
-                return False, f"{label} is not configured"
+        if spec is None: return False, "connection is not declared"
+        if not (spec.rest_base_url or spec.base_url): return False, "connection endpoint is not configured"
+        if not self.credential(connection_id, settings): return False, "connection credential is not configured"
         return True, None
 
-    def account_scope_hash(self, connection_id: str, settings: Settings) -> str:
+    def account_scope_hash(self, connection_id, settings):
+        from app.control_plane.connections import scope_identity
         spec = self.connections.get(connection_id)
-        if spec is None:
-            return settings.connection_account_scope_hash(connection_id)
-        secret = self.credential(connection_id, settings) or "unconfigured"
-        material = "|".join(
-            [
-                spec.connection_id,
-                spec.channel_id,
-                spec.account_id or "",
-                spec.base_url or "",
-                secret,
-            ]
-        )
-        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+        if spec is None: return settings.connection_account_scope_hash(connection_id)
+        return scope_identity(spec, settings)
 
     def _validate(self) -> None:
         from app.control_plane.execution_authorization import execution_authorization, validate_response_evidence_headers
@@ -724,6 +736,8 @@ class ModelControlPlane:
             credential_env=(str(value.get("credential_env")) if value.get("credential_env") else None),
             account_id=(str(value.get("account_id")) if value.get("account_id") else None),
             metadata=dict(value.get("metadata") or {}),
+            **{name: value[name] for name in ("rest_base_url", "upload_base_url", "sdk_endpoint_options",
+                "api_version", "auth_type", "credential_ref", "project_id", "region", "provider") if name in value},
         )
 
     @staticmethod

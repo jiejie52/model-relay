@@ -42,14 +42,15 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
         token = session.get("session_affinity_token") or session_affinity_token(settings, session, epoch)
     profile = (snapshot.get("protocol_profile") or {}).get("cache") or {}
     header = profile.get("affinity_header")
-    if header is None and channel == "aihubmix":
-        header = "X-Aihubmix-Session-Id"
-    hosts = profile.get("affinity_hosts")
-    if hosts is None and channel == "aihubmix":
-        hosts = [urlsplit(url).hostname for url in (
-            settings.aihubmix_openai_base_url, settings.aihubmix_claude_base_url,
-            settings.aihubmix_gemini_base_url, settings.aihubmix_gemini_sdk_base_url,
-        ) if url]
+    interaction = (snapshot.get("protocol_profile") or {}).get("metadata", {}).get("affinity_policy")
+    if interaction is not None:
+        header = interaction.get("header") if interaction.get("enabled") else None
+        if header:
+            token = interaction.get("value_template", "{token}").format(token=token, epoch=epoch, session_id=str(session["id"]))
+        hosts = interaction.get("allowed_hosts", []) if interaction.get("enabled") else []
+    else:
+        from app.compatibility.affinity_config import legacy_affinity
+        header, hosts = legacy_affinity(settings, channel, profile, header)
     policy = snapshot.get("cache_policy") or {}
     managed = bool(upgrade and upgrade.get("grok_mode") != "legacy_v1"
                    and snapshot.get("requested_cache_mode") != "off" and not policy.get("deny")

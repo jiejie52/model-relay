@@ -73,7 +73,7 @@ class ChatCompletionsV2Adapter:
         messages.append(user_message)
 
         payload: dict[str, Any] = {
-            "model": str(context.snapshot["model"]),
+            "model": str(context.snapshot.get("upstream_model") or context.snapshot["model"]),
             "messages": messages,
             "stream": False,
         }

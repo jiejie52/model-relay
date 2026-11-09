@@ -16,6 +16,7 @@ class ProviderRegistry:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.openai_compatible = OpenAICompatibleResponsesProvider(settings)
+        self._versions = {}
         self._v2: dict[str, object] = {}
         self._v2_meta: dict[str, dict[str, str]] = {}
 
@@ -56,6 +57,8 @@ class ProviderRegistry:
         protocol: str | None = None,
         channel_id: str | None = None,
     ) -> None:
+        identity = getattr(getattr(adapter, "connection", None), "identity_hash", None)
+        if identity: self._versions[(connection_id, identity)] = adapter
         self._v2[connection_id] = adapter
         self._v2_meta[connection_id] = {
             # Empty provider means this connection-scoped protocol adapter may
@@ -68,6 +71,14 @@ class ProviderRegistry:
         }
 
     def describe(self, connection_id: str) -> dict[str, str] | None:
+        from app.runtime.connection_scope import current_identity
+        identity = current_identity()
+        adapter = self._versions.get((connection_id, identity)) if identity else None
+        if identity:
+            if adapter is None: return None
+            return {"connection_id": connection_id, "provider": "", "protocol": adapter.connection.spec.protocol,
+                "adapter_version": adapter.adapter_version, "channel_id": adapter.connection.spec.channel_id,
+                "connection_identity_hash": identity}
         value = self._v2_meta.get(connection_id)
         if value is None:
             return None
@@ -76,7 +87,26 @@ class ProviderRegistry:
     def registered_connections(self) -> list[str]:
         return sorted(self._v2)
 
+    def frozen_identity(self, connection_id, route):
+        import hashlib, json
+        candidates = []
+        for (cid, identity), adapter in self._versions.items():
+            if cid != connection_id: continue
+            client = adapter.connection
+            profile_hash = hashlib.sha256(json.dumps(client.profile, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if (client.account_scope_hash == route.get("account_scope_hash")
+                    and (not route.get("protocol_profile_hash") or profile_hash == route["protocol_profile_hash"])):
+                candidates.append(identity)
+        if len(set(candidates)) != 1: raise KeyError("Legacy frozen connection cannot be resolved uniquely")
+        return candidates[0]
+
     def get_v2(self, connection_id: str):
+        from app.runtime.connection_scope import current_identity
+        identity = current_identity()
+        if identity:
+            if not self._connection_is_enabled(connection_id): raise KeyError("Connection is disabled")
+            try: return self._versions[(connection_id, identity)]
+            except KeyError: raise KeyError("Frozen connection version is not registered") from None
         if not self._connection_is_enabled(connection_id):
             raise KeyError(
                 f"Connection is disabled by Relay connection policy: {connection_id}"

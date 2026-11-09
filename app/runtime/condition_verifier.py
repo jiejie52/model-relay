@@ -49,6 +49,10 @@ class ConditionVerifier:
                 raise ExecutionConflictError("Request execution lease has expired")
         if snapshot.get("context_plan_hash") and snapshot["context_plan_hash"] != plan.context_plan.get("context_plan_hash"):
             raise ProviderRequestError("CACHE_CONTEXT_MISMATCH", "Frozen context identity differs from accepted Request")
+        route = (session.get("metadata") or {}).get("_relay_route") or {}
+        identity = route.get("connection_identity_hash")
+        if identity and snapshot.get("connection_identity_hash") != identity:
+            raise ProviderRequestError("CONNECTION_IDENTITY_MISMATCH", "Request connection differs from frozen Session")
         self._assert_frozen_route(session, snapshot, request_id=str(row["id"]))
 
     def _assert_frozen_route(

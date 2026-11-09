@@ -101,6 +101,10 @@ def build_candidate(
     content = _read_workbook(workbook)
     declarations = parse_v2_declarations(content)
     base = ModelControlPlane._builtin(settings)
+    extension = (supply_registry or {}).get("control_plane")
+    if extension:
+        from app.control_plane.governance.declarations import merge_entities
+        base = merge_entities(base, extension, settings)
     if not isinstance(deployment_map, dict) or not deployment_map:
         raise DeclarationError("an operator-managed environment -> deployment map is required")
     deployment_map = {str(k).strip(): str(v).strip() for k, v in deployment_map.items()}
@@ -122,6 +126,7 @@ def build_candidate(
     groups: dict[tuple[str, str, str], dict[str, str]] = {}
     offerings = []
     overridden_contracts = []
+    overridden_policies = []
     seen_physical_supplies: dict[tuple[str, str, str], str] = {}
     for row in declarations["routes"]:
         model = row["对外模型名"]
@@ -147,13 +152,6 @@ def build_candidate(
         cache = cache_rows.get((model, channel))
         if cache is None:
             raise DeclarationError(f"model {model} channel {channel}: cache declaration required")
-        if cache["启用意向"] == "启用":
-            # 4.3.2 cannot honor workbook-driven cache defaults/force policy.
-            raise DeclarationError(
-                f"model {model} channel {channel}: cannot publish an enabled V2 cache policy "
-                "until per-session cache defaults/force authorization are implemented"
-            )
-
         registered = registry.get((model, environment, channel))
         if not registered:
             raise DeclarationError(f"model {model} channel {channel}: no backend-registered supply")
@@ -202,6 +200,10 @@ def build_candidate(
             contract_limit = output_rule.get("max")
             if contract_limit is not None and target_output > contract_limit:
                 raise DeclarationError(f"model {model} channel {channel}: contract output token limit too small")
+        cache_enabled = cache["启用意向"] == "启用"
+        if cache_enabled:
+            from app.control_plane.governance.declarations import validate_supply
+            validate_supply(base, original, registered.get("capability_certification"))
         # When the V2 row disables cache, narrow the frozen capability contract
         # to an empty cache contract. This prevents an existing legacy 'auto'
         # request from secretly enabling provider cache on the selected supply.
@@ -212,7 +214,38 @@ def build_candidate(
             cache={"version": "relay-cache-contract/1", "supported_mechanisms": [], "verification_status": "disabled"},
             metadata={**contract.metadata, "managed_v2_cache_disabled": True},
         )
-        overridden_contracts.append(disabled_contract.canonical())
+        target_contract = contract
+        target_policy = base.cache_policy(original.cache_policy_id)
+        if cache_enabled:
+            mechanism = _MECHANISMS.get(cache["缓存机制"])
+            if mechanism not in contract.cache.get("supported_mechanisms", []):
+                raise DeclarationError("Workbook cache mechanism is outside certified supply")
+            cache_value = dict(contract.cache)
+            cache_value["supported_mechanisms"] = [mechanism]
+            configs = {k: dict(v) for k, v in cache_value.get("mechanism_profiles", {}).items()}
+            cfg = configs.setdefault(mechanism, {})
+            floor = cache["计划门槛 Token"]
+            if floor is not None:
+                if floor < int(cfg.get("minimum_cacheable_tokens") or 0): raise DeclarationError("Workbook weakens certified cache threshold")
+                cfg["minimum_cacheable_tokens"] = floor
+            ttl_minutes = cache["资源有效期 分钟"]
+            if ttl_minutes is not None:
+                ttl = ttl_minutes * 60
+                if ttl > int(cfg.get("ttl_seconds") or 3600): raise DeclarationError("Workbook TTL exceeds certified contract")
+                cfg["ttl_seconds"] = ttl
+            cache_value["mechanism_profiles"] = configs
+            target_contract = replace(contract, contract_id=f"v2-cache:{deployment}:{model}:{channel}", cache=cache_value)
+            failure = "uncached_same_context" if cache["自动准备失败时"] == "原文无缓存继续" else "fail"
+            if failure == "uncached_same_context" and target_policy.auto_prepare_failure != failure:
+                raise DeclarationError("Workbook fallback exceeds certified cache policy")
+            force = cache["可选强制"] == "是"
+            if force and target_policy.metadata.get("allow_force") is False: raise DeclarationError("Workbook force is not authorized")
+            target_policy = replace(target_policy, policy_id=f"v2-cache-policy:{deployment}:{model}:{channel}",
+                mechanism_preference=(mechanism,), auto_prepare_failure=failure,
+                metadata={**target_policy.metadata, "default_mode": {"关闭":"off","自动":"auto","强制":"on"}[cache["默认策略"]],
+                    "allow_force": force})
+            overridden_policies.append(target_policy.canonical())
+        overridden_contracts.append((target_contract if cache_enabled else disabled_contract).canonical())
         metadata = dict(original.metadata)
         metadata.update({
             "managed_v2": True,
@@ -228,7 +261,8 @@ def build_candidate(
             original,
             offering_id=f"v2:{deployment}:{model}:{channel}",
             priority=10_000 - row["顺位"],
-            capability_contract_id=disabled_contract_id,
+            capability_contract_id=(target_contract.contract_id if cache_enabled else disabled_contract_id),
+            cache_policy_id=target_policy.policy_id if cache_enabled else original.cache_policy_id,
             metadata=metadata,
         )
         if managed_offering.priority <= 0:
@@ -243,7 +277,7 @@ def build_candidate(
             "source": "v2-workbook",
             "workbook_sha256": sha256(content).hexdigest(),
             "declarations_sha256": digest(declarations),
-            "base_control_plane_hash": base.control_plane_hash,
+            "base_control_plane_hash": ModelControlPlane._builtin(settings).control_plane_hash,
             "managed_model_groups": [groups[key] for key in sorted(groups)],
             "deployment_map_sha256": digest(deployment_map),
             "approved_supply_evidence_refs": sorted(
@@ -253,6 +287,9 @@ def build_candidate(
                 {item["metadata"]["budget_authorization_ref"] for item in offerings}
             ),
         },
+        "connections": [x.canonical() for x in base.connections.values()] if extension else [],
+        "protocol_profiles": [x.canonical() for x in base.protocol_profiles.values()] if extension else [],
+        "cache_policies": ([x.canonical() for x in base.cache_policies.values()] if extension else []) + overridden_policies,
         "capability_contracts": overridden_contracts,
         "offerings": offerings,
     }
@@ -267,7 +304,7 @@ def approve_candidate(candidate: Mapping[str, Any], approval: Mapping[str, Any])
     """
     if not isinstance(candidate, dict) or candidate.get("status") != "review":
         raise DeclarationError("only review candidates may be approved")
-    if candidate.get("release_metadata", {}).get("source") != "v2-workbook":
+    if candidate.get("release_metadata", {}).get("source") not in {"v2-workbook", "supply-declarations"}:
         raise DeclarationError("candidate is not a V2 workbook compilation")
     if not isinstance(approval, dict) or approval.get("candidate_sha256") != digest(candidate):
         raise DeclarationError("approval is not bound to these exact candidate bytes/content")

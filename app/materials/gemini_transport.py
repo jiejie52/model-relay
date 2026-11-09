@@ -97,6 +97,7 @@ def decide_gemini_request_transport(
     material_sizes: Iterable[int],
     threshold_bytes: int,
     threshold_inclusive: bool = False,
+    supported_material_transports=None,
 ) -> GeminiTransportDecision:
     """Freeze the authoritative Gemini Request aggregate strategy.
 
@@ -110,12 +111,19 @@ def decide_gemini_request_transport(
     """
 
     threshold = int(threshold_bytes)
-    if threshold <= 0:
+    if threshold < 0 or (threshold == 0 and supported_material_transports is None):
         raise GeminiTransportPolicyError("invalid Gemini transport size configuration")
     sizes = [int(x) for x in material_sizes]
     if any(x < 0 for x in sizes):
         raise GeminiTransportPolicyError("material size cannot be negative")
     total = sum(sizes)
+    if supported_material_transports is not None:
+        modes = set(supported_material_transports)
+        if "external_signed_url" in modes and total <= threshold:
+            mode = "inline_cache_no_files"
+        elif "provider_files_api" in modes: mode = "hybrid_inline_cache_files"
+        else: raise GeminiTransportPolicyError("No authorized material transport for this aggregate")
+        return GeminiTransportDecision(mode, total, threshold, "frozen_supply_contract")
     return GeminiTransportDecision(
         mode=("inline_cache_no_files" if (total <= threshold if threshold_inclusive else total < threshold) else "hybrid_inline_cache_files"),
         total_bytes=total,

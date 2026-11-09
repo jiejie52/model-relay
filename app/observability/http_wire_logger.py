@@ -49,11 +49,11 @@ def wire_phase() -> str | None:
 def _headers(headers: httpx.Headers, redact: bool) -> list[tuple[str, str]]:
     entries = []
     for name, value in headers.multi_items():
-        if redact and (
+        if (
             name in {"authorization", "proxy-authorization", "cookie", "set-cookie", "location"}
             or any(word in name for word in ("api-key", "apikey", "token", "secret", "upload-url"))
         ):
-            value = f"{value[:4]}…{value[-4:]}" if len(value) >= 16 else "[redacted]"
+            value = "[redacted]"
         entries.append((name, value))
     return entries
 

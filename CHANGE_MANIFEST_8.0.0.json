@@ -1,0 +1,344 @@
+{
+  "version": "8.0.0",
+  "baseline": "model-relay-7.1.0-source.zip",
+  "baseline_sha256": "e898343fb98259332086bac04cec2da1c6a4862b970848cfa09365170d4f9d3e",
+  "original_file_count": 166,
+  "deleted_files": [],
+  "hidden_files_unchanged": true,
+  "sql_unchanged": true,
+  "requirements_unchanged": true,
+  "validation_checks_passed": 49,
+  "files": [
+    {
+      "path": "README.md",
+      "change": "modified",
+      "old_sha256": "d6e0f0f03faace88b51d1be71236951e6732f37ccdc1924d0cf51540767cbd0f",
+      "new_sha256": "1dc6383f4a18857e4ce4e720e891e2e0d112054e7e771c0459a156b03ce95562"
+    },
+    {
+      "path": "RELEASE_NOTES_8.0.0.md",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "9057ab003f0e94ad47aa9980172f0b2e7fe8de8e9145f5aac9978d2bee458b2a"
+    },
+    {
+      "path": "UPGRADE_8.0.0.md",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "f942f4f3c7ab3705bd81e09088689d140bb91dc6c9352a0b6b2af27726369533"
+    },
+    {
+      "path": "VALIDATION_8.0.0.md",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "7826b319edb74e20fcfb41f714c8ce5080899ce87037aae17ca3ffb5154dd3f4"
+    },
+    {
+      "path": "app/api.py",
+      "change": "modified",
+      "old_sha256": "421f371330658a2757135e76ae1a4ef224ccd2bc990c904217647685e3ccbdb8",
+      "new_sha256": "cca5932f2b13f8f8b34e923daf524df5859383d2e10e9bc3baeb3040400c33fb"
+    },
+    {
+      "path": "app/compatibility/affinity_config.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "62caf1bc215990723c4136950673dd0b8e0f1a4489f8c51b8c17331a0b6ba34c"
+    },
+    {
+      "path": "app/compatibility/connection_config.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "c1cdaa94873b8255dbd5e6d284dc42c228ade805ab6f5a621d4e75846c059694"
+    },
+    {
+      "path": "app/compatibility/response_evidence.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "1918e6c0a22b7b9b4fd978d63a991a4f857ec0b55fac341668d3cda4e943c9cb"
+    },
+    {
+      "path": "app/compatibility/supply_seed.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "410e23270b74359126c4cc09abbb3a7cdf0cbd0aaa97b31acfdd260f2b84e48a"
+    },
+    {
+      "path": "app/config.py",
+      "change": "modified",
+      "old_sha256": "dbf112fbc890b6c1690245b5dd76bc7db24b35cf7c94b5cb9229a8931d2c426f",
+      "new_sha256": "1228bc7f8c594e4d93c2c5e824113521241dab1894cd8a8583220fff586bd5cf"
+    },
+    {
+      "path": "app/control_plane/connections.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "4af5da640d3431e67a8998e873d8f1c7019295b533b5f572e24b7aae45afebb8"
+    },
+    {
+      "path": "app/control_plane/definitions.py",
+      "change": "modified",
+      "old_sha256": "209263f0227f49aee7b8663b90d0f9c5dd78f535e98892f1a952ce95850beec6",
+      "new_sha256": "ea92f6638468c4a8787eb6e606561da227e0f98196f24f63289cf22bb3cba109"
+    },
+    {
+      "path": "app/control_plane/execution_authorization.py",
+      "change": "modified",
+      "old_sha256": "c090b704c43210c8e59e3103b543d2ad3840766eb4fffd1736089b88b7701127",
+      "new_sha256": "605a1b877c91d6bb280db830d5795ff28ded70da28ff2529d97960f554bb4e7c"
+    },
+    {
+      "path": "app/control_plane/governance/cli.py",
+      "change": "modified",
+      "old_sha256": "16ef764c977b76f31ae797b6285d79304350300f80414c3d3ee71e22bc131fbb",
+      "new_sha256": "498867254cf854cd37c10c90a4b7d4427edbc851481f792b300d91e5fa9632dd"
+    },
+    {
+      "path": "app/control_plane/governance/declarations.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "e9c4df431dd3b4f77dec5d4acf7e0ec9569c153655a56c445569486f580d49d1"
+    },
+    {
+      "path": "app/control_plane/governance/releases.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "3668efbc2a22b5bd15eb6d904860a5d4fb14f60fcfc09460ddcd6d9d2c6f1b13"
+    },
+    {
+      "path": "app/control_plane/governance/snapshot_compiler.py",
+      "change": "modified",
+      "old_sha256": "8763f07da3df08dfc8b77307162eb2cd9a4a7b98c0ceda2fb0fd4b0da58f240e",
+      "new_sha256": "b1f693312da3730a998119aeadb130e0c2ccb2447caf39e9eb4927c3a003e855"
+    },
+    {
+      "path": "app/control_plane/resource_registry.py",
+      "change": "modified",
+      "old_sha256": "e224b356f8020c92bbd20529f8b53ad30367a40253f1db03e64f1370266f0f8f",
+      "new_sha256": "25bf4e17605a54375c485d388311a406987fd469b59f87ab9a7618bf969999a8"
+    },
+    {
+      "path": "app/control_plane/snapshot.py",
+      "change": "modified",
+      "old_sha256": "8c5ba22d302afd7815d4e08bf2831028f91de82dde80f504cdc0f687666a4dd5",
+      "new_sha256": "7dd9d274abb27273e1f3ace471fee5f4e6a5ca1ea5162c480f47d382ac6182cd"
+    },
+    {
+      "path": "app/control_plane/supply_group.py",
+      "change": "modified",
+      "old_sha256": "410e23270b74359126c4cc09abbb3a7cdf0cbd0aaa97b31acfdd260f2b84e48a",
+      "new_sha256": "f6c86c92bba79397cd3422422215dd3f83b832ddbddb9e83595acda1c5b025b1"
+    },
+    {
+      "path": "app/execution_plane/plan_loader.py",
+      "change": "modified",
+      "old_sha256": "5853e07ddf696d990ad1d52e44e4b4194e35b9d0554d745ea7ff937249881c77",
+      "new_sha256": "945070a1b365bc2fcfc050bc80d789978709e27ced3e96029779202b3a5c1520"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "change": "modified",
+      "old_sha256": "9dfb64e1ca08fe15953a33f0cd3d242fd5f92d389ca6d01938947386b1979c6c",
+      "new_sha256": "2d62d79b56022bad15134177cadeba561485a9320ff6f908bfa24b67f8b2a9d6"
+    },
+    {
+      "path": "app/execution_plane/result_committer.py",
+      "change": "modified",
+      "old_sha256": "66c6ead760b6d3eb02526e9ebdfa037c6428bdb12cdc9670cee61576ab3bd36c",
+      "new_sha256": "b391d8845a3672dfb54345d53a8cef141512d0e18d9cd0a1cc6b1830e51074d1"
+    },
+    {
+      "path": "app/execution_plane/result_contract.py",
+      "change": "modified",
+      "old_sha256": "3c5e8af0f96e199e0ed2a6ffbe9dc39dea805c2484bbe088dae1c1e055cfa3f4",
+      "new_sha256": "915d572b3ae5563aa9d1a6bffc74ea74fbb222f6c1d8186f3c58375b984455e8"
+    },
+    {
+      "path": "app/execution_plane/route_resolver.py",
+      "change": "modified",
+      "old_sha256": "dc91c9e0fa8601e0d7720b83fdf39859c3118ad9240386871eea2875b3c10ab9",
+      "new_sha256": "95e7f42a452c66dbf8b3f7d8ed5eb3db1c11c6d41ab9ea756a84abfe04731130"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "change": "modified",
+      "old_sha256": "fafebc867fcd93e9a4ec12966cd5c5ec07c026f6e77c5c3b5caf90b1e27ae121",
+      "new_sha256": "9881fc7ab0fcb3b32660c067fd55ad19bfbe99bc7678c46d9b8d8ffd1979afc2"
+    },
+    {
+      "path": "app/execution_plane/session_manager.py",
+      "change": "modified",
+      "old_sha256": "f11d1c4532b264ed6bbfe39341ed40af7e42f9b10303252bab99a590e64dea7e",
+      "new_sha256": "56b94ace719f442e2663b5123e5b07ea8615aab240207adda149176b82c327b1"
+    },
+    {
+      "path": "app/materials/gemini_transport.py",
+      "change": "modified",
+      "old_sha256": "866d60c87f4cf64b5a5bee62f21e1396bf27afbdd8844f33475d85533eea7150",
+      "new_sha256": "b1c4f1270602cb7199cb287eda82823d7604a5b6f853ac803d1ef02cc7c52532"
+    },
+    {
+      "path": "app/materials/provider_files/gemini_aihubmix.py",
+      "change": "modified",
+      "old_sha256": "9b93dcd0adab859bb40858ef5989a95f1052217153f8baf9b9ac16079e40f343",
+      "new_sha256": "6e7f687b7ea434b3b10e2cdc1683c412e5f6aafee1c97a62e688fd9a2ac11661"
+    },
+    {
+      "path": "app/materials/provider_files/gemini_files.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "f4ee7f0a19c4f74652addcec53f49b84284f86b53c51162ee86444f4d1f6a900"
+    },
+    {
+      "path": "app/materials/provider_files/kimi_official.py",
+      "change": "modified",
+      "old_sha256": "1a6d4778d44ab68e2befd409ab7978a94090cda9444d37965d0c0da1be55dc54",
+      "new_sha256": "0f647b07cf73377ad2246cce67247a13ea65e2aefe6f7ee77663c54c2c192878"
+    },
+    {
+      "path": "app/materials/provider_files/registry.py",
+      "change": "modified",
+      "old_sha256": "d2c7d8b210b48998ee8ed14bde21743d30e17be9c33eea32520454500308bc7b",
+      "new_sha256": "e2ac89fcb29cb194dd9ff74c843653d42fa89aa677f5fb3c214d5ebb57d73242"
+    },
+    {
+      "path": "app/observability/http_wire_logger.py",
+      "change": "modified",
+      "old_sha256": "8c8e75d4be0343f7f8c80b6d13f29dd78d67d9ab173a9964bd6029c52f4336eb",
+      "new_sha256": "b1e28d5d23cad290e36a3764ea845824cee40b956dd8d92766d428f9c3714850"
+    },
+    {
+      "path": "app/protocol_adapters/factory.py",
+      "change": "modified",
+      "old_sha256": "2b2e8b23d916618335085da46f9db4a7932baf308444bff8ad44af9da324e708",
+      "new_sha256": "63d8c44ab3dee1a8aede82c9c6d5393a44bee4a02d3ef53ee3f0ab78783c8667"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/chat_completions.py",
+      "change": "modified",
+      "old_sha256": "71dcea8e5124a1e00b5000dfcd8efead88828498d61055a4271ebbc17f114e91",
+      "new_sha256": "33c8afb4eecfb6cef2ad7feb37788a82ef3768c943f29248fe52b1ee1b84f061"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/claude_messages.py",
+      "change": "modified",
+      "old_sha256": "e21e0f3a8601e1b62aef06555bc45197118c46842e89cd1757ac50bf4e992614",
+      "new_sha256": "fa101fa9599e16fe2e487e4bb472104106bf414c4a9e493de05a46653e5a62f6"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_genai_sdk.py",
+      "change": "modified",
+      "old_sha256": "3d336e4fc338d44db797ae9ef3fbdbaafac4125d30b288ec85d3087cf93baae6",
+      "new_sha256": "a42403510eb503f84564d70dd5e9c39232b8fe939b25745180ec0875c9daf2be"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_native.py",
+      "change": "modified",
+      "old_sha256": "a410719b0a53a14019ee03f6d512cd0712c5b71ec646656d8877283db0804a79",
+      "new_sha256": "ed4f1d2fcda28b3360448de212ec93f8fa6fed0c52f4e9c3ddb10ffb7dcd4602"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/moonshot_chat.py",
+      "change": "modified",
+      "old_sha256": "3e68a9726e255282ae0cc2e4473bf6f1bcf3e7db21da52d7c47775f8573731a4",
+      "new_sha256": "45bc2bec644ad74cee0c7538da6a2f732c6e71f86cdd37d944b04354116d3b11"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/responses_v2.py",
+      "change": "modified",
+      "old_sha256": "a6f27e76c6624c347e01857058aa0daf5fbc4b86062a2fef83783ba31da58967",
+      "new_sha256": "a788a682fb0c090c55f361f5a60eec4a8f5483d69e4ffe3345dfd2251d8e2951"
+    },
+    {
+      "path": "app/protocol_adapters/registry.py",
+      "change": "modified",
+      "old_sha256": "0f099b577571bd7b57c2b6e501294306879418cdaf8141ca2b1db2aeb6a26b4a",
+      "new_sha256": "41bfc7ce71ca02444afc438d4eec6613521339c503ad6d7f8e9fe525b8bf5372"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_physical.py",
+      "change": "modified",
+      "old_sha256": "cf90183bc44159652cebcc0733498e3193ec334e2c41c3e2dece6837e2f67a10",
+      "new_sha256": "a803460efc677d4808d6d0a6ad7264b502f8902abbcc9d598cf4f4669221a3e5"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_wire.py",
+      "change": "modified",
+      "old_sha256": "ccfd2a7e7556e0b5b7efaa49d522a3ec5c5ccc04a9633e1ba00ed403454ab27f",
+      "new_sha256": "fb7684962f1f12f47052ad78d730b210648a4d26e5446c1f1828e196df9d351b"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/http_wire.py",
+      "change": "modified",
+      "old_sha256": "c343efa1f31fe9415d9d6697dca00fa35e810455c7ae5168afcb83d66619ef3c",
+      "new_sha256": "576189b510c6b3f7dd1de591e02ec635ac8b18b060afef9b6f88d409e3322ec2"
+    },
+    {
+      "path": "app/runtime/affinity.py",
+      "change": "modified",
+      "old_sha256": "5c4bb13b7114870656a58fe6be5ba87e6a6964d18ed3fee18c92f90f2e5c45e9",
+      "new_sha256": "7b8303a435d8110e853e547482bb1e3586ea932f7344f9c129497d4052c801d1"
+    },
+    {
+      "path": "app/runtime/condition_verifier.py",
+      "change": "modified",
+      "old_sha256": "318c4eaf37a62b35fbfed1787aafd9c23c68c4926a68cdf252e6c0144620a2c2",
+      "new_sha256": "c5b6aa33fc6e564ccfa10d1d22be44b672da2638451728b2bbc92d1c9e4a6eb7"
+    },
+    {
+      "path": "app/runtime/connection_scope.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "ba0fc7cc8beb4b5497fd67ac09c43a1e9f2fcf624334b92bf7ffd5614db1afbd"
+    },
+    {
+      "path": "app/runtime/dispatch_sealer.py",
+      "change": "modified",
+      "old_sha256": "2306653816c4b76a989c261ffe3c2d59e764740a27deec46c38417b17c13d8c5",
+      "new_sha256": "c6ec2fe5fc90d920c4e24ddcd060b0a9209bf5de84f74decab6e1d7d3c38e8c3"
+    },
+    {
+      "path": "app/runtime/engine.py",
+      "change": "modified",
+      "old_sha256": "7775585c1a1001ea988b942663b12be45993082178251633aac7bb1573070bc3",
+      "new_sha256": "735c3f61cd8b51095ad4e259862c8c7df710a81e997f46e8a8845bf9da3c933d"
+    },
+    {
+      "path": "app/runtime/material_binder.py",
+      "change": "modified",
+      "old_sha256": "65cc51c2309baed4410ca335539ab6c022e13b67355feadd8dd59d8d8c4e88a9",
+      "new_sha256": "302aa65c25810fa810bfdf84f787117d7dcdf6d55247c9d03daae4434ef1e26b"
+    },
+    {
+      "path": "app/runtime/physical_context.py",
+      "change": "modified",
+      "old_sha256": "7f6e642cd5f40cc205489401bdcd20cdac1a66324201e224639955e5ab4e0c92",
+      "new_sha256": "67da01c293fdf5be66d5444f3042a3e3a9f38688b840581b67c8bd56f5b81fa7"
+    },
+    {
+      "path": "app/runtime/resource_adapters/gemini_aihubmix.py",
+      "change": "modified",
+      "old_sha256": "59139ad5094d186a57ffd9613ada11786ececd5a9dd83bea544c3f2421b478c9",
+      "new_sha256": "e0ecc9782a50a4fb99c77c2948a67dda628eec2216fe3e1b9e3a2c6ec9e46be6"
+    },
+    {
+      "path": "app/runtime/resource_adapters/gemini_stateful_cache.py",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "ee6673cc4ac1b81737c43de745698e1bd563ac0dd2a792a9c5205aadfe54e85d"
+    },
+    {
+      "path": "app/runtime/transport_guard.py",
+      "change": "modified",
+      "old_sha256": "d72944ff61e9b82f787892433b1a0598f530aed9aa752522d1818c280919ba3d",
+      "new_sha256": "ef96fe9376fbde38c0296235dbb742edd30e97c3c055ae0144e4612d22b88cb9"
+    },
+    {
+      "path": "config/google_official.declaration.json",
+      "change": "added",
+      "old_sha256": null,
+      "new_sha256": "fdadd4a3f3429afc0cf2ace17584d46ac6ab8857d7cf3463f89ff21356f33f33"
+    }
+  ],
+  "manifest_note": "This manifest excludes its own digest."
+}

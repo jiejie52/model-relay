@@ -140,6 +140,12 @@ class RequestAcceptor:
                     },
                 )
 
+        policy = ((session.get("metadata") or {}).get("_relay_route") or {}).get("cache_policy") or {}
+        governed = policy.get("metadata") or {}
+        if cache_contract_session and "requested_cache_mode" not in body.model_fields_set and governed.get("default_mode"):
+            body = body.model_copy(update={"requested_cache_mode": governed["default_mode"]})
+        if cache_contract_session and body.requested_cache_mode == "on" and governed.get("allow_force") is False:
+            raise ExecutionRequestError(422, {"code": "CACHE_FORCE_NOT_AUTHORIZED"})
         requested_cache_mode = body.requested_cache_mode if cache_contract_session else None
         public_intent = {
             "input": body.input,
@@ -266,6 +272,8 @@ class RequestAcceptor:
                 control_plane_hash=(str(frozen_route.get("control_plane_hash")) if frozen_route.get("control_plane_hash") else None),
                 capability_requirements=(dict(frozen_route.get("capability_requirements")) if isinstance(frozen_route.get("capability_requirements"), dict) else {}),
                 observed_model_policy=str(frozen_route.get("observed_model_policy") or "audit"),
+                connection_identity_hash=frozen_route.get("connection_identity_hash"),
+                upstream_model=frozen_route.get("upstream_model"),
                 quota=(dict(frozen_route.get("quota")) if isinstance(frozen_route.get("quota"), dict) else {}),
             )
             await _validate_materials_for_route(
@@ -407,6 +415,8 @@ class RequestAcceptor:
             "material_total_bytes": material_total_bytes,
             "provider": provider,
             "connection_id": connection_id,
+            "connection_identity_hash": frozen_route.get("connection_identity_hash"),
+            "upstream_model": frozen_route.get("upstream_model"),
             "model": model,
             "offering_id": frozen_route.get("offering_id") if frozen_route else None,
             "channel_id": frozen_route.get("channel_id") if frozen_route else None,

@@ -88,6 +88,7 @@ class PhysicalContextProjector:
                     session_id=state.session_id,
                     enable_projection_reuse=bool((state.context_plan or {}).get("material_reuse", {}).get("projection_reuse_enabled")),
                     cache_budget_bytes=(state.upgrade.get("material_budget") if state.wire.get("normalize") else None),
+                    explicit_cache_material_mode=(state.snapshot.get("cache_contract") or {}).get("explicit_cache_material_mode", "inline_bytes_only"),
                 )
             if state.cache_material_projection is not None:
                 state.material_reuse_observation = state.cache_material_projection.pop("_material_reuse_observation", None)

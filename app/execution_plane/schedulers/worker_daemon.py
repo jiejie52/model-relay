@@ -19,18 +19,14 @@ from app.control_plane.snapshot import get_active_config_snapshot, verify_node_s
 from app.runtime.engine import RelayRuntimeEngine
 from app.runtime.cache_materializer import CacheMaterializer
 from app.control_plane.resource_registry import CacheResourceRegistry
-from app.runtime.resource_adapters.gemini_aihubmix import GeminiAIHubMixCacheResourceAdapter
 from app.core.raw_error import RawErrorRecorder
 from app.execution_plane.schedulers.queue_scheduler import QueueScheduler
 from app.materials.resolver import MaterialResolver
 from app.materials.fallback_storage import FallbackObjectStorage
 from app.runtime.material_binder import MaterialBinder
-from app.materials.provider_files import ProviderFileRegistry, GeminiAIHubMixFileAdapter, KimiOfficialFileAdapter
+from app.materials.provider_files import ProviderFileRegistry
 from app.persistence.object_storage import StorageRegistry
 from app.persistence.supabase_storage import SupabaseObjectStorage
-from app.protocol_adapters.profiles.moonshot_chat import MoonshotChatAdapter
-from app.protocol_adapters.profiles.gemini_native import GeminiNativeAdapter
-from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIClient
 from app.protocol_adapters.registry import ProviderRegistry
 from app.protocol_adapters.factory import register_protocol_adapters
 from app.control_plane.catalog import RouteCatalog
@@ -41,7 +37,7 @@ from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "7.1.0"
+WORKER_VERSION = "8.1.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -55,49 +51,14 @@ class RelayWorker:
         self.storage = StorageRegistry(SupabaseObjectStorage(self.backend, settings))
         self.materials = MaterialResolver(self.repo, self.storage, settings)
         self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
-        self.gemini_sdk = (
-            GeminiAIHubMixGenAIClient(settings)
-            if settings.connection_is_active(settings.aihubmix_gemini_connection_id)
-            else None
-        )
         self.file_adapters = ProviderFileRegistry()
-        if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
-            self.file_adapters.register(
-                settings.aihubmix_gemini_connection_id,
-                GeminiAIHubMixFileAdapter(settings, sdk=self.gemini_sdk),
-            )
-        if settings.connection_is_active(settings.moonshot_connection_id):
-            self.file_adapters.register(
-                settings.moonshot_connection_id,
-                KimiOfficialFileAdapter(settings, self.repo, self.storage),
-            )
         self.bindings = MaterialBinder(self.repo, self.fallback_storage, self.file_adapters)
         self.control_plane = ModelControlPlane.from_settings(settings)
         self.providers = ProviderRegistry(settings)
-        self.providers.validate_enabled_connections()
-        register_protocol_adapters(
-            settings=settings,
-            control_plane=self.control_plane,
-            providers=self.providers,
-            materials=self.materials,
-            repo=self.repo,
-        )
-        if settings.connection_is_active(settings.aihubmix_gemini_connection_id):
-            self.providers.register_v2(
-                settings.aihubmix_gemini_connection_id,
-                GeminiNativeAdapter(settings),
-                provider="gemini",
-                protocol="gemini_native",
-                channel_id="aihubmix",
-            )
-        if settings.connection_is_active(settings.moonshot_connection_id):
-            self.providers.register_v2(
-                settings.moonshot_connection_id,
-                MoonshotChatAdapter(settings, self.materials, self.repo),
-                provider="kimi",
-                protocol="moonshot_chat",
-                channel_id="moonshot_official",
-            )
+        self.cache_resources = CacheResourceRegistry()
+        self.connection_assembly = register_protocol_adapters(settings=settings, control_plane=self.control_plane,
+            providers=self.providers, materials=self.materials, repo=self.repo, file_adapters=self.file_adapters,
+            cache_resources=self.cache_resources, storage=self.storage)
         self.route_catalog = RouteCatalog.from_settings(settings, control_plane=self.control_plane)
         self.config_snapshot = get_active_config_snapshot(settings, control_plane=self.control_plane, catalog=self.route_catalog)
         verify_node_snapshot_compatibility(self.config_snapshot)
@@ -108,12 +69,6 @@ class RelayWorker:
             provider_files=self.file_adapters,
         )
         self.route_resolver.validate_catalog()
-        self.cache_resources = CacheResourceRegistry()
-        if settings.aihubmix_api_key is not None and settings.aihubmix_gemini_base_url:
-            self.cache_resources.register(
-                settings.aihubmix_gemini_connection_id,
-                GeminiAIHubMixCacheResourceAdapter(settings, sdk=self.gemini_sdk),
-            )
         self.cache_orchestrator = CacheMaterializer(
             self.repo, resource_registry=self.cache_resources
         )
@@ -255,8 +210,7 @@ class RelayWorker:
     async def close(self) -> None:
         if self._legacy is not None:
             await self._legacy.close()
-        if self.gemini_sdk is not None:
-            await self.gemini_sdk.close()
+        await self.connection_assembly.close()
         await self.backend.close()
 
     async def run_forever(self) -> None:

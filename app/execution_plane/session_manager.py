@@ -108,6 +108,9 @@ class SessionManager:
             "threshold_bytes": int(settings.gemini_files_threshold_bytes),
             "threshold_inclusive": True,
         }
+        material_transport = (route.capability_contract or {}).get("metadata", {}).get("material_transport")
+        if material_transport:
+            session_metadata["_relay_material_transport"] = {"version": "supply-material-transport/1", **material_transport}
         context = context_settings(body.context_policy)
         session_metadata["_relay_cache_v66"] = context
         if route_group:

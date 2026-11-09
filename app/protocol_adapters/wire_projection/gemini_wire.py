@@ -84,7 +84,7 @@ def project_material_part(binding: dict[str, Any], *, material_id: str | None = 
         )
     return {
         "fileData": {
-            "mimeType": project_gemini_input_content_type(binding.get("content_type")),
+            "mimeType": project_gemini_input_content_type(binding.get("projected_content_type") or binding.get("content_type")),
             "fileUri": str(file_uri),
         }
     }
