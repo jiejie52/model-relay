@@ -340,7 +340,7 @@ class ModelControlPlane:
         if metadata.get("source") == "supply-declarations":
             if not filename or not all(metadata.get(k) for k in ("candidate_sha256", "approved_by", "approval_ref", "declarations_sha256")):
                 raise ValueError("Supply declarations require an approved pinned file")
-            if parsed.get("mode", "merge") != "replace" and metadata.get("base_control_plane_hash") != base.control_plane_hash:
+            if metadata.get("base_control_plane_hash") != base.control_plane_hash:
                 raise ValueError("Supply declaration base does not match this node")
         if metadata.get("source") == "v2-workbook":
             if not filename:
@@ -656,8 +656,6 @@ class ModelControlPlane:
         return scope_identity(spec, settings)
 
     def _validate(self) -> None:
-        from app.control_plane.governance.route_policy import validate_published_rules
-        validate_published_rules(self)
         from app.control_plane.execution_authorization import execution_authorization, validate_response_evidence_headers
         for offering in self.offerings.values():
             if "execution_authorization" in offering.metadata:

@@ -14,7 +14,15 @@ def resolve_credential(spec, settings):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ref):
             raise ValueError("Credential references must be controlled environment names")
         value = getattr(settings, ref.lower(), None)
-        return value.get_secret_value() if hasattr(value, "get_secret_value") else os.getenv(ref)
+        if hasattr(value, 'get_secret_value'): return value.get_secret_value()
+        secret=os.getenv(ref)
+        if secret: return secret
+        from pathlib import Path
+        filename=getattr(settings,'credential_env_file',None)
+        if filename and Path(filename).is_file():
+            from dotenv import dotenv_values
+            return dotenv_values(filename).get(ref)
+        return None
     from app.compatibility.connection_config import legacy_credential
     return legacy_credential(spec, settings)
 

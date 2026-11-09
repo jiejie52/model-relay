@@ -37,7 +37,7 @@ from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "8.3.0"
+WORKER_VERSION = "8.4.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -45,26 +45,25 @@ logger = logging.getLogger("model-relay-worker")
 
 
 class RelayWorker:
-    def __init__(self) -> None:
+    def __init__(self, *, configuration, backend) -> None:
         global settings
-        from app.control_plane.loading import load_runtime_configuration, describe_configuration
-        loaded = load_runtime_configuration(settings)
-        settings = loaded.settings
-        self.control_plane = loaded.control_plane
-        self.control_plane_release = loaded.diagnostics
-        log_info(logger, "control_plane_release_loaded", role="worker", **describe_configuration(loaded))
-        self.backend = SupabaseBackend(settings)
+        settings=settings.model_copy(update={'model_control_plane_file':None,'model_control_plane_file_sha256':None,
+            'model_control_plane_json':None,'model_control_plane_release_pointer':None,'retained_control_plane_files':'[]'})
+        self.backend = backend
+        self.configuration_report = configuration.report
+        log_info(logger,'workbook_configuration_loaded',role='worker',**configuration.report)
         self.repo = RelayV2Repository(self.backend, settings)
         self.storage = StorageRegistry(SupabaseObjectStorage(self.backend, settings))
         self.materials = MaterialResolver(self.repo, self.storage, settings)
         self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
         self.file_adapters = ProviderFileRegistry()
         self.bindings = MaterialBinder(self.repo, self.fallback_storage, self.file_adapters)
+        self.control_plane = configuration.plane
         self.providers = ProviderRegistry(settings)
         self.cache_resources = CacheResourceRegistry()
         self.connection_assembly = register_protocol_adapters(settings=settings, control_plane=self.control_plane,
             providers=self.providers, materials=self.materials, repo=self.repo, file_adapters=self.file_adapters,
-            cache_resources=self.cache_resources, storage=self.storage)
+            cache_resources=self.cache_resources, storage=self.storage,retained_control_planes=configuration.retained)
         self.route_catalog = RouteCatalog.from_settings(settings, control_plane=self.control_plane)
         self.config_snapshot = get_active_config_snapshot(settings, control_plane=self.control_plane, catalog=self.route_catalog)
         verify_node_snapshot_compatibility(self.config_snapshot)
@@ -97,6 +96,17 @@ class RelayWorker:
         self._quiescent = False
         self._busy = False
         self._control_server: uvicorn.Server | None = None
+
+    @classmethod
+    async def create(cls):
+        from app.control_plane.auto_workbook import prepare_configuration
+        backend=SupabaseBackend(settings)
+        try:
+            configuration=await prepare_configuration(settings,backend)
+            return cls(configuration=configuration,backend=backend)
+        except BaseException:
+            await backend.close()
+            raise
 
     @property
     def lifecycle_state(self) -> str:
@@ -154,10 +164,11 @@ class RelayWorker:
 
         @app.get("/health")
         async def health() -> dict[str, object]:
+            from app.control_plane.auto_workbook import public_configuration_status
             return {
                 "ok": True,
                 "service": "relay-worker",
-                "control_plane_release": self.control_plane_release,
+                "configuration": public_configuration_status(self.configuration_report),
                 "version": WORKER_VERSION,
                 "worker_id": self.worker_id,
                 "state": self.lifecycle_state,
@@ -168,6 +179,13 @@ class RelayWorker:
                 "control_plane_status": self.control_plane.status,
                 "control_plane_hash": self.control_plane.control_plane_hash,
             }
+
+        @app.get('/configuration')
+        async def configuration(authorization: str | None = Header(default=None,alias='Authorization')):
+            import secrets
+            if not secrets.compare_digest(authorization or '',f'Bearer {settings.relay_api_token.get_secret_value()}'):
+                raise HTTPException(status_code=401,detail='Unauthorized')
+            return self.configuration_report
 
         @app.post("/wake", status_code=status.HTTP_202_ACCEPTED)
         async def wake(
@@ -405,7 +423,7 @@ class RelayWorker:
 
 
 async def main() -> None:
-    worker = RelayWorker()
+    worker = await RelayWorker.create()
     loop = asyncio.get_running_loop()
     control_task: asyncio.Task[None] | None = None
 

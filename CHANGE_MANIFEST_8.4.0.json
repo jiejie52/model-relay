@@ -1,0 +1,301 @@
+{
+  "version": "8.4.0",
+  "baseline": {
+    "filename": "model-relay-8.1.0-source.zip",
+    "sha256": "aa8b98afc0c1d768e5f0ff08e3bee5d8fb3a5cd4269871972a7a8851e515f622",
+    "file_count": 184
+  },
+  "preservation": {
+    "deleted": [],
+    "unchanged_file_count": 171,
+    "unchanged_files": [
+      ".dockerignore",
+      ".gitattributes",
+      ".gitignore",
+      "CHANGE_MANIFEST_7.0.0.json",
+      "CHANGE_MANIFEST_7.1.0.json",
+      "CHANGE_MANIFEST_8.0.0.json",
+      "CHANGE_MANIFEST_8.1.0.json",
+      "Dockerfile",
+      "QUICKSTART.md",
+      "RELEASE_NOTES_6.2.0.md",
+      "RELEASE_NOTES_6.2.1.md",
+      "RELEASE_NOTES_6.3.0.md",
+      "RELEASE_NOTES_6.4.0.md",
+      "RELEASE_NOTES_6.4.1.md",
+      "RELEASE_NOTES_6.4.2.md",
+      "RELEASE_NOTES_6.5.0.md",
+      "RELEASE_NOTES_6.6.0.md",
+      "RELEASE_NOTES_6.7.0.md",
+      "RELEASE_NOTES_6.8.0.md",
+      "RELEASE_NOTES_7.0.0.md",
+      "RELEASE_NOTES_7.1.0.md",
+      "RELEASE_NOTES_8.0.0.md",
+      "RELEASE_NOTES_8.1.0.md",
+      "UPGRADE_8.0.0.md",
+      "VALIDATION_7.1.0.md",
+      "VALIDATION_8.0.0.md",
+      "VALIDATION_8.1.0.md",
+      "app/__init__.py",
+      "app/api_v2/__init__.py",
+      "app/api_v2/router.py",
+      "app/canonical_schema.py",
+      "app/compatibility/__init__.py",
+      "app/compatibility/affinity_config.py",
+      "app/compatibility/connection_config.py",
+      "app/compatibility/fusion_runtime.py",
+      "app/compatibility/legacy_worker.py",
+      "app/compatibility/relay_gateway.py",
+      "app/compatibility/response_evidence.py",
+      "app/compatibility/supply_seed.py",
+      "app/control_plane/__init__.py",
+      "app/control_plane/cache_contracts.py",
+      "app/control_plane/catalog.py",
+      "app/control_plane/definitions.py",
+      "app/control_plane/execution_authorization.py",
+      "app/control_plane/governance/__init__.py",
+      "app/control_plane/governance/declarations.py",
+      "app/control_plane/governance/releases.py",
+      "app/control_plane/governance/snapshot_compiler.py",
+      "app/control_plane/resource_registry.py",
+      "app/control_plane/snapshot.py",
+      "app/control_plane/supply_group.py",
+      "app/core/__init__.py",
+      "app/core/cache_fingerprint.py",
+      "app/core/context_codec.py",
+      "app/core/error_classification.py",
+      "app/core/idempotency.py",
+      "app/core/raw_error.py",
+      "app/execution_plane/__init__.py",
+      "app/execution_plane/acceptance_support.py",
+      "app/execution_plane/cache_contracts.py",
+      "app/execution_plane/cache_intent_planner.py",
+      "app/execution_plane/cache_intent_resolver.py",
+      "app/execution_plane/context_planner.py",
+      "app/execution_plane/contracts.py",
+      "app/execution_plane/plan_loader.py",
+      "app/execution_plane/request_acceptor.py",
+      "app/execution_plane/request_identity.py",
+      "app/execution_plane/result_committer.py",
+      "app/execution_plane/result_contract.py",
+      "app/execution_plane/schedulers/__init__.py",
+      "app/execution_plane/schedulers/common.py",
+      "app/execution_plane/schedulers/inline_scheduler.py",
+      "app/execution_plane/schedulers/queue_scheduler.py",
+      "app/execution_plane/semantic_resolver.py",
+      "app/execution_plane/services.py",
+      "app/execution_plane/session_manager.py",
+      "app/execution_plane/structured_output.py",
+      "app/execution_plane/supply_resolver.py",
+      "app/governance/cli.py",
+      "app/immutable.py",
+      "app/materials/__init__.py",
+      "app/materials/cache_selector.py",
+      "app/materials/classification.py",
+      "app/materials/document_projection.py",
+      "app/materials/fallback_storage.py",
+      "app/materials/gemini_cache_projection.py",
+      "app/materials/gemini_transport.py",
+      "app/materials/ingress.py",
+      "app/materials/projection_store.py",
+      "app/materials/provider_files/__init__.py",
+      "app/materials/provider_files/base.py",
+      "app/materials/provider_files/gemini_aihubmix.py",
+      "app/materials/provider_files/gemini_files.py",
+      "app/materials/provider_files/kimi_official.py",
+      "app/materials/provider_files/registry.py",
+      "app/materials/resolver.py",
+      "app/materials/safe_fetch.py",
+      "app/models.py",
+      "app/observability/__init__.py",
+      "app/observability/http_wire_logger.py",
+      "app/persistence/__init__.py",
+      "app/persistence/execution_artifacts.py",
+      "app/persistence/metadata_repository.py",
+      "app/persistence/object_storage.py",
+      "app/persistence/supabase_storage.py",
+      "app/protocol_adapters/__init__.py",
+      "app/protocol_adapters/base.py",
+      "app/protocol_adapters/cache_usage.py",
+      "app/protocol_adapters/error_observation.py",
+      "app/protocol_adapters/profiles/__init__.py",
+      "app/protocol_adapters/profiles/chat_completions.py",
+      "app/protocol_adapters/profiles/claude_messages.py",
+      "app/protocol_adapters/profiles/gemini_genai_sdk.py",
+      "app/protocol_adapters/profiles/gemini_native.py",
+      "app/protocol_adapters/profiles/moonshot_chat.py",
+      "app/protocol_adapters/profiles/openai_compatible.py",
+      "app/protocol_adapters/profiles/responses_v2.py",
+      "app/protocol_adapters/registry.py",
+      "app/protocol_adapters/usage_contracts.py",
+      "app/protocol_adapters/usage_normalizer.py",
+      "app/protocol_adapters/v2_base.py",
+      "app/protocol_adapters/wire_projection/__init__.py",
+      "app/protocol_adapters/wire_projection/gemini_physical.py",
+      "app/protocol_adapters/wire_projection/gemini_wire.py",
+      "app/protocol_adapters/wire_projection/http_wire.py",
+      "app/protocol_adapters/wire_projection/schema_projector.py",
+      "app/repository.py",
+      "app/runtime/__init__.py",
+      "app/runtime/affinity.py",
+      "app/runtime/breakpoints.py",
+      "app/runtime/cache_arbiter.py",
+      "app/runtime/cache_contracts.py",
+      "app/runtime/cache_economics.py",
+      "app/runtime/cache_materializer.py",
+      "app/runtime/condition_verifier.py",
+      "app/runtime/connection_scope.py",
+      "app/runtime/contracts.py",
+      "app/runtime/controlled_invoker.py",
+      "app/runtime/dispatch_sealer.py",
+      "app/runtime/engine.py",
+      "app/runtime/execution_guard.py",
+      "app/runtime/material_binder.py",
+      "app/runtime/physical_context.py",
+      "app/runtime/prefix.py",
+      "app/runtime/resource_adapters/__init__.py",
+      "app/runtime/resource_adapters/gemini_aihubmix.py",
+      "app/runtime/resource_adapters/gemini_stateful_cache.py",
+      "app/runtime/stateful.py",
+      "app/runtime/transport_guard.py",
+      "app/runtime/watchdog.py",
+      "app/security.py",
+      "app/shared_contracts.py",
+      "app/storage_paths.py",
+      "app/utils.py",
+      "app/v2_models.py",
+      "app/v2_repository.py",
+      "app/worker.py",
+      "config/google_official.declaration.json",
+      "config/runtime/README.md",
+      "requirements.txt",
+      "sql/001_relay_schema.sql",
+      "sql/002_fusion_runtime.sql",
+      "sql/003_relay_v2_session_request_material.sql",
+      "sql/004_provider_native_file_ingress.sql",
+      "sql/005_relay_cache_control.sql",
+      "sql/006_gemini_stateful_cache.sql",
+      "sql/007_multi_cache_bindings.sql",
+      "sql/008_cache_v65_upgrade.sql",
+      "sql/009_cache_v66_patch.sql",
+      "sql/010_execution_plane_commit_recovery.sql",
+      "sql/011_execution_authority_closure.sql"
+    ]
+  },
+  "modified_files": [
+    {
+      "path": ".env.example",
+      "baseline_sha256": "6e59e5ed057a3ab9a8fa3f5f3930e3b0f21a5f315a08450ead15ca786b6ced49",
+      "sha256": "b31d97d93d9df8b35f613dc92c2db325116802215745a083ad83816a9a85dafa"
+    },
+    {
+      "path": "README.md",
+      "baseline_sha256": "44334457f12027dd06244fb19ecb7903173575817ed8d775ed6ee6e803b0b003",
+      "sha256": "1277965b7c3f966fbf773836eded9bf85a11fc69badbb8e40c19a0f448da0ac5"
+    },
+    {
+      "path": "app/api.py",
+      "baseline_sha256": "296b854e5268aa523f9657e534244f6ad3e6e6bf8ff535fce815cdf176b28ca2",
+      "sha256": "1690c2a16a57980489cdeb037d93303cb86062fa07eef94ac27892447b56a7a5"
+    },
+    {
+      "path": "app/config.py",
+      "baseline_sha256": "1228bc7f8c594e4d93c2c5e824113521241dab1894cd8a8583220fff586bd5cf",
+      "sha256": "95101e3686e767d7ebf803a396a50477a9a590dcd120a75b1d9cd5043ea53055"
+    },
+    {
+      "path": "app/control_plane/connections.py",
+      "baseline_sha256": "4af5da640d3431e67a8998e873d8f1c7019295b533b5f572e24b7aae45afebb8",
+      "sha256": "bb7d34c51afa70e1053d0ab8f571f2b8632ecb27b9b754dd764adb1dd6324392"
+    },
+    {
+      "path": "app/control_plane/governance/cli.py",
+      "baseline_sha256": "498867254cf854cd37c10c90a4b7d4427edbc851481f792b300d91e5fa9632dd",
+      "sha256": "a2ca35f0677d74ff8bd7e0325417eb2f7beb674bcfc797d2e515ee65ffa095fa"
+    },
+    {
+      "path": "app/control_plane/governance/v2_import.py",
+      "baseline_sha256": "3e42defb56b8bae3e3623af1fe591c0319224372cdfd92479924763a4007a4ca",
+      "sha256": "c5cb078d0857357e348672b66f57c66a079d56b9ca3e4f13bf629da47196ec67"
+    },
+    {
+      "path": "app/execution_plane/route_resolver.py",
+      "baseline_sha256": "95e7f42a452c66dbf8b3f7d8ed5eb3db1c11c6d41ab9ea756a84abfe04731130",
+      "sha256": "a6c6ecba6085c2ec7d01a656d8d9925ff5d83051ac273deeb8d1695653485fb0"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "baseline_sha256": "99189bb841627e2089c562ad763ab513c7dba2be59fa00e5c66ec0897163c951",
+      "sha256": "9a4e954e43212fb4ce03f5e276d6a1fa609b8734a8be460bbf321647eb571aab"
+    },
+    {
+      "path": "app/protocol_adapters/factory.py",
+      "baseline_sha256": "63d8c44ab3dee1a8aede82c9c6d5393a44bee4a02d3ef53ee3f0ab78783c8667",
+      "sha256": "4ee76e9613116d53dc8d7cdd113b31177df3d07bebcbdefcc7a66f94f60bcb28"
+    },
+    {
+      "path": "app/supabase.py",
+      "baseline_sha256": "55772cfdf9c52f9380ea93f64897e707a1419235eaa40696895d1a2c8e4c6f7e",
+      "sha256": "853b8019ca64de40e933cc5ff65d3aa55cb75566ebf9ffba57b462ca281a5e89"
+    },
+    {
+      "path": "config/README.md",
+      "baseline_sha256": "a15771cc48b4982f2856b2080eece8b224fe32f23ce88bcf2f3ad24bd8b4a685",
+      "sha256": "9533078dd6a8bc3c699b526036495454076825cdbaae947a25e8bab1fc10b303"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "baseline_sha256": "47e18514f5af25a4d74da699c921bf72be2045ce5bbcf136f0df5f44b1c18734",
+      "sha256": "2600891015481ea118cd336b7bc4edc3022032ba747044335b8fd32f6420d297"
+    }
+  ],
+  "added_files": [
+    {
+      "path": "ACCEPTANCE_8.4.0.json",
+      "sha256": "52a47337984a4fd34a29bdf5f8973b8359600fa8297668b41746062300b0b246"
+    },
+    {
+      "path": "RELEASE_NOTES_8.4.0.md",
+      "sha256": "7aaf2ecadce59f3eae51e1d6e17ef3e1f8e030fc21bfbfd2027f730eaf45e014"
+    },
+    {
+      "path": "UPGRADE_8.4.0.md",
+      "sha256": "389b4ad9c4522496cfa1dc9dc4a1e9b0ae884dce96e92beb8b7dce88234831ab"
+    },
+    {
+      "path": "VALIDATION_8.4.0.md",
+      "sha256": "fc02c64c65162c1fbbc4c33bf5d7bf31f92fd29f9930586d79780565ee66eb4c"
+    },
+    {
+      "path": "app/control_plane/auto_workbook.py",
+      "sha256": "f1250696a24b6a4552b11a7fe8a83c593530aff66f4a7104f23a0fa2bbfd2949"
+    },
+    {
+      "path": "app/control_plane/governance/deployment_validation.py",
+      "sha256": "a5f81ad4c66f602b998ac0d58d923e15dd535909a673b17ab1383a94e197862e"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "sha256": "9ce94cd2368b21a37db47a1c0b5979a8cd858fa032c06579955ae15796634467"
+    },
+    {
+      "path": "CHANGE_MANIFEST_8.4.0.json",
+      "sha256": null,
+      "reason": "self hash omitted"
+    }
+  ],
+  "final_file_count": 192,
+  "verification": {
+    "controlled_checks_passed": 54,
+    "python_files_compiled": 142,
+    "live_provider_requests": 0,
+    "production_certification": false,
+    "baseline_files_deleted": 0,
+    "test_scripts_shipped": false
+  },
+  "notes": [
+    "Only the explicitly managed provider scope is taken over by Excel; other seed supplies are retained for compatibility.",
+    "Frozen historical clients remain available; no runtime or SQL file was modified.",
+    "No manual activation pointer or published snapshot file is required."
+  ]
+}

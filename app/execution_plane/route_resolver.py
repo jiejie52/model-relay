@@ -314,6 +314,14 @@ class RouteResolver:
             if offering_id is not None:
                 candidates = [entry for entry in candidates if entry.offering_id == offering_id]
             if not candidates:
+                pending = [s for s in self.config_snapshot.supplies.values()
+                    if s.get('provider') == provider_n and s.get('model_pattern') == model_n
+                    and s.get('deployment_id') in (None, '*', self.settings.deployment_id)
+                    and (s.get('metadata') or {}).get('deployment_validation_state') == 'pending']
+                if pending:
+                    raise RouteResolutionError('ROUTE_SUPPLY_NOT_READY',
+                        'The declared supply is pending deployment validation; check configuration diagnostics',
+                        provider=provider_n, model=model_n, purpose=purpose_n)
                 if self.catalog.has_provider(provider_n, deployment_id=self.settings.deployment_id):
                     raise RouteResolutionError(
                         "ROUTE_MODEL_UNSUPPORTED",

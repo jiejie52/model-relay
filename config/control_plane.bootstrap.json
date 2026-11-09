@@ -1,6 +1,0 @@
-{
-  "schema_version": "relay-control-plane-bootstrap/1",
-  "release_pointer": "config/runtime/active.json",
-  "require_published_release": true,
-  "retain_seed_connections": true
-}

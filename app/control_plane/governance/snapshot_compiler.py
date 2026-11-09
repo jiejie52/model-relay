@@ -290,7 +290,7 @@ def build_candidate(
         "connections": [x.canonical() for x in base.connections.values()] if extension else [],
         "protocol_profiles": [x.canonical() for x in base.protocol_profiles.values()] if extension else [],
         "cache_policies": ([x.canonical() for x in base.cache_policies.values()] if extension else []) + overridden_policies,
-        "capability_contracts": ([x.canonical() for x in base.capability_contracts.values()] if extension else []) + overridden_contracts,
+        "capability_contracts": overridden_contracts,
         "offerings": offerings,
     }
 

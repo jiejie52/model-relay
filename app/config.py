@@ -66,12 +66,15 @@ class Settings(BaseSettings):
     # capability contracts and per-model channel priority. Configuration may
     # reference credential *environment variable names* but never secret values.
     model_control_plane_revision: str = "relay-model-control-plane/2026-10-02.1"
+    model_workbook_file: str = "config/model_management_v2.xlsx"
+    credential_env_file: str | None = ".env"
+    configuration_io_timeout_seconds: float = Field(5,gt=0,le=30)
+    configuration_probe_timeout_seconds: float = Field(35,gt=0,le=120)
+    configuration_verification_ttl_seconds: int = Field(86400,ge=60,le=604800)
     model_control_plane_json: str | None = None
     # V2 governance releases are authored from config/model_management_v2.xlsx
     # but only an externally approved, SHA256-pinned JSON snapshot enters runtime.
     model_control_plane_release_pointer: str | None = None
-    model_control_plane_bootstrap_file: str | None = "config/control_plane.bootstrap.json"
-    retain_seed_connections: bool = False  # Historical frozen routes only; never an active catalog.
     retained_control_plane_files: str = "[]"  # JSON array of {path, sha256}; old executable releases
     model_control_plane_file: str | None = None
     model_control_plane_file_sha256: str | None = None

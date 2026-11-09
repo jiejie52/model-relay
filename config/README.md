@@ -1,3 +1,11 @@
+# 8.4.0 Excel 唯一配置入口
+
+修改 model_management_v2.xlsx 后重新部署 API 与 Worker 即可。环境映射决定由 Excel 接管的提供方范围；其余提供方暂保留 8.1.0 兼容种子。连接、协议、能力和供应全部由新增配置页引用，不依赖外部 supply-registry JSON 或 Python 内置供应登记。
+
+运行配置和真实验证观察由系统自动保存在已有对象存储桶中。runtime/ 下没有 active.json 是正常的，不需要补建。google_official.declaration.json 和以下手工发布说明仅作为历史兼容资料，8.4.0 API/Worker 不读取它们作为当前目录。运行时只消费启动阶段编译和冻结的结果，不在请求热路径解析 Excel。
+
+以下保留历史说明。
+
 # Model Relay V2 workbook as governed runtime configuration
 
 **Authoring input:** `config/model_management_v2.xlsx` (the original V2
@@ -160,11 +168,3 @@ until certified on the actual model, account, endpoint and protocol.
   to an already published V2 catalog need a baseline comparison/migration
   workflow before publication.
 - Gemini 3.6 Flash/4 Argon still require actual account/endpoint certification.
-# 8.3.0 生效配置入口
-
-本版 Gemini 官方切换的权威作者输入是 google_official.declaration.json，包含逐型号供应、能力合同、独立官方 Profile 和路由策略。control_plane.bootstrap.json 让 API / Worker 默认从 runtime/active.json 读取同一批准快照；没有发布文件时明确拒绝启动，不静默使用内置目录。完整认证、编译、审核、发布、激活及摘要核对步骤见 ../UPGRADE_8.3.0.md。
-
-model_management_v2.xlsx 保留为既有作者输入和历史记录，不是运行时配置，也不会自动与声明 JSON 双向同步。此次发布不从该工作簿生成；如选择工作簿 authoring，应另走受治理 registry 与工作簿编译流程。不能仅修改 Excel 的优先级就认定运行目录已切换。
-
-以下保留历史配置说明。
-

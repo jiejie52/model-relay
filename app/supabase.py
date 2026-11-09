@@ -241,6 +241,19 @@ class SupabaseBackend:
         raw = await self.storage_get(object_path)
         return json.loads(raw.decode("utf-8"))
 
+    async def storage_list(self, prefix: str) -> list[str]:
+        bucket = quote(self.settings.supabase_bucket, safe="")
+        names=[]; offset=0
+        while True:
+            response=await self._request('POST',f'{self.settings.supabase_root}/storage/v1/object/list/{bucket}',
+                headers={'Content-Type':'application/json'},json_body={'prefix':prefix.rstrip('/'),'limit':1000,'offset':offset,
+                    'sortBy':{'column':'name','order':'asc'}})
+            rows=response.json()
+            if not isinstance(rows,list): raise RuntimeError('Invalid configuration archive listing')
+            names.extend(row['name'] for row in rows if row.get('name') and row.get('id'))
+            if len(rows)<1000: return names
+            offset+=len(rows)
+
 
     async def storage_head(self, object_path: str) -> dict[str, Any]:
         encoded_path = quote(object_path.lstrip("/"), safe="/")

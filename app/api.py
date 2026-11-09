@@ -43,7 +43,7 @@ from app.observability import configure_logging, elapsed_ms, error as log_error,
 
 
 
-API_VERSION = "8.3.0"
+API_VERSION = "8.4.0"
 
 
 settings = get_settings()
@@ -139,13 +139,15 @@ class WorkerWakeNotifier:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global backend, repo, settings
-    from app.control_plane.loading import load_runtime_configuration, describe_configuration
-    loaded = load_runtime_configuration(settings)
-    settings = loaded.settings
-    control_plane = loaded.control_plane
-    log_info(logger, "control_plane_release_loaded", role="api", **describe_configuration(loaded))
     backend = SupabaseBackend(settings)
     repo = RelayV2Repository(backend, settings)
+    from app.control_plane.auto_workbook import prepare_configuration
+    configuration = await prepare_configuration(settings,backend)
+    settings = settings.model_copy(update={'model_control_plane_file':None,'model_control_plane_file_sha256':None,
+        'model_control_plane_json':None,'model_control_plane_release_pointer':None,'retained_control_plane_files':'[]'})
+    control_plane = configuration.plane
+    app.state.configuration_report = configuration.report
+    log_info(logger,'workbook_configuration_loaded',role='api',**configuration.report)
 
     storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
     material_resolver = MaterialResolver(repo, storage_registry, settings)
@@ -157,7 +159,7 @@ async def lifespan(_: FastAPI):
     cache_resources = CacheResourceRegistry()
     connection_assembly = register_protocol_adapters(settings=settings, control_plane=control_plane,
         providers=providers, materials=material_resolver, repo=repo, file_adapters=file_adapters,
-        cache_resources=cache_resources, storage=storage_registry)
+        cache_resources=cache_resources, storage=storage_registry,retained_control_planes=configuration.retained)
     route_catalog = RouteCatalog.from_settings(settings, control_plane=control_plane)
     config_snapshot = get_active_config_snapshot(settings, control_plane=control_plane, catalog=route_catalog)
     verify_node_snapshot_compatibility(config_snapshot)
@@ -177,7 +179,6 @@ async def lifespan(_: FastAPI):
     inline_executor = InlineScheduler(runtime, raw_errors, repo, settings)
 
     app.state.settings = settings
-    app.state.control_plane_release = loaded.diagnostics
     app.state.v2_repo = repo
     app.state.storage_registry = storage_registry
     app.state.material_ingress = material_ingress
@@ -312,10 +313,11 @@ def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    from app.control_plane.auto_workbook import public_configuration_status
     return {
         "ok": True,
         "service": "relay-api",
-        "control_plane_release": getattr(app.state, "control_plane_release", None),
+        "configuration": public_configuration_status(getattr(app.state,'configuration_report',{})),
         "version": API_VERSION,
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
@@ -328,6 +330,11 @@ async def health() -> dict[str, Any]:
         "capability_revision": CAPABILITY_PROFILE_REVISION,
         "worker_follow_api": settings.worker_follow_api_enabled,
     }
+
+
+@app.get('/configuration',dependencies=[Depends(require_relay_auth)])
+async def configuration_diagnostics() -> dict[str, Any]:
+    return getattr(app.state,'configuration_report',{})
 
 
 @app.post(

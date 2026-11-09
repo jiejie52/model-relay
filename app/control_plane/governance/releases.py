@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 
-def activate_release(*, pointer, release_path, expected_sha256, relative_paths=False):
+def activate_release(*, pointer, release_path, expected_sha256):
     target = Path(pointer)
     target.parent.mkdir(parents=True, exist_ok=True)
     content = Path(release_path).read_bytes()
@@ -23,14 +23,7 @@ def activate_release(*, pointer, release_path, expected_sha256, relative_paths=F
         if current.get("path") and current.get("sha256"):
             retained.append({"path": current["path"], "sha256": current["sha256"]})
         retained = list({item["sha256"]: item for item in retained if item["sha256"] != fingerprint}.values())
-        if relative_paths:
-            def portable(item):
-                path = Path(item["path"])
-                absolute = path if path.is_absolute() else target.parent / path
-                return {**item, "path": os.path.relpath(absolute.resolve(), target.parent.resolve())}
-            retained = [portable(item) for item in retained]
-        active_path = os.path.relpath(Path(release_path).resolve(), target.parent.resolve()) if relative_paths else str(Path(release_path).resolve())
-        value = {"path": active_path, "sha256": fingerprint, "retained": retained,
+        value = {"path": str(Path(release_path).resolve()), "sha256": fingerprint, "retained": retained,
             "previous": {k: current[k] for k in ("path", "sha256") if k in current}}
         fd, temporary = tempfile.mkstemp(prefix=target.name+"-", dir=target.parent)
         try:

@@ -1,8 +1,8 @@
 """V2 workbook declaration parser.
 
-Produces an untrusted, non-executable draft. In particular, this module does
-NOT publish a control-plane snapshot, grant capabilities, validate credentials,
-or trigger inference. Server-side certification/approval is mandatory.
+Produces non-executable authoring declarations. 8.4 deployments compile and
+qualify them automatically; parsing alone never grants traffic or validates
+credentials. The historical manual governance CLI remains available.
 """
 from __future__ import annotations
 
@@ -56,8 +56,8 @@ def _sheet_rows(ws, fields: tuple[str, ...]):
 def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_000_000) -> dict[str, Any]:
     """Parse declarations without trusting Excel formulas or granting traffic.
 
-    All output is a draft, even where a row says '启用' or '发布'. External
-    publication requires a separately approved, immutable server snapshot.
+    All output is a draft, even where a row says '启用' or '发布'. Runtime
+    activation requires the automatic deployment compiler and qualification.
     """
     payload = bytes(source) if isinstance(source, (bytes, bytearray)) else Path(source).read_bytes()
     if len(payload) > maximum_bytes:
@@ -67,8 +67,9 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
     except Exception as exc:
         raise DeclarationError("invalid V2 xlsx workbook") from exc
     try:
-        if set(wb.sheetnames) != {*_FIELDS, "填写说明"}:
-            raise DeclarationError("V2 workbook must have exactly four expected sheets")
+        from app.control_plane.governance.workbook import SCHEMAS, extension_rows
+        if not {*_FIELDS, '填写说明'} <= set(wb.sheetnames) or set(wb.sheetnames)-{*_FIELDS,'填写说明',*SCHEMAS}:
+            raise DeclarationError('工作簿缺少必要工作表或包含未知配置表')
         result: dict[str, Any] = {"template": "model-relay-v2", "status": "unverified_draft", "models": [], "routes": [], "caches": []}
         models: set[str] = set()
         for idx, row in _sheet_rows(wb["模型清单"], _FIELDS["模型清单"]):
@@ -101,7 +102,7 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
             route_keys.add(key)
             route_pairs.add((model, row["渠道名称"].lower()))
             ranks.add(rank)
-            result["routes"].append(row)
+            result["routes"].append({**row,'_row':idx})
         cache_keys: set[tuple[str, str]] = set()
         for idx, row in _sheet_rows(wb["缓存设置"], _FIELDS["缓存设置"]):
             for key in ("对外模型名", "渠道名称", "缓存机制", "默认策略", "可选强制", "自动准备失败时", "启用意向"):
@@ -126,6 +127,7 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
             if row["默认策略"] == "强制" and (row["可选强制"] != "是" or row["缓存机制"] == "不使用"):
                 raise DeclarationError(f"缓存设置!row {idx}: invalid forced cache configuration")
             result["caches"].append(row)
+        result['extensions']=extension_rows(wb)
         return result
     finally:
         wb.close()

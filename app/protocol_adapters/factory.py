@@ -27,12 +27,10 @@ class ConnectionAssembly:
             await connection.pool.aclose()
 
 def register_protocol_adapters(*, settings, control_plane, providers, materials, repo,
-                               file_adapters=None, cache_resources=None, storage=None):
+                               file_adapters=None, cache_resources=None, storage=None, retained_control_planes=None):
     from app.control_plane.definitions import ModelControlPlane
     assembly = ConnectionAssembly()
-    planes = []
-    if settings.retain_seed_connections:
-        planes.append(ModelControlPlane._builtin(settings))
+    planes = [ModelControlPlane._builtin(settings), *(retained_control_planes or [])] if retained_control_planes is not None else []
     # Retained releases are read-only, pinned, and never become routing catalogs.
     retained_releases = json.loads(getattr(settings, "retained_control_plane_files", "[]"))
     pointer = getattr(settings, "model_control_plane_release_pointer", None)
