@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     # V2 governance releases are authored from config/model_management_v2.xlsx
     # but only an externally approved, SHA256-pinned JSON snapshot enters runtime.
     model_control_plane_release_pointer: str | None = None
+    model_control_plane_bootstrap_file: str | None = "config/control_plane.bootstrap.json"
+    retain_seed_connections: bool = False  # Historical frozen routes only; never an active catalog.
     retained_control_plane_files: str = "[]"  # JSON array of {path, sha256}; old executable releases
     model_control_plane_file: str | None = None
     model_control_plane_file_sha256: str | None = None

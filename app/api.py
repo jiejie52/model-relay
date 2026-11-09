@@ -43,7 +43,7 @@ from app.observability import configure_logging, elapsed_ms, error as log_error,
 
 
 
-API_VERSION = "8.1.0"
+API_VERSION = "8.3.0"
 
 
 settings = get_settings()
@@ -138,7 +138,12 @@ class WorkerWakeNotifier:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global backend, repo
+    global backend, repo, settings
+    from app.control_plane.loading import load_runtime_configuration, describe_configuration
+    loaded = load_runtime_configuration(settings)
+    settings = loaded.settings
+    control_plane = loaded.control_plane
+    log_info(logger, "control_plane_release_loaded", role="api", **describe_configuration(loaded))
     backend = SupabaseBackend(settings)
     repo = RelayV2Repository(backend, settings)
 
@@ -148,7 +153,6 @@ async def lifespan(_: FastAPI):
     file_adapters = ProviderFileRegistry()
     material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
     binding_resolver = MaterialBinder(repo, fallback_storage, file_adapters)
-    control_plane = ModelControlPlane.from_settings(settings)
     providers = ProviderRegistry(settings)
     cache_resources = CacheResourceRegistry()
     connection_assembly = register_protocol_adapters(settings=settings, control_plane=control_plane,
@@ -173,6 +177,7 @@ async def lifespan(_: FastAPI):
     inline_executor = InlineScheduler(runtime, raw_errors, repo, settings)
 
     app.state.settings = settings
+    app.state.control_plane_release = loaded.diagnostics
     app.state.v2_repo = repo
     app.state.storage_registry = storage_registry
     app.state.material_ingress = material_ingress
@@ -310,6 +315,7 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "service": "relay-api",
+        "control_plane_release": getattr(app.state, "control_plane_release", None),
         "version": API_VERSION,
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,

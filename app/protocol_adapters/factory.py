@@ -31,6 +31,8 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
     from app.control_plane.definitions import ModelControlPlane
     assembly = ConnectionAssembly()
     planes = []
+    if settings.retain_seed_connections:
+        planes.append(ModelControlPlane._builtin(settings))
     # Retained releases are read-only, pinned, and never become routing catalogs.
     retained_releases = json.loads(getattr(settings, "retained_control_plane_files", "[]"))
     pointer = getattr(settings, "model_control_plane_release_pointer", None)

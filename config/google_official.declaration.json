@@ -1,4 +1,6 @@
 {
+  "schema_version": "relay-supply-declarations/1",
+  "revision": "gemini-official-8.3.0",
   "connections": [
     {
       "connection_id": "gemini_google_official_prod",
@@ -19,10 +21,58 @@
       "region": "global"
     }
   ],
+  "protocol_profiles": [
+    {
+      "profile_id": "gemini-native-google-official",
+      "revision": "8.3.0",
+      "protocol": "gemini_native",
+      "cache": {
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "composite_mode": "mutually_exclusive",
+        "token_count_connection_id": "gemini_google_official_prod",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified"
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified"
+          }
+        }
+      },
+      "metadata": {
+        "adapter_type": "gemini_native",
+        "allowed_hosts": [
+          "generativelanguage.googleapis.com"
+        ],
+        "affinity_policy": {
+          "enabled": false
+        },
+        "response_evidence_headers": {}
+      }
+    }
+  ],
+  "cache_policies": [
+    {
+      "policy_id": "google-official-session-cache",
+      "revision": "8.3.0",
+      "scope": "session",
+      "mechanism_preference": [
+        "stateful_resource",
+        "implicit_prefix"
+      ],
+      "metadata": {
+        "default_mode": "auto",
+        "allow_force": true
+      }
+    }
+  ],
   "capability_contracts": [
     {
-      "contract_id": "gemini-2.5-pro-google-official-capability",
-      "revision": "8.0.0-draft",
+      "contract_id": "gemini-3-6-flash-google-official-capability",
+      "revision": "8.3.0",
       "supported_options": {
         "temperature": {
           "type": "number",
@@ -36,7 +86,482 @@
         },
         "max_output_tokens": {
           "type": "integer",
-          "min": 1
+          "min": 1,
+          "max": 65536
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto",
+          "low",
+          "medium",
+          "high"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "native_json_schema"
+      },
+      "input_modalities": [
+        "text",
+        "image",
+        "document"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-4-argon-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 32768
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "native_json_schema"
+      },
+      "input_modalities": [
+        "text",
+        "image",
+        "document"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-3-8-flash-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 16384
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-3-5-flash-lite-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-3-1-flash-lite-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-3-1-pro-preview-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
+      }
+    },
+    {
+      "contract_id": "gemini-2-5-pro-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 65536
         }
       },
       "thinking": {
@@ -102,73 +627,182 @@
           "text/plain",
           "image/png",
           "image/jpeg"
-        ]
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
       }
-    }
-  ],
-  "protocol_profiles": [
+    },
     {
-      "profile_id": "gemini-native-google-official",
-      "revision": "8.0.0-draft",
-      "protocol": "gemini_native",
+      "contract_id": "gemini-3-1-pro-preview-search-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "features": [],
+      "provider_defaults": {},
       "cache": {
+        "version": "relay-cache-contract/1",
         "supported_mechanisms": [
           "stateful_resource",
           "implicit_prefix"
         ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
         "composite_mode": "mutually_exclusive",
-        "token_count_connection_id": "gemini_google_official_prod",
         "mechanism_profiles": {
           "stateful_resource": {
-            "verification_status": "unverified"
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
           },
           "implicit_prefix": {
-            "verification_status": "unverified"
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
           }
         }
       },
       "metadata": {
-        "adapter_type": "gemini_native",
-        "allowed_hosts": [
-          "generativelanguage.googleapis.com"
-        ],
-        "affinity_policy": {
-          "enabled": false
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
         },
-        "response_evidence_headers": {}
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
       }
-    }
-  ],
-  "cache_policies": [
+    },
     {
-      "policy_id": "google-official-session-cache",
-      "revision": "8.0.0-draft",
-      "scope": "session",
-      "mechanism_preference": [
-        "stateful_resource",
-        "implicit_prefix"
+      "contract_id": "gemini-3-5-flash-lite-free-google-official-capability",
+      "revision": "8.3.0",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1,
+          "max": 8192
+        }
+      },
+      "thinking": {
+        "mode": "effort",
+        "accepted_levels": [
+          "auto"
+        ],
+        "wire_strategy": "gemini_thinking_level",
+        "level_map": {}
+      },
+      "structured_output": {
+        "mode": "post_validate"
+      },
+      "input_modalities": [
+        "text"
       ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "stateful_resource",
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "explicit_cache_material_mode": "file_uri_allowed",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "stateful_resource": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "count_tokens",
+            "ttl_seconds": 3600,
+            "final_threshold_guard": true
+          },
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
       "metadata": {
-        "default_mode": "auto",
-        "allow_force": true
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ],
+        "definition_source": "8.1.0 model catalog; independent official certification required"
       }
     }
   ],
   "offerings": [
     {
-      "offering_id": "gemini-2.5-pro-google-official",
+      "offering_id": "gemini-3-6-flash-google-official",
       "provider": "gemini",
-      "model_pattern": "gemini-2.5-pro",
+      "model_pattern": "gemini-3.6-flash",
       "connection_id": "gemini_google_official_prod",
-      "capability_contract_id": "gemini-2.5-pro-google-official-capability",
+      "capability_contract_id": "gemini-3-6-flash-google-official-capability",
       "protocol_profile_id": "gemini-native-google-official",
       "cache_policy_id": "google-official-session-cache",
       "deployment_id": "railway",
-      "priority": 10,
+      "priority": 1,
       "requires_file_adapter": true,
-      "enabled": false,
+      "observed_model_policy": "strict",
+      "enabled": true,
       "metadata": {
-        "unavailable_action": "try_next",
+        "unavailable_action": "reject_new_session",
         "execution_authorization": {
           "allow_provider_fallback": false,
           "allow_paid_fallback": false,
@@ -176,8 +810,206 @@
           "require_native_constraint_evidence": false
         }
       }
+    },
+    {
+      "offering_id": "gemini-4-argon-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-4-argon",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-4-argon-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-3-8-flash-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.8-flash",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-8-flash-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-3-5-flash-lite-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.5-flash-lite",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-5-flash-lite-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-3-1-flash-lite-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.1-flash-lite",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-1-flash-lite-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-3-1-pro-preview-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.1-pro-preview",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-1-pro-preview-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-2-5-pro-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-2.5-pro",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-2-5-pro-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": true,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-3-1-pro-preview-search-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.1-pro-preview-search",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-1-pro-preview-search-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": false,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        },
+        "registration_state": "awaiting_certified_official_alias_mapping"
+      }
+    },
+    {
+      "offering_id": "gemini-3-5-flash-lite-free-google-official",
+      "provider": "gemini",
+      "model_pattern": "gemini-3.5-flash-lite-free",
+      "connection_id": "gemini_google_official_prod",
+      "capability_contract_id": "gemini-3-5-flash-lite-free-google-official-capability",
+      "protocol_profile_id": "gemini-native-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 1,
+      "requires_file_adapter": true,
+      "observed_model_policy": "strict",
+      "enabled": false,
+      "metadata": {
+        "unavailable_action": "reject_new_session",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "audit",
+          "require_native_constraint_evidence": false
+        },
+        "registration_state": "awaiting_certified_official_alias_mapping"
+      }
     }
   ],
-  "schema_version": "relay-supply-declarations/1",
-  "revision": "google-official-draft"
+  "route_policies": [
+    {
+      "provider": "gemini",
+      "model_pattern": "*",
+      "deployment_id": "railway",
+      "allowed_channels": [
+        "google_official"
+      ],
+      "allowed_hosts": [
+        "generativelanguage.googleapis.com"
+      ],
+      "unavailable_action": "reject_new_session"
+    }
+  ]
 }

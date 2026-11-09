@@ -160,3 +160,11 @@ until certified on the actual model, account, endpoint and protocol.
   to an already published V2 catalog need a baseline comparison/migration
   workflow before publication.
 - Gemini 3.6 Flash/4 Argon still require actual account/endpoint certification.
+# 8.3.0 生效配置入口
+
+本版 Gemini 官方切换的权威作者输入是 google_official.declaration.json，包含逐型号供应、能力合同、独立官方 Profile 和路由策略。control_plane.bootstrap.json 让 API / Worker 默认从 runtime/active.json 读取同一批准快照；没有发布文件时明确拒绝启动，不静默使用内置目录。完整认证、编译、审核、发布、激活及摘要核对步骤见 ../UPGRADE_8.3.0.md。
+
+model_management_v2.xlsx 保留为既有作者输入和历史记录，不是运行时配置，也不会自动与声明 JSON 双向同步。此次发布不从该工作簿生成；如选择工作簿 authoring，应另走受治理 registry 与工作簿编译流程。不能仅修改 Excel 的优先级就认定运行目录已切换。
+
+以下保留历史配置说明。
+

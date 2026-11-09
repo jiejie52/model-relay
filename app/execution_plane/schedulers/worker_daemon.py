@@ -37,7 +37,7 @@ from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "8.1.0"
+WORKER_VERSION = "8.3.0"
 
 settings = get_settings()
 configure_logging(settings)
@@ -46,6 +46,13 @@ logger = logging.getLogger("model-relay-worker")
 
 class RelayWorker:
     def __init__(self) -> None:
+        global settings
+        from app.control_plane.loading import load_runtime_configuration, describe_configuration
+        loaded = load_runtime_configuration(settings)
+        settings = loaded.settings
+        self.control_plane = loaded.control_plane
+        self.control_plane_release = loaded.diagnostics
+        log_info(logger, "control_plane_release_loaded", role="worker", **describe_configuration(loaded))
         self.backend = SupabaseBackend(settings)
         self.repo = RelayV2Repository(self.backend, settings)
         self.storage = StorageRegistry(SupabaseObjectStorage(self.backend, settings))
@@ -53,7 +60,6 @@ class RelayWorker:
         self.fallback_storage = FallbackObjectStorage(self.repo, self.storage, settings)
         self.file_adapters = ProviderFileRegistry()
         self.bindings = MaterialBinder(self.repo, self.fallback_storage, self.file_adapters)
-        self.control_plane = ModelControlPlane.from_settings(settings)
         self.providers = ProviderRegistry(settings)
         self.cache_resources = CacheResourceRegistry()
         self.connection_assembly = register_protocol_adapters(settings=settings, control_plane=self.control_plane,
@@ -151,6 +157,7 @@ class RelayWorker:
             return {
                 "ok": True,
                 "service": "relay-worker",
+                "control_plane_release": self.control_plane_release,
                 "version": WORKER_VERSION,
                 "worker_id": self.worker_id,
                 "state": self.lifecycle_state,

@@ -6,11 +6,27 @@ from datetime import datetime, timezone
 import json
 from app.control_plane.definitions import ModelControlPlane
 from app.core.idempotency import stable_hash
+from dataclasses import replace
 
 ENTITY_PARSERS = {"connections": "_connection_from_mapping", "capability_contracts": "_contract_from_mapping",
     "protocol_profiles": "_profile_from_mapping", "cache_policies": "_cache_policy_from_mapping"}
 ID_FIELDS = {"connections": "connection_id", "capability_contracts": "contract_id", "protocol_profiles": "profile_id", "cache_policies": "policy_id"}
 FORBIDDEN = {"api_key", "apikey", "secret", "access_token", "authorization", "python_class", "class_path", "script", "wire_template"}
+
+
+def compilation_base(settings):
+    """Extend the selected approved release; seed only the first publication."""
+    from pathlib import Path
+    from app.control_plane.loading import load_runtime_configuration
+    if settings.model_control_plane_file or settings.model_control_plane_json or settings.model_control_plane_release_pointer:
+        return load_runtime_configuration(settings).control_plane
+    bootstrap = settings.model_control_plane_bootstrap_file
+    if bootstrap and Path(bootstrap).is_file():
+        value = json.loads(Path(bootstrap).read_text())
+        pointer = value.get("release_pointer")
+        if pointer and Path(pointer).is_file():
+            return load_runtime_configuration(settings).control_plane
+    return ModelControlPlane._builtin(settings)
 
 def safe_declaration(value):
     if isinstance(value, dict):
@@ -42,7 +58,7 @@ def merge_entities(base, declaration, settings):
         offerings[s.offering_id] = s
     return ModelControlPlane(revision=declaration.get("revision", base.revision),
         **{k: v.values() for k,v in parts.items()}, offerings=offerings.values(),
-        release_metadata={"source": "declaration-staging"})
+        release_metadata={"source": "declaration-staging", "managed_model_groups": list(base.release_metadata.get("managed_model_groups", []))})
 
 def certification_identity(plane, supply):
     connection = plane.connection(supply.connection_id)
@@ -57,13 +73,41 @@ def certification_identity(plane, supply):
 
 
 def certification_request(declaration, *, settings):
-    plane = merge_entities(ModelControlPlane._builtin(settings), declaration, settings)
+    plane = compilation_plane(declaration, settings)
     return {row["offering_id"]: {"status": "draft", "supply_hash": stable_hash(certification_identity(plane, plane.offerings[row["offering_id"]])),
         "evidence_ref": None, "reviewed_by": None, "valid_until": None,
         "capabilities": sorted({"inference", *plane.contract(row["capability_contract_id"]).cache.get("supported_mechanisms", []),
             *plane.contract(row["capability_contract_id"]).metadata.get("material_transport", {}).get("supported_material_transports", []),
             *(["file_uri_allowed"] if plane.contract(row["capability_contract_id"]).cache.get("explicit_cache_material_mode") == "file_uri_allowed" else [])})}
-        for row in declaration.get("offerings", [])}
+        for row in declaration.get("offerings", []) if plane.offerings[row["offering_id"]].enabled}
+
+
+def compilation_plane(declaration, settings, *, base=None):
+    """Prospective contracts only. Evidence is still mandatory before publication.
+
+    Certification identities describe the exact target verified contract, so
+    accepting evidence never invalidates its own hash by changing status flags.
+    """
+    base = base or compilation_base(settings)
+    plane = merge_entities(base, declaration, settings)
+    from app.control_plane.governance.route_policy import compile_rules
+    supplies = compile_rules(plane, declaration.get("route_policies", []))
+    enabled = [s for s in supplies if s.enabled and s.offering_id in {
+        row["offering_id"] for row in declaration.get("offerings", [])}]
+    contracts, profiles = dict(plane.capability_contracts), dict(plane.protocol_profiles)
+    for supply in enabled:
+        contract, profile = contracts[supply.capability_contract_id], profiles[supply.protocol_profile_id]
+        for item, collection, identity in ((contract, contracts, contract.contract_id), (profile, profiles, profile.profile_id)):
+            cache = dict(item.cache)
+            if cache.get("supported_mechanisms"):
+                cache["verification_status"] = "verified"
+                cache["mechanism_profiles"] = {k: {**v, "verification_status": "verified"}
+                    for k, v in cache.get("mechanism_profiles", {}).items()}
+            collection[identity] = replace(item, cache=cache)
+    return ModelControlPlane(revision=plane.revision, connections=plane.connections.values(),
+        capability_contracts=contracts.values(), protocol_profiles=profiles.values(),
+        cache_policies=plane.cache_policies.values(), offerings=supplies,
+        release_metadata={"source": "declaration-staging", "managed_model_groups": list(plane.release_metadata.get("managed_model_groups", []))})
 
 
 def validate_supply(plane, supply, evidence):
@@ -95,6 +139,8 @@ def validate_supply(plane, supply, evidence):
         raise ValueError("Gemini SDK implementation requires x_goog_api_key_header")
     if not connection.credential_ref or not connection.account_id or not connection.region:
         raise ValueError("Managed connection requires credential_ref, account_id and region")
+    if any(str(value).startswith("REPLACE_") for value in (connection.account_id, connection.project_id)):
+        raise ValueError("Replace deployment account/project placeholders before certification")
     if not (connection.rest_base_url or connection.base_url): raise ValueError("Missing connection endpoint")
     from urllib.parse import urlsplit
     for endpoint in (connection.rest_base_url or connection.base_url, connection.upload_base_url,
@@ -173,15 +219,20 @@ def validate_supply(plane, supply, evidence):
 
 def build_declaration_candidate(declaration, *, settings, revision, certifications=None):
     from app.control_plane.governance.snapshot_compiler import digest
-    base = ModelControlPlane._builtin(settings)
-    plane = merge_entities(base, declaration, settings)
-    groups, supplies, refs = {}, [], []
+    base = compilation_base(settings)
+    plane = compilation_plane(declaration, settings, base=base)
+    groups = {tuple(group[k] for k in ("provider", "model", "deployment_id")): dict(group)
+        for group in base.release_metadata.get("managed_model_groups", [])}
+    supplies, refs = [], list(base.release_metadata.get("approved_supply_evidence_refs", []))
     certs = certifications or {}
     order = set()
     for row in declaration.get("offerings", []):
         supply = plane.offerings[row["offering_id"]]
         key = (supply.provider, supply.model_pattern, supply.deployment_id)
-        if any(c in supply.model_pattern for c in "*?"): raise ValueError("Managed supplies require exact model identities")
+        if any(c in supply.model_pattern for c in "*?"):
+            if supply.enabled:
+                raise ValueError("Managed supplies require exact model identities")
+            continue  # Disabled seed wildcards remain explicit tombstones in the full release.
         groups[key] = dict(zip(("provider", "model", "deployment_id"), key))
         value = supply.canonical()
         value["metadata"] = {**value["metadata"], "managed_v2": True,
@@ -195,8 +246,11 @@ def build_declaration_candidate(declaration, *, settings, revision, certificatio
             value["metadata"].update(certification_evidence_ref=ref, declared_priority=supply.priority)
             refs.append(ref)
         supplies.append(value)
-    return {"status": "review", "mode": "merge", "revision": revision,
-        **{name: [getattr(plane, name)[x[ID_FIELDS[name]]].canonical() for x in declaration.get(name, [])] for name in ENTITY_PARSERS},
-        "offerings": supplies, "release_metadata": {"source": "supply-declarations", "base_control_plane_hash": base.control_plane_hash,
+    compiled = {s.offering_id: s.canonical() for s in plane.offerings.values()}
+    compiled.update({s["offering_id"]: s for s in supplies})
+    return {"status": "review", "mode": "replace", "revision": revision,
+        **{name: [item.canonical() for item in getattr(plane, name).values()] for name in ENTITY_PARSERS},
+        "offerings": list(compiled.values()), "release_metadata": {"source": "supply-declarations", "base_control_plane_hash": base.control_plane_hash,
+            "route_policies": declaration.get("route_policies", []),
             "declarations_sha256": digest(declaration), "managed_model_groups": [groups[k] for k in sorted(groups)],
             "approved_supply_evidence_refs": sorted(set(refs)), "certifications_sha256": digest(certs)}}
