@@ -51,7 +51,21 @@ class ConnectionRuntime:
         if set(timeouts)-allowed or any(type(v) not in (int, float) or not __import__("math").isfinite(v) or v <= 0 for v in timeouts.values()):
             raise ValueError("Invalid connection timeout policy")
         if timeouts: object.__setattr__(self, "settings", self.settings.model_copy(update=dict(timeouts)))
-        if self.pool is None: object.__setattr__(self, "pool", httpx.AsyncHTTPTransport(retries=0))
+        if self.pool is None:
+            # Restrict this experimental pool policy to the official Google
+            # connection; it does not imply affinity to an upstream backend.
+            official_google = (
+                self.spec.connection_id == "google_gemini"
+                and self.spec.channel_id == "google_official"
+                and urlsplit(self.rest_base).hostname == "generativelanguage.googleapis.com"
+            )
+            if official_google:
+                limits = httpx.Limits(max_keepalive_connections=20, max_connections=50,
+                                      keepalive_expiry=120.0)
+                pool = httpx.AsyncHTTPTransport(limits=limits, retries=0)
+            else:
+                pool = httpx.AsyncHTTPTransport(retries=0)
+            object.__setattr__(self, "pool", pool)
         object.__setattr__(self, "profile", freeze_json(self.profile))
         for url in (self.rest_base, self.sdk_base, self.spec.upload_base_url):
             if url:

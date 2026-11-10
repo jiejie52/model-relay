@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -118,7 +119,35 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if body is None and isinstance(request.stream, httpx.ByteStream):
                 body = await request.aread()
             self._emit("outbound", request, request.headers, body, ctx)
-        response = await self.wrapped.handle_async_request(request)
+        trace = None
+        if enabled:
+            # HTTPX/httpcore emit these before a response is available. Do not
+            # log trace arguments: they may contain addresses or TLS details.
+            trace = {"observed": False, "tcp_connect_started": False, "tls_handshake_started": False}
+            previous_trace = request.extensions.get("trace")
+
+            async def trace_connection(name, info):
+                trace["observed"] = True
+                if name == "connection.connect_tcp.started":
+                    trace["tcp_connect_started"] = True
+                elif name == "connection.start_tls.started":
+                    trace["tls_handshake_started"] = True
+                if previous_trace is not None:
+                    result = previous_trace(name, info)
+                    if inspect.isawaitable(result):
+                        await result
+
+            request.extensions["trace"] = trace_connection
+        response = None
+        error_type = None
+        try:
+            response = await self.wrapped.handle_async_request(request)
+        except Exception as exc:
+            error_type = type(exc).__name__
+            raise
+        finally:
+            if trace is not None:
+                self._emit_connection_diagnostic(request, response, ctx, trace, error_type)
         if ctx.get("phase") == "inference":
             ctx["route_observation"] = {name: response.headers[name] for name in _ROUTER_HEADERS if name in response.headers}
         if enabled:
@@ -126,6 +155,24 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if not response.is_stream_consumed:
                 response.stream = _ResponseCapture(response.stream, self, request, response, ctx)
         return response
+
+    def _emit_connection_diagnostic(self, request, response, ctx, trace, error_type):
+        try:
+            from app.runtime.connection_scope import current_client
+            connection = current_client()
+            log_info(
+                logger, "provider_http_connection",
+                request_id=ctx.get("request_id"), session_id=ctx.get("session_id"),
+                connection_id=getattr(connection, "connection_id", None),
+                provider=self.provider, phase=ctx.get("phase"), process_id=os.getpid(),
+                host=request.url.host, http_version=response.http_version if response else None,
+                trace_observed=trace["observed"],
+                tcp_connect_started=trace["tcp_connect_started"] if trace["observed"] else None,
+                tls_handshake_started=trace["tls_handshake_started"] if trace["observed"] else None,
+                error_type=error_type,
+            )
+        except Exception as exc:
+            log_warning(logger, "provider_http_connection_logging_failed", error_type=type(exc).__name__)
 
     def _emit(self, direction: str, request: httpx.Request, headers: httpx.Headers,
               body: bytes | None, ctx: dict[str, Any], status: int | None = None,
