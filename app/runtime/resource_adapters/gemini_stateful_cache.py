@@ -213,6 +213,28 @@ class GeminiStatefulCacheAdapter:
             raise RuntimeError("Gemini countTokens returned a negative totalTokens")
         return value
 
+    async def measure_system_instruction_text(self, *, spec: dict[str, Any]) -> int:
+        """Count a text-only projection, not the native system-prefix length.
+
+        A GenerateContentRequest with no contents is rejected by Gemini. This
+        probe is for diagnostics only: tokenizing instruction text as a user
+        content is not an authenticated bound for native system framing.
+        """
+        import copy
+        payload = spec.get("provider_payload") or {}
+        instruction = payload.get("systemInstruction") or {}
+        parts = instruction.get("parts") if isinstance(instruction, dict) else None
+        if (not isinstance(parts, list) or not parts or any(
+            not isinstance(part, dict) or set(part) != {"text"}
+            or not isinstance(part["text"], str) or not part["text"]
+            for part in parts
+        )):
+            raise ValueError("System instruction is not a nonempty text-only projection")
+        return await self.measure(spec={
+            "model": spec.get("model"),
+            "provider_payload": {"contents": [{"role": "user", "parts": copy.deepcopy(parts)}]},
+        })
+
     async def create(self, *, spec: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
         model = self._model(spec)
         if (

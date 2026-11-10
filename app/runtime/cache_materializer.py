@@ -398,6 +398,43 @@ class CacheMaterializer:
                     material_binding_hash=material_binding_hash,
                     metadata=dict(prepared.get("metadata") or {}),
                 )
+            if not measurement_payload.get("contents") and measurement_payload.get("systemInstruction"):
+                # Google rejects a GenerateContentRequest without contents. A
+                # text-only count is useful evidence but is not a certified
+                # measurement of the native system prefix or a threshold guard.
+                # Never count the dynamic current user turn as stable context.
+                try:
+                    projected_tokens = await adapter.measure_system_instruction_text(spec={
+                        "model": str(snapshot.get("model") or ""),
+                        "provider_payload": measurement_payload,
+                    })
+                except Exception as exc:
+                    prepared = self.stateful._provider_prepare_failure(
+                        plan, exc, "implicit_prefix_measurement_failed",
+                    )
+                    return CacheExecutionBinding(
+                        mechanism=prepared.get("mechanism"),
+                        decision_reason=str(prepared.get("decision_reason") or "implicit_prefix_measurement_failed"),
+                        context_plan_hash=str(context_plan.get("context_plan_hash") or ""),
+                        plan_hash=plan_hash, material_binding_hash=material_binding_hash,
+                        metadata=dict(prepared.get("metadata") or {}),
+                    )
+                prepared = self.stateful._prepare_failure(
+                    plan, reason="implicit_prefix_threshold_unverified",
+                    message="Native system-prefix token threshold cannot be verified by a text-only projection",
+                )
+                return CacheExecutionBinding(
+                    mechanism=prepared.get("mechanism"),
+                    decision_reason=str(prepared.get("decision_reason") or "implicit_prefix_threshold_unverified"),
+                    context_plan_hash=str(context_plan.get("context_plan_hash") or ""),
+                    plan_hash=plan_hash, material_binding_hash=material_binding_hash,
+                    metadata={
+                        "threshold_measurement": "gemini_countTokens_system_text_projection",
+                        "system_text_projection_tokens": projected_tokens,
+                        "minimum_cacheable_tokens": minimum,
+                        "native_prefix_count_verified": False,
+                    },
+                )
             try:
                 measured_tokens = int(
                     await adapter.measure(
