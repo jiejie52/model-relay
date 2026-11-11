@@ -80,6 +80,9 @@ class RequestAcceptor:
                 },
             )
 
+        if "_relay_audit" in body.metadata:
+            raise ExecutionRequestError(422, {"code": "AUDIT_CONTEXT_OVERRIDE_FORBIDDEN"})
+
         protected_metadata = [
             str(key) for key in body.metadata if str(key).startswith("_relay_cache")
         ]
@@ -396,7 +399,7 @@ class RequestAcceptor:
                 raw_think_level=body.think_level,
                 think_level_source=("omitted" if not thinking_field_present else "explicit_empty" if body.think_level is None or not body.think_level.strip() else "caller_explicit"),
                 think_level_policy=body.think_level_policy,
-                entry_point="/v2/sessions/{session_id}/requests",
+                entry_point=services.entry_point,
                 frozen_contract_id=frozen_route.get("capability_contract_id"),
                 session_id=str(session_id),
                 provider=provider,
@@ -434,7 +437,7 @@ class RequestAcceptor:
                 think_level_policy=body.think_level_policy, requested_intent=resolved_options.thinking["requested_intent"],
                 effective_thinking=resolved_options.thinking["effective"], mapping_rule_id=resolved_options.thinking["mapping_rule_id"],
                 mapping_reason=resolved_options.thinking["mapping_reason"], frozen_contract_id=frozen_route.get("capability_contract_id"),
-                entry_point="/v2/sessions/{session_id}/requests")
+                entry_point=services.entry_point)
         for warning in resolved_options.warnings:
             log_warning(
                 logger,
@@ -447,6 +450,8 @@ class RequestAcceptor:
             )
 
         base_snapshot = {
+            "audit_context": {"entry_point": services.entry_point},
+            "protocol_profile": frozen_route.get("protocol_profile"),
             "execution_authorization": dict(execution_authorization(frozen_route.get("execution_authorization"))),
             "session_id": str(session_id),
             "tenant_id": tenant_id,
@@ -728,7 +733,7 @@ class RequestAcceptor:
                     model=model,
                     execution_pool=session.get("execution_pool") or settings.execution_pool,
                     expected_history_version=int(session.get("history_version") or 0),
-                    metadata=accept_metadata,
+                    metadata={**accept_metadata, "_relay_audit": {"entry_point": services.entry_point}},
                     job_id=job_id,
                     route_pin=pending_pin,
                 )
@@ -746,7 +751,7 @@ class RequestAcceptor:
                     connection_id=connection_id,
                     model=model,
                     execution_pool=session.get("execution_pool") or settings.execution_pool,
-                    metadata=body.metadata,
+                    metadata={**body.metadata, "_relay_audit": {"entry_point": services.entry_point}},
                     job_id=job_id,
                 )
         except SupabaseError as exc:

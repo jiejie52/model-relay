@@ -10,13 +10,15 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/8.7.0'
+COMPILER_VERSION = 'relay-excel/8.8.0'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
 from app.control_plane.governance.thinking_mappings import FIELDS as THINKING_FIELDS, CONTRACT_OPTIONAL, compile_thinking_mappings
 
 SCHEMAS = {
  '思考映射清单': THINKING_FIELDS,
+ '思考合同配置': ('合同ID','源合同ID','思考投影',*CONTRACT_OPTIONAL),
+ '供应思考绑定': ('供应ID','模型匹配','合同ID','优先级'),
  '环境映射': ('环境','部署ID','管理提供方'),
  '连接配置': ('连接ID','渠道名称','渠道ID','协议族','账号ID','项目ID','区域','REST端点','上传端点','SDK端点','API版本','鉴权方式','凭据引用'),
  '协议配置': ('协议ID','协议族','允许主机','亲和启用','亲和头','亲和模板','实际模型响应头','原生约束响应头','计费层级响应头'),
@@ -136,7 +138,14 @@ def compile_workbook(content, settings):
             'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
                 'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
-    thinking_specs=compile_thinking_mappings(ext['思考映射清单'],cap_rows)
+    extra_thinking=unique(ext['思考合同配置'],'合同ID')
+    if set(extra_thinking) & set(cap_rows): raise DeclarationError('思考合同配置与能力合同重复登记')
+    thinking_specs=compile_thinking_mappings(ext['思考映射清单'],{**cap_rows,**extra_thinking})
+    for cid in extra_thinking:
+        if cid.startswith('template:'): continue
+        source=value(extra_thinking[cid],'源合同ID')
+        if source not in contracts: raise DeclarationError('未知兼容合同 '+source)
+        contracts[cid]=replace(contracts[source],contract_id=cid,thinking=thinking_specs[cid])
     bindings={}
     for row in ext['供应配置']:
         key=tuple(value(row,f) for f in ('对外模型名','环境','渠道名称'))
@@ -244,6 +253,30 @@ def compile_workbook(content, settings):
             'connection_id':connection.connection_id,'channel_id':connection.channel_id,'protocol':connection.protocol,
             'endpoint':connection.rest_base_url or connection.base_url}
     group_scopes={}
+    seen_thinking_bindings=set()
+    for row in ext['供应思考绑定']:
+        sid=value(row,'供应ID'); model=value(row,'模型匹配'); cid=value(row,'合同ID')
+        if (sid,model) in seen_thinking_bindings: fail(row,'供应ID','重复供应绑定')
+        seen_thinking_bindings.add((sid,model))
+        source=supplies.get(sid)
+        if source is None or cid not in contracts or cid not in extra_thinking: fail(row,'合同ID','未知供应或映射合同')
+        from fnmatch import fnmatchcase
+        if not fnmatchcase(model,source.model_pattern): fail(row,'模型匹配','不能扩大原供应模型范围')
+        target=sid if model==source.model_pattern else sid+':thinking:'+stable_hash([model,cid])[:12]
+        supplies[target]=replace(source,offering_id=target,model_pattern=model,capability_contract_id=cid,priority=number(row,'优先级',minimum=-2147483648))
+    for sid,supply in list(supplies.items()):
+        if not supply.enabled: continue
+        contract=contracts[supply.capability_contract_id]
+        if contract.thinking.get('version')!='relay-thinking/2':
+            raise DeclarationError('启用供应缺少新版思考映射: '+sid)
+        from app.protocol_adapters.thinking_projection import validate_projection
+        validate_projection(contract.thinking,connections[supply.connection_id].protocol)
+        if sid not in targets:
+            connection=connections[supply.connection_id]
+            targets[sid]={'sheet':'思考合同配置','row':extra_thinking[supply.capability_contract_id]['_row'],
+                'model':supply.model_pattern,'channel':connection.channel_id,'connection_id':connection.connection_id,
+                'channel_id':connection.channel_id,'protocol':connection.protocol,
+                'endpoint':connection.rest_base_url or connection.base_url}
     for s in supplies.values():
         if not s.supply_group_id: continue
         c=connections[s.connection_id]

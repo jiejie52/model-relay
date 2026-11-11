@@ -38,11 +38,17 @@ class ResultCommitter:
             return await self.fail_fact(plan, fact)
         if fact.provider_dispatch_state != "result_stored" or fact.standardized_result is None:
             raise ExecutionConflictError("Result commit requires an archived provider response")
+        if plan.snapshot.get("thinking") is not None and not isinstance(
+                (fact.standardized_result.observed or {}).get("observed_thinking"), dict):
+            exc = ProviderRequestError("THINKING_EVIDENCE_ARCHIVE_INVALID", "Thinking execution facts are missing")
+            setattr(exc, "provider_success_object_id", fact.provisional_raw_object_id)
+            setattr(exc, "provider_output_object_id", fact.provisional_output_object_id)
+            raise exc
         request_row, session, snapshot = map(thaw_json, (plan.request_record, plan.session_record, plan.snapshot))
         request_id, session_id = str(request_row["id"]), str(request_row["session_id"])
         result = fact.standardized_result
         contract_observation = None
-        if snapshot.get("schema_version") == "relay-request/2.4":
+        if snapshot.get("schema_version") == "relay-request/2.4" or snapshot.get("thinking") is not None:
             try:
                 contract_observation = validate_execution_observations(snapshot, result.observed or {})
             except ProviderRequestError as exc:
@@ -281,6 +287,8 @@ class ResultCommitter:
         marker = row.get("provisional_compact_result") or {}
         object_id = marker.get("_relay_execution_fact")
         active_fence = fence or plan.execution_fence
+        if plan.snapshot.get("thinking") is not None and not object_id:
+            raise ProviderRequestError("THINKING_EXECUTION_FACT_MISSING", "New thinking requests require archived execution facts")
         if object_id:
             identity = {"tenant_id": row["tenant_id"], "conversation_hash": row["conversation_hash"]}
             archive = await self.artifacts.load_json(object_id, **identity)
@@ -290,6 +298,8 @@ class ResultCommitter:
             raw = await self.artifacts.load_bytes(row["provisional_result_object_id"], **identity)
             if __import__("hashlib").sha256(raw).hexdigest() != archive.get("raw_sha256"):
                 raise ExecutionConflictError("Archived raw response integrity mismatch")
+            if plan.snapshot.get("thinking") is not None and not isinstance((archive.get("result", {}).get("observed") or {}).get("observed_thinking"), dict):
+                raise ProviderRequestError("THINKING_EVIDENCE_ARCHIVE_INVALID", "Archived thinking evidence is missing")
             result = StandardizedProviderResult(raw_bytes=raw, **archive["result"])
             fact = ActualExecutionFact(str(row["id"]), "result_stored", standardized_result=result,
                 provisional_raw_object_id=row["provisional_result_object_id"],

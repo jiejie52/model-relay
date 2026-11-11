@@ -393,7 +393,7 @@ class ControlledInvoker:
         fact_object_id = await self.artifacts.store_object(state.request_row, "execution-fact.json", json_bytes({
             "schema_version": "relay-execution-fact/1", "request_id": state.request_id,
             "snapshot_hash": stable_hash(state.snapshot), "raw_sha256": __import__("hashlib").sha256(result.raw_bytes).hexdigest(),
-            "result": archived_result, "observation": observation,
+            "result": archived_result, "observation": observation, "audit_context": state.snapshot.get("audit_context") or {},
         }), "application/json")
         marker = {"_relay_execution_fact": fact_object_id, "schema_version": "relay-result-pending-commit/1"}
         if state.fence is not None:

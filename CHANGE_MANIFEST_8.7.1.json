@@ -1,0 +1,207 @@
+{
+  "version": "8.7.1",
+  "baseline": "model-relay-8.6.0.zip",
+  "baseline_sha256": "f4401074584c94e81314dcaf217f30b9b48d734e4b0dea278e7ad2ded8520485",
+  "reapplied_feature_version": "8.7.0",
+  "reason": "Bug 修复：Docker COPY 所需的 requirements.txt 缺失；升级 ZZ 位",
+  "changes": [
+    {
+      "path": "CHANGE_MANIFEST_8.7.0.json",
+      "action": "added",
+      "sha256": "cc1589faa2d488c7a369893099574ac411da343b18b3090beea5a30059ea064f"
+    },
+    {
+      "path": "UPGRADE_8.7.0.md",
+      "action": "added",
+      "sha256": "b6f30c606850554e31dcf47dd5d5b197e90dbf32c195e9703ffe92eaa63a7168"
+    },
+    {
+      "path": "UPGRADE_8.7.1.md",
+      "action": "added",
+      "sha256": "ae44cee80e61eb8f5d2f5c3b72fa0c3b65551ac0da150c8b4b09c6422a85626a"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "f0fef3bc9288ff13ff3fca5913f5d9b0ed5de06affb34d63869c8b8e2637e007"
+    },
+    {
+      "path": "app/control_plane/definitions.py",
+      "action": "modified",
+      "sha256": "1c152d29ba4e2351834f759acc9618e31a775c93880123ff5aad42daf38e100a"
+    },
+    {
+      "path": "app/control_plane/execution_authorization.py",
+      "action": "modified",
+      "sha256": "5c2fb7dfa8c445b99ece69756d8818207886236918797627e8c215d955c20e0d"
+    },
+    {
+      "path": "app/control_plane/governance/deployment_validation.py",
+      "action": "modified",
+      "sha256": "61486a7d6638a12467bd1d8c263d6a6c2926d631a6ed9a3bf1e9c64849851e66"
+    },
+    {
+      "path": "app/control_plane/governance/snapshot_compiler.py",
+      "action": "modified",
+      "sha256": "51e3cbc54e62b1a9649d3a7cf9c8f970914d4eed3d340d5e1d8057381866c521"
+    },
+    {
+      "path": "app/control_plane/governance/thinking_mappings.py",
+      "action": "added",
+      "sha256": "ffa18c450efacb67f5f2b653c0b89a83bb81fda1307f95b00aa462ea8f75dab1"
+    },
+    {
+      "path": "app/control_plane/governance/v2_import.py",
+      "action": "modified",
+      "sha256": "4407da3759cc7ed91fc360b91d163f5f19c785c95866075dd6aad69c3bf0156e"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "action": "modified",
+      "sha256": "98290f0826cec3d2c4c125199287bbb291a3632cc1f9a115bad690f036f66d8e"
+    },
+    {
+      "path": "app/core/idempotency.py",
+      "action": "modified",
+      "sha256": "3da81f502826509338dc6aad091ec30744911b7156bb526334437d0d05aa5eb9"
+    },
+    {
+      "path": "app/execution_plane/context_planner.py",
+      "action": "modified",
+      "sha256": "053ad62a558bdd177b435aad8f4e9d0adfdcfee10fabdedc8cc35177ebe7a9cb"
+    },
+    {
+      "path": "app/execution_plane/plan_loader.py",
+      "action": "modified",
+      "sha256": "2a2d31268a4caa14b9b480c1a728f7b3e4b03db32848ad274973769b92bc039a"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "action": "modified",
+      "sha256": "af524499079777a9480da7daecd2f6056b3c47180de29a89e2befa2b4c4dd9d1"
+    },
+    {
+      "path": "app/execution_plane/request_identity.py",
+      "action": "modified",
+      "sha256": "f32f724ac84a298afd64199c8d98902b0ef3505b1a37849f5ecb2a9b25c17084"
+    },
+    {
+      "path": "app/execution_plane/result_committer.py",
+      "action": "modified",
+      "sha256": "ee5d21d9df8c8c0438b8c2945a02a7f52b043a7238888672d8d2eb792104023c"
+    },
+    {
+      "path": "app/execution_plane/result_contract.py",
+      "action": "modified",
+      "sha256": "a093d2e298087332e24a13897e9c50d5fd891bdf93ae631c94970e40e8e93c48"
+    },
+    {
+      "path": "app/execution_plane/semantic_resolver.py",
+      "action": "modified",
+      "sha256": "4815a490e447dd0d17783989c1eb6e47253faf9248190bab82f481e0d06a542d"
+    },
+    {
+      "path": "app/execution_plane/supply_resolver.py",
+      "action": "modified",
+      "sha256": "3a620ba26ab7bc34bd76d763db26166a61fe99e54e1659c41ed303877bb6cc76"
+    },
+    {
+      "path": "app/execution_plane/thinking_resolver.py",
+      "action": "added",
+      "sha256": "7b0056ea842f27b907f66ae8b6e68e4dd9a6e44813db162deebcc841b5e505f7"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/chat_completions.py",
+      "action": "modified",
+      "sha256": "8673cbaf1e4b5c37864445e21264a3dc50609e733b0ed31f754a1df6fdd63fd2"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/claude_messages.py",
+      "action": "modified",
+      "sha256": "3b105e936cde717cebe480555bd84e785212fbb4ecece83292ffd44e35440ef6"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_native.py",
+      "action": "modified",
+      "sha256": "26d7cc35fdd45f15fa3e886ad57cc67c484c8f7d43bd3652b8cb4e746e4063ea"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/moonshot_chat.py",
+      "action": "modified",
+      "sha256": "1400dfac3c0822d78d49d6242f96746bb9d22880dbd235b5f9c4e0ebcf276bb4"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/openai_compatible.py",
+      "action": "modified",
+      "sha256": "78b626a2c4832effaea4199c7d2388b42fc9b99b1866397126182b2f9ce68a28"
+    },
+    {
+      "path": "app/protocol_adapters/thinking_evidence.py",
+      "action": "added",
+      "sha256": "1d6f2b525da945a64e5886d504fd02456883afc66b33174d789e6ee0ceefcc5d"
+    },
+    {
+      "path": "app/protocol_adapters/thinking_projection.py",
+      "action": "added",
+      "sha256": "7c895f5b75537e30618c015a059d833acbeb589c9619937b77246c4bb633a938"
+    },
+    {
+      "path": "app/protocol_adapters/v2_base.py",
+      "action": "modified",
+      "sha256": "947fe12e3d56c1a9e2f3853fe69a894b815d40adf65db081bc3d153f9e4e11b1"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/http_wire.py",
+      "action": "modified",
+      "sha256": "36f7a998dcfe2aecc1848ba4b0fe6e5526802b2d179338f015861d23fc9dcdab"
+    },
+    {
+      "path": "app/runtime/contracts.py",
+      "action": "modified",
+      "sha256": "dc22d5eb9aa9ecc40f33f8dc30960d35e9ecf0c9a69327b052e1341f308b5a84"
+    },
+    {
+      "path": "app/runtime/controlled_invoker.py",
+      "action": "modified",
+      "sha256": "67bb21ab11bfdb8099d88a22ea9526114045e9a46bcd6fad4c31a2a9883f7cba"
+    },
+    {
+      "path": "app/runtime/resource_adapters/gemini_stateful_cache.py",
+      "action": "modified",
+      "sha256": "445b806a7bc4c413a52bf8266186a476eaab4992fcb2777b349b19d3ebc71ce3"
+    },
+    {
+      "path": "app/thinking_contracts.py",
+      "action": "added",
+      "sha256": "0a7536fb574cd272ea55f6495dddc3d863959dce2e3e2f9a838948dc444f84a1"
+    },
+    {
+      "path": "app/v2_models.py",
+      "action": "modified",
+      "sha256": "40af2b876f9a1d68a3b21e0c10410ba1eb582ef3bd7ae56d2ce7c4409f9b5d9b"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "action": "modified",
+      "sha256": "0fc1e7cc3112046e4d7872b29c6e6094cd8b5130754095d5386f022d3bfaa14a"
+    },
+    {
+      "path": "requirements.txt",
+      "action": "added",
+      "sha256": "5303d35ec76feff46e97df3bcb548a45b4ecec5107f4c47224ba0607f56aade9"
+    }
+  ],
+  "deleted_files": [],
+  "validation": {
+    "fresh_python_3_12_install": "passed",
+    "pip_check": "passed",
+    "compileall": "passed",
+    "api_worker_import": "passed",
+    "workbook_supplies_compiled": 6,
+    "gemini_sdk_initialize_close": "passed",
+    "uvicorn_health_and_openapi": "passed, external-service lifespan disabled",
+    "docker_build": "not run: Docker unavailable",
+    "railway_deploy": "not run",
+    "test_files_added": false
+  }
+}

@@ -17,3 +17,4 @@ class ExecutionServices:
     provider_files: Any
     inline_scheduler: Any
     headers: Mapping[str, str] = field(default_factory=dict)
+    entry_point: str = "/v2/sessions/{session_id}/requests"

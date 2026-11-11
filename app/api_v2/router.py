@@ -814,4 +814,5 @@ async def cancel_request(
 
 def _execution_services(request: Request) -> ExecutionServices:
     return ExecutionServices(_repo(request), _settings(request), _storage(request), _route_resolver(request),
-                             _provider_files(request), _inline(request), dict(request.headers))
+                             _provider_files(request), _inline(request), dict(request.headers),
+                             request.scope.get("relay.entry_point", "/v2/sessions/{session_id}/requests"))

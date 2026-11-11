@@ -1,0 +1,80 @@
+{
+  "version": "8.8.0",
+  "baseline": "model-relay-8.7.1.zip",
+  "baseline_sha256": "4073a7b8526e75ddc842adb9ade4076465de05a826feddd60ebff0cab971613f",
+  "changes": [
+    {
+      "path": "UPGRADE_8.8.0.md",
+      "action": "added",
+      "sha256": "9cfc002821e65f032335b56bfc2e76c10b71647b214d35fc5ef06d5c2e00c22b"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "a0ea1a3106593cd5c981e2b15ffbaaee08cf5e7b361c3d1be061710ce6ba4f97"
+    },
+    {
+      "path": "app/api_v2/router.py",
+      "action": "modified",
+      "sha256": "bd8118ff9926f5e511352f9d35ae720c9b43aac63c8cbf8acc745f7c24b6c4b5"
+    },
+    {
+      "path": "app/compatibility/dify_v2.py",
+      "action": "added",
+      "sha256": "2cfd74fb3e87598b68097e1fba422af876e6f4f38d408b3c4cf5f93fdbb96265"
+    },
+    {
+      "path": "app/compatibility/relay_gateway.py",
+      "action": "modified",
+      "sha256": "f21ef2f757e0ed0fcddd064ad559fd05cbc4394ef68b8d97a2e0f24c349f500a"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "action": "modified",
+      "sha256": "2969a45794f2c79d289121d50dfa7ce71b0ae4c4744aa43c485b281de9aaec81"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "action": "modified",
+      "sha256": "0baef1b342eb73d49ffd120459fda4b945e75de612e8803866380ec03a3b27c6"
+    },
+    {
+      "path": "app/execution_plane/result_committer.py",
+      "action": "modified",
+      "sha256": "1ac8c5d5896ac052c89735b1e0a6333c0f6cbe39a08f49f19a7806d4720e8c9d"
+    },
+    {
+      "path": "app/execution_plane/services.py",
+      "action": "modified",
+      "sha256": "9e214865fa1f4a0e232004f1bc3b78eb06a7986cf7ea7159daf95ff558a596d6"
+    },
+    {
+      "path": "app/execution_plane/session_manager.py",
+      "action": "modified",
+      "sha256": "7667e69e0475f4080cae1ea8de6db97bf38c3e7e7a73d011a08dd0b796783c66"
+    },
+    {
+      "path": "app/runtime/controlled_invoker.py",
+      "action": "modified",
+      "sha256": "2c71d2f114d6f9d80648d03af64d6c0cf2db4e30a0d12fe8bc91df668cff6af3"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "action": "modified",
+      "sha256": "fdef7487a513ddaa7a7c1ffb4375e9d5dbc376bfd94f80dec50ef46ca4f62d16"
+    }
+  ],
+  "deleted_files": [],
+  "test_files_added": false,
+  "validation": {
+    "compile_import": "passed",
+    "enabled_declarations_on_excel_thinking": "18/18",
+    "thinking_mapping_rows": 189,
+    "intent_protocol_projections": 108,
+    "dify_asgi_boundaries": "passed",
+    "recovery_missing_archive_and_2_2_2_4_contract_checks": "passed",
+    "historical_identity_module": "byte-identical",
+    "original_sheet_values_formulas_validation_counts": "retained",
+    "real_provider_certification": "not performed; pending when unavailable"
+  }
+}

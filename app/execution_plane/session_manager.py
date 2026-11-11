@@ -62,6 +62,8 @@ class SessionManager:
             failures=await qualify_candidates(services,body)
             failures.update(_excluded or {})
             route, route_group, route_pin_state = services.route_resolver.resolve_on_session_create(body,qualification_failures=failures)
+            if ((route.capability_contract or {}).get("thinking") or {}).get("version") != "relay-thinking/2":
+                raise ExecutionRequestError(409, {"code": "THINKING_CONTRACT_UPGRADE_REQUIRED"})
             services.route_resolver.handle_legacy_hint(
                 client_hint=body.connection_id,
                 resolved=route,

@@ -60,6 +60,12 @@ async def dify_relay_gateway(
     if not isinstance(envelope, dict):
         raise HTTPException(status_code=400, detail="request body must be a JSON object")
 
+    contract = envelope.get("execution_contract", "v1")
+    if contract == "v2":
+        from app.compatibility.dify_v2 import handle_dify_v2
+        return await handle_dify_v2(request, envelope, authorization, idempotency_key, tenant_id, conversation_hash)
+    if contract != "v1":
+        raise HTTPException(400, "Unknown execution_contract")
     operation = str(envelope.get("operation") or "").strip().lower()
     headers = _forward_headers(authorization, idempotency_key, tenant_id, conversation_hash)
 
