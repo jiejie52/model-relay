@@ -10,14 +10,17 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/8.6.0'
+COMPILER_VERSION = 'relay-excel/8.7.0'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
-PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据')
+PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
+from app.control_plane.governance.thinking_mappings import FIELDS as THINKING_FIELDS, CONTRACT_OPTIONAL, compile_thinking_mappings
+
 SCHEMAS = {
+ '思考映射清单': THINKING_FIELDS,
  '环境映射': ('环境','部署ID','管理提供方'),
  '连接配置': ('连接ID','渠道名称','渠道ID','协议族','账号ID','项目ID','区域','REST端点','上传端点','SDK端点','API版本','鉴权方式','凭据引用'),
  '协议配置': ('协议ID','协议族','允许主机','亲和启用','亲和头','亲和模板','实际模型响应头','原生约束响应头','计费层级响应头'),
- '能力合同': ('合同ID','输入类型','思考档位','思考投影','自动预算','低预算','中预算','高预算','结构化输出','最大输出Token','材料传输','外链阈值MiB','显式缓存材料模式','最低温度','最高温度','最低TopP','最高TopP'),
+ '能力合同': ('合同ID','输入类型','思考投影','结构化输出','最大输出Token','材料传输','外链阈值MiB','显式缓存材料模式','最低温度','最高温度','最低TopP','最高TopP'),
  '供应配置': ('对外模型名','环境','渠道名称','连接ID','协议ID','合同ID'),
 }
 
@@ -29,6 +32,11 @@ def extension_rows(wb):
         ws = wb[name]
         if tuple(ws.cell(5,i).value for i in range(1,len(fields)+1)) != fields:
             raise DeclarationError(name+'!第5行: 表头与配置格式不符')
+        if name == '能力合同':
+            extras=tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(CONTRACT_OPTIONAL)+1))
+            while extras and extras[-1] is None: extras=extras[:-1]
+            if extras!=CONTRACT_OPTIONAL[:len(extras)]: raise DeclarationError('能力合同: 可选思考约束表头顺序错误')
+            fields=fields+extras
         if name == '供应配置':
             extras = tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(SUPPLY_OPTIONAL)+1))
             while extras and extras[-1] is None: extras=extras[:-1]
@@ -116,7 +124,7 @@ def compile_workbook(content, settings):
             if not re.fullmatch('[A-Za-z0-9-]+',policy['header']) or any(field not in ('token','epoch','session_id')
                 for _,field,_,_ in Formatter().parse(policy['value_template']) if field): fail(row,'亲和模板','包含不支持的占位符或请求头')
         evidence={}
-        for key,field in [('actual_model','实际模型响应头'),('native_constraint_enforced','原生约束响应头'),('billing_tier','计费层级响应头')]:
+        for key,field in [('actual_model','实际模型响应头'),('native_constraint_enforced','原生约束响应头'),('billing_tier','计费层级响应头'),('thinking_parameter_stripped','思考参数剥离响应头'),('thinking_degraded','思考降级响应头'),('effective_thinking_mode','有效思考模式响应头')]:
             header=value(row,field,True)
             if header: evidence[key]=header
         source=value(row,'证据来源',True) or 'gateway_headers'
@@ -128,21 +136,20 @@ def compile_workbook(content, settings):
             'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
                 'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
+    thinking_specs=compile_thinking_mappings(ext['思考映射清单'],cap_rows)
     bindings={}
     for row in ext['供应配置']:
         key=tuple(value(row,f) for f in ('对外模型名','环境','渠道名称'))
         if key in bindings: fail(row,'供应','同模型、环境和渠道只能登记一次')
         bindings[key]=row
     for cid,row in cap_rows.items():
-        modalities=parts(value(row,'输入类型')); levels=parts(value(row,'思考档位'))
-        if any(x not in _MODALITIES for x in modalities) or any(x not in _THINKING for x in levels): fail(row,'输入类型/思考档位','包含未知选项')
+        modalities=parts(value(row,'输入类型'))
+        if any(x not in _MODALITIES for x in modalities): fail(row,'输入类型','包含未知选项')
         structured=value(row,'结构化输出')
         if structured not in _STRUCTURED: fail(row,'结构化输出','包含未知选项')
         transport=parts(value(row,'材料传输'))
         if not set(transport)<= {'provider_files_api','external_signed_url','inline_data'}: fail(row,'材料传输','尚无实现')
-        thinking={'mode':'effort','accepted_levels':[_THINKING[x] for x in levels],'wire_strategy':value(row,'思考投影')}
-        if thinking['wire_strategy']=='gemini_thinking_budget':
-            thinking['mode']='budget';thinking['budget_map']={key:number(row,field,minimum=-1) for key,field in [('auto','自动预算'),('low','低预算'),('medium','中预算'),('high','高预算')]}
+        thinking=thinking_specs[cid]
         maximum=number(row,'最大输出Token',minimum=1)
         options={'max_output_tokens':{'type':'integer','min':1,'max':maximum}}
         for option,low,high in [('temperature','最低温度','最高温度'),('top_p','最低TopP','最高TopP')]:
@@ -179,12 +186,12 @@ def compile_workbook(content, settings):
         connection=connections.get(value(binding,'连接ID')); profile=profiles.get(value(binding,'协议ID')); contract=contracts.get(value(binding,'合同ID'))
         if not connection or not profile or not contract: fail(binding,'连接ID/协议ID/合同ID','引用不存在')
         if connection.protocol!=profile.protocol: fail(binding,'协议ID','与连接协议不一致')
-        if connection.protocol=='gemini_native' and contract.thinking.get('wire_strategy') not in ('gemini_thinking_level','gemini_thinking_budget'):
-            fail(binding,'合同ID','思考投影没有匹配的协议实现')
         if connection.protocol=='gemini_native' and not set(contract.metadata['material_transport']['supported_material_transports']) & {'provider_files_api','external_signed_url'}:
             fail(binding,'合同ID','当前原生材料绑定器需要 Files 或外链传输授权')
-        requirement={'input_modalities':[_MODALITIES[x] for x in parts(m['输入类型'])],
-            'think_levels':[_THINKING[x] for x in parts(m['思考档位'])]}
+        from app.protocol_adapters.thinking_projection import validate_projection
+        try: validate_projection(contract.thinking,connection.protocol)
+        except ValueError as exc: fail(binding,'合同ID/思考投影','contract_id='+value(binding,'合同ID')+': '+str(exc))
+        requirement={'input_modalities':[_MODALITIES[x] for x in parts(m['输入类型'])]}
         if not contract.supports_requirements(requirement)[0]: fail(binding,'合同ID','不能满足模型清单中的输入和思考要求')
         conn_row=conn_rows.get(connection.connection_id)
         if conn_row is None or value(conn_row,'渠道名称')!=channel: fail(binding,'渠道名称','与连接配置不一致')

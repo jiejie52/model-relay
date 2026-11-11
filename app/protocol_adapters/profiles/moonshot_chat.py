@@ -255,6 +255,8 @@ class MoonshotChatAdapter:
                 if "max_output_tokens" in options:
                     payload["max_tokens"] = options["max_output_tokens"]
 
+            from app.protocol_adapters.thinking_projection import project_thinking
+            if project_thinking(payload, snapshot, "moonshot_chat"): return
             think_level = str(snapshot.get("think_level") or "auto").strip().lower() or "auto"
             model = str(snapshot.get("model") or "").strip().lower()
 

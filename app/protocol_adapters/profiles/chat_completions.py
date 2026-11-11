@@ -224,6 +224,8 @@ class ChatCompletionsV2Adapter:
 
     @staticmethod
     def _apply_thinking(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        from app.protocol_adapters.thinking_projection import project_thinking
+        if project_thinking(payload, snapshot, "chat_completions"): return
         contract = snapshot.get("capability_contract")
         thinking = contract.get("thinking") if isinstance(contract, dict) and isinstance(contract.get("thinking"), dict) else {}
         strategy = str(thinking.get("wire_strategy") or "").lower()

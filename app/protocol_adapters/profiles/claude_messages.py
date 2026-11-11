@@ -269,8 +269,10 @@ class ClaudeMessagesV2Adapter:
         thinking = contract.get("thinking") if isinstance(contract, dict) and isinstance(contract.get("thinking"), dict) else {}
         strategy = str(thinking.get("wire_strategy") or "").lower()
         level = str(snapshot.get("think_level") or "auto").lower()
-        output_config: dict[str, Any] = {}
-        if strategy == "claude_adaptive_effort":
+        from app.protocol_adapters.thinking_projection import project_thinking
+        projected = project_thinking(payload, snapshot, "claude_messages")
+        output_config: dict[str, Any] = dict(payload.get("output_config") or {})
+        if not projected and strategy == "claude_adaptive_effort":
             if level == "off":
                 payload["thinking"] = {"type": "disabled"}
             else:

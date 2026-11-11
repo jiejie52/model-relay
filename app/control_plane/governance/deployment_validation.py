@@ -16,6 +16,30 @@ VALIDATOR_VERSION='deployment-probes/1'
 
 class ProbeFailure(RuntimeError): pass
 
+def _project_probe_thinking(payload, cap, protocol):
+    """Probe a declared representative mapping through the registered projector."""
+    spec = cap.thinking
+    if spec.get("version") != "relay-thinking/2": return False
+    from app.protocol_adapters.thinking_projection import project_thinking
+    from app.thinking_contracts import THINKING_CONTRACT_VERSION
+    mappings = spec["mappings"]
+    intent = next((i for i in ("LOW", "MEDIUM", "HIGH", "XHIGH", "MAX")
+        if mappings[i]["is_allowed"] and mappings[i]["satisfies_require"]), "AUTO")
+    r = mappings[intent]
+    e = {"mode": r["effective_mode"], "wire_action": r["wire_action"],
+         "wire_strategy": spec["wire_strategy"], "level": r.get("effective_level"),
+         "budget_tokens": r.get("effective_budget")}
+    if intent == "AUTO" and e["mode"] != "fixed_on":
+        e.update(wire_action="omit", level=None, budget_tokens=None)
+    if e["wire_action"] == "send_budget" and (spec.get("when_thinking_active") or {}).get("budget_lt_max_output"):
+        limit = cap.supported_options.get("max_output_tokens", {}).get("max")
+        required = e["budget_tokens"] + 1
+        if limit is None or required > limit: raise ProbeFailure("probe_budget_exceeds_output_contract")
+        target, key = (payload.setdefault("generationConfig", {}), "maxOutputTokens") if protocol == "gemini_native" else (payload, "max_output_tokens" if protocol == "responses" else "max_tokens")
+        target[key] = max(target.get(key, 0), required)
+    project_thinking(payload, {"thinking": {"version": THINKING_CONTRACT_VERSION, "effective": e}}, protocol)
+    return True
+
 async def verify_supply(settings, plane, supply, *, journal=None):
     spec=plane.connection(supply.connection_id); cap=plane.contract(supply.capability_contract_id)
     profile=plane.protocol_profile(supply.protocol_profile_id)
@@ -73,7 +97,10 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                 last=None
                 for level in levels:
                     config=dict(generation)
-                    if cap.thinking.get('wire_strategy')=='gemini_thinking_budget':
+                    probe_payload={**payload,'generationConfig':config}
+                    if _project_probe_thinking(probe_payload,cap,protocol):
+                        config=probe_payload['generationConfig']
+                    elif cap.thinking.get('wire_strategy')=='gemini_thinking_budget':
                         budget=cap.thinking.get('budget_map',{}).get(level)
                         if type(budget) is not int or budget < -1: raise ProbeFailure('thinking_budget_unexpressible')
                         config['thinkingConfig']={'thinkingBudget':budget}
@@ -112,11 +139,13 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                 if protocol in ('chat_completions','moonshot_chat'):
                     payload={'model':model,'messages':[{'role':'user','content':prompt}],'max_tokens':128}
                     if native: payload['response_format']={'type':'json_schema','json_schema':{'name':'validation','strict':True,'schema':schema}}
+                    _project_probe_thinking(payload,cap,protocol)
                     data=(await request('POST',runtime.rest_base+'/chat/completions',json=payload)).json()
                     text=data.get('choices',[{}])[0].get('message',{}).get('content','')
                 elif protocol=='responses':
                     payload={'model':model,'input':prompt,'max_output_tokens':128}
                     if native: payload['text']={'format':{'type':'json_schema','name':'validation','strict':True,'schema':schema}}
+                    _project_probe_thinking(payload,cap,protocol)
                     data=(await request('POST',runtime.rest_base+'/responses',json=payload)).json()
                     text=''.join(p.get('text','') for o in data.get('output',[]) for p in o.get('content',[]) if p.get('type')=='output_text')
                 elif protocol=='claude_messages':

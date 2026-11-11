@@ -9,4 +9,7 @@ def semantic_intent_hash(intent, resolved):
     value = {**intent, "think_level": resolved.effective_think_level,
              "options": resolved.effective_options, "provider_payload": {},
              "structured_output": normalize_structured_output(intent.get("structured_output"))}
+    if resolved.thinking is not None:
+        from app.thinking_contracts import thinking_identity
+        value["thinking_identity"] = thinking_identity(resolved.thinking)
     return caller_intent_hash(value)

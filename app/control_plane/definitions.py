@@ -108,6 +108,9 @@ class CapabilityContract:
             if str(x).strip()
         }
         available_features = {x.lower() for x in self.features}
+        if self.thinking.get("version") == "relay-thinking/2":
+            from app.thinking_contracts import derive_thinking_summary
+            if derive_thinking_summary(self.thinking)["supports_thinking"]: available_features.add("thinking")
         missing_features = sorted(required_features - available_features)
         if missing_features:
             return False, "unsupported_features:" + ",".join(missing_features)
@@ -117,6 +120,13 @@ class CapabilityContract:
             for x in (req.get("think_levels") or [])
             if str(x).strip()
         }
+        if self.thinking.get("version") == "relay-thinking/2":
+            from app.thinking_contracts import derive_thinking_summary
+            summary = derive_thinking_summary(self.thinking)
+            accepted = {x.lower() for x in summary["hard_satisfied_intents"]}
+            missing = {"off" if x in {"none", "disabled"} else x for x in required_levels} - accepted
+            if missing: return False, "unsupported_think_levels:" + ",".join(sorted(missing))
+            required_levels = set()
         accepted_levels = {
             str(x).strip().lower()
             for x in (self.thinking.get("accepted_levels") or [])
@@ -705,6 +715,10 @@ class ModelControlPlane:
             policy = offering.observed_model_policy.lower()
             from app.control_plane.cache_contracts import validate_supply_cache_transport
             validate_supply_cache_transport(self.connections[offering.connection_id],self.capability_contracts[offering.capability_contract_id],requires_file_adapter=offering.requires_file_adapter)
+            thinking = self.capability_contracts[offering.capability_contract_id].thinking
+            if thinking.get("version"):
+                from app.protocol_adapters.thinking_projection import validate_projection
+                validate_projection(thinking, self.connections[offering.connection_id].protocol)
             auth=offering.metadata.get('execution_authorization',{})
             if auth.get('evidence_source_mode')=='first_party_native_payload':
                 profile=self.protocol_profiles.get(offering.protocol_profile_id)
@@ -763,6 +777,9 @@ class ModelControlPlane:
             raise ValueError("supported_options must be an object or array")
         thinking = value.get("thinking") or {"mode": "none", "accepted_levels": ["auto"]}
         structured = value.get("structured_output") or {"mode": "none"}
+        if isinstance(thinking, dict) and thinking.get("version"):
+            from app.thinking_contracts import validate_thinking_contract
+            thinking = {**thinking, "derived_capabilities": validate_thinking_contract(thinking)}
         if not isinstance(thinking, dict) or not isinstance(structured, dict):
             raise ValueError("thinking and structured_output must be objects")
         return CapabilityContract(

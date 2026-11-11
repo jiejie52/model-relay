@@ -236,6 +236,8 @@ class GeminiStatefulCacheAdapter:
         })
 
     async def create(self, *, spec: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
+        if {"thinkingConfig", "thinking", "generationConfig"}.intersection(spec.get("provider_payload") or {}):
+            raise ProviderRequestError("CACHE_THINKING_PARAMETERS_FORBIDDEN", "Per-request thinking controls cannot enter cachedContents")
         model = self._model(spec)
         if (
             str(spec.get("layout_version") or "") in {GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V9}

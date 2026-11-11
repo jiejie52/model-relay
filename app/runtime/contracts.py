@@ -58,7 +58,7 @@ class SealedDispatchBundle:
     def route_binding(self): return (self.session.get("metadata") or {}).get("_relay_route") or {}
     @property
     def effective_semantics(self):
-        return freeze_json({k: self.snapshot.get(k) for k in ("think_level", "effective_options", "structured_output", "requested_cache_mode")})
+        return freeze_json({k: self.snapshot.get(k) for k in ("think_level", "thinking", "effective_options", "structured_output", "requested_cache_mode")})
     @property
     def material_binding(self): return self.material_bindings
     @property

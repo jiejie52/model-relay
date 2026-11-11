@@ -1,0 +1,254 @@
+{
+  "version": "8.7.0",
+  "baseline": "model-relay-8.6.0.zip",
+  "baseline_sha256": "f4401074584c94e81314dcaf217f30b9b48d734e4b0dea278e7ad2ded8520485",
+  "version_reason": "既有思考能力解析与映射处理方式增强，升级 YY 位",
+  "architecture_invariants": [
+    "Session 供应与连接身份冻结",
+    "执行面裁决有效语义，Adapter 仅投影冻结事实",
+    "发送前原子封存和 ExecutionFence/TransportGuard 保留",
+    "dispatch_started 后禁止换渠道、换机制或重复推理",
+    "result_stored 仅恢复核验和提交",
+    "观测事实不改写请求身份",
+    "思考控制不进入缓存内容身份"
+  ],
+  "deleted_files": [],
+  "changes": [
+    {
+      "path": "UPGRADE_8.7.0.md",
+      "action": "added",
+      "sha256": "b6f30c606850554e31dcf47dd5d5b197e90dbf32c195e9703ffe92eaa63a7168"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "2a208d5955b3a9e768326c91cea925c167265bf0524ed2e4116b9783b92a064d",
+      "baseline_sha256": "b6c506878376f258b3eb051598373f0cc4fb0cfb04f6b2c619b56dd77cec6ed9"
+    },
+    {
+      "path": "app/control_plane/definitions.py",
+      "action": "modified",
+      "sha256": "1c152d29ba4e2351834f759acc9618e31a775c93880123ff5aad42daf38e100a",
+      "baseline_sha256": "eee6ec8ea013dc05e32d794f16b826d5f3bdc3ea081466252ae6fadb40518062"
+    },
+    {
+      "path": "app/control_plane/execution_authorization.py",
+      "action": "modified",
+      "sha256": "5c2fb7dfa8c445b99ece69756d8818207886236918797627e8c215d955c20e0d",
+      "baseline_sha256": "b8c02683253aaa6d550482df4c365d79bba97fe3ea73a203ca91d3ee214f7f60"
+    },
+    {
+      "path": "app/control_plane/governance/deployment_validation.py",
+      "action": "modified",
+      "sha256": "61486a7d6638a12467bd1d8c263d6a6c2926d631a6ed9a3bf1e9c64849851e66",
+      "baseline_sha256": "a5f81ad4c66f602b998ac0d58d923e15dd535909a673b17ab1383a94e197862e"
+    },
+    {
+      "path": "app/control_plane/governance/snapshot_compiler.py",
+      "action": "modified",
+      "sha256": "51e3cbc54e62b1a9649d3a7cf9c8f970914d4eed3d340d5e1d8057381866c521",
+      "baseline_sha256": "48eb8757be09a1bc4a4172dfaa770aa97566a59c7b85449dd9c089196988416e"
+    },
+    {
+      "path": "app/control_plane/governance/thinking_mappings.py",
+      "action": "added",
+      "sha256": "ffa18c450efacb67f5f2b653c0b89a83bb81fda1307f95b00aa462ea8f75dab1"
+    },
+    {
+      "path": "app/control_plane/governance/v2_import.py",
+      "action": "modified",
+      "sha256": "4407da3759cc7ed91fc360b91d163f5f19c785c95866075dd6aad69c3bf0156e",
+      "baseline_sha256": "c5cb078d0857357e348672b66f57c66a079d56b9ca3e4f13bf629da47196ec67"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "action": "modified",
+      "sha256": "98290f0826cec3d2c4c125199287bbb291a3632cc1f9a115bad690f036f66d8e",
+      "baseline_sha256": "b9964c62313174f7babf2bad093ce86f6eef0a836d74b8cffe4491f264a4a58c"
+    },
+    {
+      "path": "app/core/idempotency.py",
+      "action": "modified",
+      "sha256": "3da81f502826509338dc6aad091ec30744911b7156bb526334437d0d05aa5eb9",
+      "baseline_sha256": "f96ddce2609a5f2e61c3eaa1b0bf1448a2992ca9cfe3d2705e068dec61698e35"
+    },
+    {
+      "path": "app/execution_plane/context_planner.py",
+      "action": "modified",
+      "sha256": "053ad62a558bdd177b435aad8f4e9d0adfdcfee10fabdedc8cc35177ebe7a9cb",
+      "baseline_sha256": "7158d6ec945d1cff5a7e82853d300afb5b482790d421eb1df500fbb8d263ce02"
+    },
+    {
+      "path": "app/execution_plane/plan_loader.py",
+      "action": "modified",
+      "sha256": "2a2d31268a4caa14b9b480c1a728f7b3e4b03db32848ad274973769b92bc039a",
+      "baseline_sha256": "733826b3aec8c65a6b4eb689208abfcd9bc5ebeec6a3f340e213d561b4ef40d9"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "action": "modified",
+      "sha256": "af524499079777a9480da7daecd2f6056b3c47180de29a89e2befa2b4c4dd9d1",
+      "baseline_sha256": "bbdb1fbbc0f40b8cf88bc754ab0a19da8d902d3b360e07ba1ebe8df535af86cc"
+    },
+    {
+      "path": "app/execution_plane/request_identity.py",
+      "action": "modified",
+      "sha256": "f32f724ac84a298afd64199c8d98902b0ef3505b1a37849f5ecb2a9b25c17084",
+      "baseline_sha256": "d4c4713cbf089f73af25cf90b88eef966a147ba6f52c7827644e4535f3ccf1ee"
+    },
+    {
+      "path": "app/execution_plane/result_committer.py",
+      "action": "modified",
+      "sha256": "ee5d21d9df8c8c0438b8c2945a02a7f52b043a7238888672d8d2eb792104023c",
+      "baseline_sha256": "b391d8845a3672dfb54345d53a8cef141512d0e18d9cd0a1cc6b1830e51074d1"
+    },
+    {
+      "path": "app/execution_plane/result_contract.py",
+      "action": "modified",
+      "sha256": "a093d2e298087332e24a13897e9c50d5fd891bdf93ae631c94970e40e8e93c48",
+      "baseline_sha256": "868a5bee0ab7a27bd0442da2a37ceab62d621aae82d7dd7af70e819659dcc665"
+    },
+    {
+      "path": "app/execution_plane/semantic_resolver.py",
+      "action": "modified",
+      "sha256": "4815a490e447dd0d17783989c1eb6e47253faf9248190bab82f481e0d06a542d",
+      "baseline_sha256": "8d32492e4edf0945b1b6631423a756cb4a447c983386c7e5cc70671287f9e549"
+    },
+    {
+      "path": "app/execution_plane/supply_resolver.py",
+      "action": "modified",
+      "sha256": "3a620ba26ab7bc34bd76d763db26166a61fe99e54e1659c41ed303877bb6cc76",
+      "baseline_sha256": "14ee33be31d5dc8e97458f406f598357fad86b7388d74e9b022f2ad51a7016fd"
+    },
+    {
+      "path": "app/execution_plane/thinking_resolver.py",
+      "action": "added",
+      "sha256": "7b0056ea842f27b907f66ae8b6e68e4dd9a6e44813db162deebcc841b5e505f7"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/chat_completions.py",
+      "action": "modified",
+      "sha256": "8673cbaf1e4b5c37864445e21264a3dc50609e733b0ed31f754a1df6fdd63fd2",
+      "baseline_sha256": "33c8afb4eecfb6cef2ad7feb37788a82ef3768c943f29248fe52b1ee1b84f061"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/claude_messages.py",
+      "action": "modified",
+      "sha256": "3b105e936cde717cebe480555bd84e785212fbb4ecece83292ffd44e35440ef6",
+      "baseline_sha256": "fa101fa9599e16fe2e487e4bb472104106bf414c4a9e493de05a46653e5a62f6"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_native.py",
+      "action": "modified",
+      "sha256": "26d7cc35fdd45f15fa3e886ad57cc67c484c8f7d43bd3652b8cb4e746e4063ea",
+      "baseline_sha256": "4b93b09591348b5577a93066032c697b3310946cf563d2273d5f57d2a8fbfdc5"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/moonshot_chat.py",
+      "action": "modified",
+      "sha256": "1400dfac3c0822d78d49d6242f96746bb9d22880dbd235b5f9c4e0ebcf276bb4",
+      "baseline_sha256": "45bc2bec644ad74cee0c7538da6a2f732c6e71f86cdd37d944b04354116d3b11"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/openai_compatible.py",
+      "action": "modified",
+      "sha256": "78b626a2c4832effaea4199c7d2388b42fc9b99b1866397126182b2f9ce68a28",
+      "baseline_sha256": "51cb4835960cc1148e664a38c74e64bab0f4af9965fd6420e80509960aac2a9b"
+    },
+    {
+      "path": "app/protocol_adapters/thinking_evidence.py",
+      "action": "added",
+      "sha256": "1d6f2b525da945a64e5886d504fd02456883afc66b33174d789e6ee0ceefcc5d"
+    },
+    {
+      "path": "app/protocol_adapters/thinking_projection.py",
+      "action": "added",
+      "sha256": "7c895f5b75537e30618c015a059d833acbeb589c9619937b77246c4bb633a938"
+    },
+    {
+      "path": "app/protocol_adapters/v2_base.py",
+      "action": "modified",
+      "sha256": "947fe12e3d56c1a9e2f3853fe69a894b815d40adf65db081bc3d153f9e4e11b1",
+      "baseline_sha256": "f2fef2ca699c969a02fa2615ed33c2bdca0b99ea2cd056578063b7239a7a0088"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/http_wire.py",
+      "action": "modified",
+      "sha256": "36f7a998dcfe2aecc1848ba4b0fe6e5526802b2d179338f015861d23fc9dcdab",
+      "baseline_sha256": "576189b510c6b3f7dd1de591e02ec635ac8b18b060afef9b6f88d409e3322ec2"
+    },
+    {
+      "path": "app/runtime/contracts.py",
+      "action": "modified",
+      "sha256": "dc22d5eb9aa9ecc40f33f8dc30960d35e9ecf0c9a69327b052e1341f308b5a84",
+      "baseline_sha256": "1660641a4cc12447a573a44216e00f1e8c26ad15b856e4c0c74baabdc71a5800"
+    },
+    {
+      "path": "app/runtime/controlled_invoker.py",
+      "action": "modified",
+      "sha256": "67bb21ab11bfdb8099d88a22ea9526114045e9a46bcd6fad4c31a2a9883f7cba",
+      "baseline_sha256": "e281fb691e1dfc7347b5369f5ebf6ce32c11903f9b405eb939578ffa0c5a0820"
+    },
+    {
+      "path": "app/runtime/resource_adapters/gemini_stateful_cache.py",
+      "action": "modified",
+      "sha256": "445b806a7bc4c413a52bf8266186a476eaab4992fcb2777b349b19d3ebc71ce3",
+      "baseline_sha256": "5d71823fc47d9de009f0c16bf67056ee06acdc0ef5b10b4c7ca3d387c3fc87e1"
+    },
+    {
+      "path": "app/thinking_contracts.py",
+      "action": "added",
+      "sha256": "0a7536fb574cd272ea55f6495dddc3d863959dce2e3e2f9a838948dc444f84a1"
+    },
+    {
+      "path": "app/v2_models.py",
+      "action": "modified",
+      "sha256": "40af2b876f9a1d68a3b21e0c10410ba1eb582ef3bd7ae56d2ce7c4409f9b5d9b",
+      "baseline_sha256": "d7b6f29fdf787f32c70584a60a437b35879f89294a865b48b8b36386f00f0ddb"
+    },
+    {
+      "path": "config/model_management_v2.xlsx",
+      "action": "modified",
+      "sha256": "0fc1e7cc3112046e4d7872b29c6e6094cd8b5130754095d5386f022d3bfaa14a",
+      "baseline_sha256": "d0a16665f5933d63b914f92468f8edc7bc396f069df8aa68c55aa5077d69745d"
+    }
+  ],
+  "validation": {
+    "python_compile": "passed",
+    "api_worker_import": "passed",
+    "workbook_compile": {
+      "status": "passed",
+      "contracts": 6,
+      "mapping_rows": 42
+    },
+    "scenario_groups": [
+      "seven intents and omitted/empty/explicit provenance",
+      "compiled Flash-Lite LOW -> adaptive/omit; require rejects",
+      "XHIGH/MAX clamps to configured HIGH under prefer only",
+      "Session routing uses derived hard-supported intents",
+      "missing/duplicate/inverted/fixed-OFF declarations block compilation with row diagnostics",
+      "current thinking changes Request identity without changing content fingerprints",
+      "40 comparisons preserve all four historical Request hash algorithms",
+      "old Session conversion keeps the frozen declaration unchanged; historical Request replay remains exact",
+      "fixed-on configuration enables thinking without model-name branches; OFF and hard depths reject",
+      "budget hard guarantees, output/sampling validation, omitted defaults and equal-budget identity convergence",
+      "Responses and Chat Completions project the same frozen discrete semantics",
+      "explicit AUTO can send adaptive configuration while omitted AUTO stays omitted",
+      "none/toggle/fixed_on/discrete/budget/adaptive mode coverage",
+      "Request identity excludes provenance labels and includes hard acceptance policy",
+      "five protocol families extract thinking evidence; unknown counters remain distinct from zero",
+      "gateway stripping and positive OFF contradictions fail post-response checks",
+      "real ControlledInvoker verifies the seal, calls once and archives thinking evidence",
+      "real commit-only recovery checks archived thinking and fails without runtime re-entry or losing raw refs",
+      "real Gemini layout/9 cache content/prefix fingerprints and frozen history stay unchanged across LOW/HIGH",
+      "real RequestAcceptor creates and replays v2.2/v3 requests with provenance and semantic idempotency",
+      "new requests on AUTO-only legacy Sessions can map preferences to declared AUTO while require and OFF stay strict"
+    ],
+    "scope": "本地、受控替身与确定性函数验证；无真实供应、数据库 RPC、网络与计费认证",
+    "added_test_files": false
+  },
+  "limitations": [
+    "原始包未附 requirements.txt；Docker 全新构建仍需现有部署依赖清单",
+    "新旧 API/Worker 应同步部署，既有 Request 保留历史身份与投影"
+  ]
+}

@@ -33,5 +33,5 @@ class ExecutionPlanLoader:
             history = await self.artifacts.load_json(session["history_object_id"], tenant_id=row["tenant_id"], conversation_hash=row["conversation_hash"])
             if not isinstance(history, list): raise ValueError("Session history is not a list")
         return FrozenExecutionPlan(row, session,
-            {key: snapshot.get(key) for key in ("think_level", "effective_options", "structured_output", "requested_cache_mode")},
+            {key: snapshot.get(key) for key in ("think_level", "thinking", "effective_options", "structured_output", "requested_cache_mode")},
             snapshot.get("context_plan") or {}, snapshot.get("cache_plan") or {}, fence, snapshot, history)

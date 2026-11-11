@@ -26,6 +26,10 @@ class StandardizedProviderResult:
 
     def __post_init__(self):
         from app.immutable import freeze_json
+        from app.protocol_adapters.thinking_evidence import extract_thinking_evidence
+        observed = dict(self.observed or {})
+        observed.setdefault("observed_thinking", extract_thinking_evidence(self.raw_json, observed.get("protocol"), observed))
+        object.__setattr__(self, "observed", observed)
         from app.protocol_adapters.cache_usage import normalize_cache_usage
         if not self.normalized_usage:
             normalized = normalize_cache_usage(

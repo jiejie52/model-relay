@@ -38,6 +38,7 @@ class RequestAcceptor:
         self.services = services
 
     async def accept(self, session_id: UUID, body: SessionRequestCreate, idempotency_key: str, owner: tuple[str, str]):
+        thinking_field_present = "think_level" in body.model_fields_set
         services = self.services
         tenant_id, conversation_hash = owner
         repo = services.repo
@@ -179,7 +180,9 @@ class RequestAcceptor:
             try:
                 replay_options = resolve_model_options(provider=frozen["provider"], model=frozen["model"],
                     options=body.options, provider_payload=body.provider_payload, think_level=body.think_level,
-                    capability_contract=frozen.get("capability_contract"))
+                    capability_contract=frozen.get("capability_contract"),
+                    field_present=(thinking_field_present if "thinking" in frozen else None),
+                    think_level_policy=body.think_level_policy)
                 replay_hash = semantic_intent_hash(public_intent, replay_options)
             except (ModelOptionError, ValueError) as exc:
                 raise ExecutionRequestError(409, {"code": "IDEMPOTENCY_CONFLICT"}) from exc
@@ -189,6 +192,8 @@ class RequestAcceptor:
                 return await services.inline_scheduler.execute(existing)
             return existing
         if existing and str(existing.get("request_identity_version") or "") == "relay-request/2.3":
+            if body.think_level_policy != "prefer":
+                raise ExecutionRequestError(409, {"code": "IDEMPOTENCY_CONFLICT"})
             if str(existing.get("caller_intent_hash") or "") != public_intent_hash:
                 raise ExecutionRequestError(status_code=409, detail="IDEMPOTENCY_CONFLICT")
             log_info(
@@ -205,6 +210,31 @@ class RequestAcceptor:
             )
             if (existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}
                     and existing.get("execution_mode") == "sync"):
+                return await services.inline_scheduler.execute(existing)
+            return existing
+
+        if existing:
+            # Older, non-cache Requests must be compared using their own stored
+            # algorithm; never add a new thinking node to an accepted identity.
+            frozen = await ExecutionArtifacts(repo, services.storage, settings).load_json(
+                existing["request_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash)
+            try:
+                replay_options = resolve_model_options(provider=frozen["provider"], model=frozen["model"],
+                    options=body.options, provider_payload=body.provider_payload, think_level=body.think_level,
+                    capability_contract=frozen.get("capability_contract"),
+                    field_present=(thinking_field_present if "thinking" in frozen else None),
+                    think_level_policy=body.think_level_policy)
+                replay = {**frozen, "input": body.input, "instructions": body.instructions,
+                    "material_ids": body.material_ids, "think_level": replay_options.effective_think_level,
+                    "options": replay_options.requested_options, "effective_options": replay_options.effective_options,
+                    "provider_payload": body.provider_payload, "structured_output": body.structured_output,
+                    "execution": body.execution.model_dump(mode="json")}
+                if replay_options.thinking is not None: replay["thinking"] = replay_options.thinking
+                if request_identity(replay) != existing.get("request_hash"):
+                    raise ValueError("request identity differs")
+            except (ModelOptionError, ValueError) as exc:
+                raise ExecutionRequestError(409, {"code": "IDEMPOTENCY_CONFLICT"}) from exc
+            if existing.get("execution_mode") == "sync" and existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}:
                 return await services.inline_scheduler.execute(existing)
             return existing
 
@@ -341,6 +371,8 @@ class RequestAcceptor:
                 options=body.options,
                 provider_payload=body.provider_payload,
                 think_level=body.think_level,
+                field_present=thinking_field_present,
+                think_level_policy=body.think_level_policy,
                 capability_contract=(
                     dict(frozen_route.get("capability_contract"))
                     if isinstance(frozen_route.get("capability_contract"), dict)
@@ -361,6 +393,11 @@ class RequestAcceptor:
             log_warning(
                 logger,
                 "model_options_rejected",
+                raw_think_level=body.think_level,
+                think_level_source=("omitted" if not thinking_field_present else "explicit_empty" if body.think_level is None or not body.think_level.strip() else "caller_explicit"),
+                think_level_policy=body.think_level_policy,
+                entry_point="/v2/sessions/{session_id}/requests",
+                frozen_contract_id=frozen_route.get("capability_contract_id"),
                 session_id=str(session_id),
                 provider=provider,
                 model=model,
@@ -391,6 +428,13 @@ class RequestAcceptor:
                 },
             )
 
+        if resolved_options.thinking is not None:
+            log_info(logger, "thinking_semantics_resolved", session_id=str(session_id),
+                raw_think_level=body.think_level, think_level_source=resolved_options.thinking["source"],
+                think_level_policy=body.think_level_policy, requested_intent=resolved_options.thinking["requested_intent"],
+                effective_thinking=resolved_options.thinking["effective"], mapping_rule_id=resolved_options.thinking["mapping_rule_id"],
+                mapping_reason=resolved_options.thinking["mapping_reason"], frozen_contract_id=frozen_route.get("capability_contract_id"),
+                entry_point="/v2/sessions/{session_id}/requests")
         for warning in resolved_options.warnings:
             log_warning(
                 logger,
@@ -430,6 +474,7 @@ class RequestAcceptor:
             "capability_contract_hash": frozen_route.get("capability_contract_hash") if frozen_route else None,
             "capability_contract": (dict(frozen_route.get("capability_contract")) if isinstance(frozen_route.get("capability_contract"), dict) else None),
             "observed_model_policy": str(frozen_route.get("observed_model_policy") or "audit") if frozen_route else "audit",
+            **({"thinking": resolved_options.thinking} if resolved_options.thinking is not None else {}),
             "requested_think_level": resolved_options.requested_think_level,
             "think_level": resolved_options.effective_think_level,
             "execution": body.execution.model_dump(mode="json"),

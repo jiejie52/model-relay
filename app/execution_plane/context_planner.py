@@ -194,7 +194,7 @@ def build_context_plan(
             "options": snapshot.get("effective_options"),
             "think_level": snapshot.get("think_level"),
         })
-        if upgraded:
+        if upgraded or "thinking" in snapshot:
             # Logical identity remains in request_identity. Context identity has
             # no executor IDs, object IDs, timestamps, sampling, or wire handles.
             plan["semantic_fingerprint"] = stable_hash({

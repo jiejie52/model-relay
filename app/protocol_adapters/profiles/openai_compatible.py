@@ -211,6 +211,12 @@ class OpenAICompatibleResponsesProvider:
         contract = snapshot.get("capability_contract")
         thinking = contract.get("thinking") if isinstance(contract, dict) and isinstance(contract.get("thinking"), dict) else {}
         strategy = str(thinking.get("wire_strategy") or "").lower()
+        from app.protocol_adapters.thinking_projection import project_thinking
+        if project_thinking(payload, snapshot, "responses"):
+            if thinking.get("include_encrypted_reasoning"):
+                payload["include"] = ["reasoning.encrypted_content"]
+                if session and session.get("prompt_cache_key"): payload["prompt_cache_key"] = session["prompt_cache_key"]
+            return
         if strategy == "responses_reasoning_effort":
             if bool(thinking.get("include_encrypted_reasoning")):
                 payload["include"] = ["reasoning.encrypted_content"]

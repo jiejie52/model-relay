@@ -382,7 +382,8 @@ class ControlledInvoker:
 
         await ensure_execution_allowed(states=("dispatch_started",))
         result = replace(result, normalized_usage={**result.normalized_usage, **(cache_usage or {})})
-        observation = {"cache_summary": cache_summary, "cache_usage": cache_usage,
+        observation = {"observed_thinking": (result.observed or {}).get("observed_thinking"),
+                       "cache_summary": cache_summary, "cache_usage": cache_usage,
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
         # Archive the standardized response and observations for execution-plane
         # recovery. Raw response bytes stay in their original object.

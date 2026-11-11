@@ -63,6 +63,7 @@ class ResolvedModelOptions:
     capability_revision: str
     capability_contract_id: str | None = None
     warnings: tuple[str, ...] = ()
+    thinking: dict[str, Any] | None = None
 
 
 # Compatibility profiles are used only for Sessions created from the legacy
@@ -433,7 +434,7 @@ def _kimi_legacy_thinking(
     return "auto", warnings
 
 
-def resolve_model_options(
+def _resolve_model_options_v86(
     *,
     provider: str,
     model: str,
@@ -441,6 +442,7 @@ def resolve_model_options(
     provider_payload: dict[str, Any] | None = None,
     think_level: str | None = None,
     capability_contract: dict[str, Any] | None = None,
+    _effective_think_level: str | None = None,
 ) -> ResolvedModelOptions:
     """Resolve caller intent against a frozen capability contract.
 
@@ -498,7 +500,9 @@ def resolve_model_options(
     requested_think_level = str(think_level or "auto").strip().lower() or "auto"
     thinking = contract.get("thinking") if isinstance(contract.get("thinking"), dict) else {}
     wire_strategy = str(thinking.get("wire_strategy") or "").lower()
-    if wire_strategy == "moonshot_legacy":
+    if _effective_think_level is not None:
+        effective_think_level = _effective_think_level
+    elif wire_strategy == "moonshot_legacy":
         effective_think_level, extra = _kimi_legacy_thinking(
             model=model_n,
             requested=requested_think_level,
@@ -617,6 +621,66 @@ def resolve_model_options(
         capability_contract_id=contract_id,
         warnings=tuple(warnings),
     )
+
+
+def resolve_model_options(*, provider, model, options, provider_payload=None, think_level=None,
+                          capability_contract=None, field_present=None, think_level_policy="prefer"):
+    # A missing presence argument is the exact historical resolver, used for
+    # persisted request replay and isolated legacy entry points.
+    if field_present is None or not capability_contract:
+        if think_level_policy != "prefer":
+            raise ModelOptionError("THINKING_CONTRACT_UPGRADE_REQUIRED", "A frozen thinking contract is required",
+                                   provider=provider, model=model, option="think_level_policy")
+        normalized_intent = None
+        if field_present is not None:
+            from app.thinking_contracts import normalize_thinking_intent, ThinkingContractError
+            try:
+                normalized_intent, _ = normalize_thinking_intent(think_level, field_present)
+            except ThinkingContractError as exc:
+                raise ModelOptionError("THINK_LEVEL_INVALID", str(exc), provider=provider, model=model,
+                                       option="think_level") from exc
+            think_level = normalized_intent.lower()
+        result = _resolve_model_options_v86(provider=provider, model=model, options=options,
+            provider_payload=provider_payload, think_level=think_level, capability_contract=capability_contract)
+        if normalized_intent == "OFF" and result.effective_think_level in {"on", "enabled"}:
+            raise ModelOptionError("THINK_LEVEL_UNSUPPORTED", "The legacy route cannot disable fixed thinking",
+                                   provider=provider, model=model, option="think_level")
+        return result
+    from copy import deepcopy
+    from dataclasses import replace
+    from app.execution_plane.thinking_resolver import resolve_thinking_semantics, validate_thinking_options
+    from app.thinking_contracts import ThinkingContractError, thinking_active
+    contract = deepcopy(capability_contract)
+    def kimi_compat(level):
+        return _kimi_legacy_thinking(model=model, requested=level, provider=provider,
+                                    revision=contract.get("revision", CAPABILITY_PROFILE_REVISION))[0]
+    try:
+        resolved, spec = resolve_thinking_semantics(think_level, field_present, think_level_policy,
+                                                   contract, legacy_kimi_resolver=kimi_compat)
+        thinking = resolved.canonical()
+        e = thinking["effective"]
+        label = e.get("level") or ("budget:" + str(e["budget_tokens"]) if e["wire_action"] == "send_budget" else "auto" if e["wire_action"] == "omit" else e["mode"])
+        if label == "enabled": label = "on"
+        if label == "disabled" or e.get("budget_tokens") == 0: label = "none"
+        # Reuse scalar option validation with already resolved thinking; only
+        # historical replay enters the old accepted_levels compatibility branch.
+        if thinking_active(e):
+            restrictions = spec.get("when_thinking_active") or {}
+            defaults = dict(contract.get("provider_defaults") or {})
+            for key in ("temperature", "top_p"):
+                if restrictions.get("forbid_" + key) or key in restrictions:
+                    defaults.pop(key, None)
+            contract["provider_defaults"] = defaults
+        result = _resolve_model_options_v86(provider=provider, model=model, options=options,
+            provider_payload=provider_payload, think_level=label, capability_contract=contract,
+            _effective_think_level=label)
+        validate_thinking_options(thinking, spec, result.effective_options)
+        return replace(result, requested_think_level=resolved.requested_intent.lower(),
+                       effective_think_level=label, thinking=thinking)
+    except ThinkingContractError as exc:
+        raise ModelOptionError(getattr(exc, "code", "THINK_LEVEL_INVALID"), str(exc),
+            provider=provider, model=model, option=exc.field, value=think_level,
+            capability_revision=capability_contract.get("revision")) from exc
 
 
 def validate_structured_output_capability(

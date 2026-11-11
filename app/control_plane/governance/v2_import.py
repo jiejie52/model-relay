@@ -18,7 +18,7 @@ class DeclarationError(ValueError):
 
 
 _FIELDS = {
-    "模型清单": ("显示名称", "对外模型名", "提供方", "输入类型", "思考档位", "结构化输出", "目标输出上限 Token", "发布意向"),
+    "模型清单": ("显示名称", "对外模型名", "提供方", "输入类型", "结构化输出", "目标输出上限 Token", "发布意向"),
     "渠道优先级": ("对外模型名", "环境", "渠道名称", "渠道侧模型名", "顺位", "启用意向", "不可用时"),
     "缓存设置": ("对外模型名", "渠道名称", "缓存机制", "默认策略", "可选强制", "计划门槛 Token", "资源有效期 分钟", "自动准备失败时", "启用意向"),
 }
@@ -73,7 +73,7 @@ def parse_v2_declarations(source: bytes | str | Path, *, maximum_bytes: int = 4_
         result: dict[str, Any] = {"template": "model-relay-v2", "status": "unverified_draft", "models": [], "routes": [], "caches": []}
         models: set[str] = set()
         for idx, row in _sheet_rows(wb["模型清单"], _FIELDS["模型清单"]):
-            for key in ("显示名称", "对外模型名", "提供方", "输入类型", "思考档位", "结构化输出", "发布意向"):
+            for key in ("显示名称", "对外模型名", "提供方", "输入类型", "结构化输出", "发布意向"):
                 row[key] = _required(row[key], "模型清单", idx, key)
             row["目标输出上限 Token"] = _positive_int(row["目标输出上限 Token"], "模型清单", idx, "目标输出上限 Token", optional=True)
             key = row["对外模型名"].lower()

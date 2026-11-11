@@ -94,6 +94,8 @@ def materialize_supply_group(session: dict[str, Any], request: Any) -> dict[str,
             resolve_model_options(
                 provider=session["provider"], model=session["model"], options=request.options,
                 provider_payload=request.provider_payload, think_level=request.think_level,
+                field_present="think_level" in request.model_fields_set,
+                think_level_policy=request.think_level_policy,
                 capability_contract=candidate.get("capability_contract"),
             )
             validate_structured_output_capability(

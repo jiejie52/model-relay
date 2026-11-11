@@ -94,6 +94,7 @@ class SessionRequestCreate(BaseModel):
     connection_id: str | None = Field(default=None, max_length=120)
     model: str | None = Field(default=None, max_length=200)
     think_level: str | None = Field(default=None, max_length=40)
+    think_level_policy: Literal["prefer", "require"] = "prefer"
     execution: ExecutionSpec
     structured_output: dict[str, Any] = Field(default_factory=dict)
     # Provider-neutral advanced model controls. These are validated by the

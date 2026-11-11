@@ -49,6 +49,14 @@ class ResultCommitter:
                 setattr(exc, "provider_success_object_id", fact.provisional_raw_object_id)
                 setattr(exc, "provider_output_object_id", fact.provisional_output_object_id)
                 raise
+        from app.execution_plane.result_contract import verify_thinking_execution_contract
+        try:
+            thinking_observation = verify_thinking_execution_contract(snapshot.get("thinking"), result.observed or {},
+                                                                    snapshot.get("execution_authorization") or {})
+        except ProviderRequestError as exc:
+            setattr(exc, "provider_success_object_id", fact.provisional_raw_object_id)
+            setattr(exc, "provider_output_object_id", fact.provisional_output_object_id)
+            raise
         history = thaw_json(plan.history)
         observation = thaw_json(fact.execution_observation)
         wire = {"normalize": observation.get("normalize", False)}
@@ -121,6 +129,8 @@ class ResultCommitter:
         }
         if observation.get("cache_summary") is not None:
             compact_result["cache"] = observation["cache_summary"]
+        if thinking_observation is not None:
+            compact_result["thinking_observation"] = thinking_observation
         if contract_observation is not None:
             compact_result["contract_observation"] = contract_observation
         if len(json_bytes(compact_result)) > self.settings.relay_result_hard_limit_bytes:

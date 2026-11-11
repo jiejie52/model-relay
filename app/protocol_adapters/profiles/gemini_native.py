@@ -417,6 +417,10 @@ class GeminiNativeAdapter:
                 generation["topP"] = options["top_p"]
             if "max_output_tokens" in options:
                 generation["maxOutputTokens"] = options["max_output_tokens"]
+            from app.protocol_adapters.thinking_projection import project_thinking
+            if project_thinking(payload, snapshot, "gemini_native"):
+                if not generation: payload.pop("generationConfig", None)
+                return
             think_level = str(snapshot.get("think_level") or "auto").lower()
             thinking = (snapshot.get("capability_contract") or {}).get("thinking") or {}
             if thinking.get("wire_strategy") == "gemini_thinking_budget":

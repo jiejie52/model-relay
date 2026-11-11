@@ -101,6 +101,9 @@ def build_candidate(
     content = _read_workbook(workbook)
     declarations = parse_v2_declarations(content)
     base = ModelControlPlane._builtin(settings)
+    if "思考映射清单" in declarations.get("extensions", {}):
+        from app.control_plane.governance.workbook import compile_workbook
+        base, _ = compile_workbook(content, settings)
     extension = (supply_registry or {}).get("control_plane")
     if extension:
         from app.control_plane.governance.declarations import merge_entities
@@ -180,7 +183,7 @@ def build_candidate(
             raise DeclarationError(f"model {model}: two channel labels map to one physical connection")
         seen_physical_supplies[physical_key] = channel
         required_modalities = _controlled_values("input modalities", model_row["输入类型"], _MODALITIES)
-        required_thinking = _controlled_values("thinking", model_row["思考档位"], _THINKING)
+        required_thinking = []  # Thinking is derived exclusively from supply mappings.
         structured = _STRUCTURED.get(model_row["结构化输出"])
         if structured is None:
             raise DeclarationError(f"model {model}: unknown structured output guarantee")

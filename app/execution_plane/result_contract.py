@@ -35,3 +35,26 @@ def validate_execution_observations(snapshot, observed):
         "native_constraint": ("confirmed" if native is True else "rejected" if native is False else "unknown")
             if native_required else "not_required",
         "native_evidence_policy": "required" if policy["require_native_constraint_evidence"] else "certified_supply_with_observation"}
+
+
+def verify_thinking_execution_contract(thinking, observed, authorization):
+    """Negative evidence rejects a success; absent telemetry remains unknown."""
+    if thinking is None: return None
+    from app.thinking_contracts import THINKING_CONTRACT_VERSION
+    if thinking.get("version") != THINKING_CONTRACT_VERSION:
+        raise ProviderRequestError("THINKING_SEMANTICS_INVALID", "Unknown frozen thinking semantics")
+    evidence = observed.get("observed_thinking") or {}
+    degraded = evidence.get("thinking_parameter_stripped") is True or evidence.get("thinking_degraded") is True
+    if degraded and (thinking["policy"] == "require" or not authorization.get("allow_thinking_degradation", False)):
+        raise ProviderRequestError("UPSTREAM_THINKING_CONTRACT_VIOLATION", "Upstream stripped or degraded frozen thinking controls")
+    # OFF is explicit under either policy. Never report a successful disable if
+    # the upstream response affirmatively demonstrates active reasoning.
+    from app.thinking_contracts import thinking_active
+    if not thinking_active(thinking["effective"]) and (evidence.get("has_explicit_thought_blocks") is True or
+            type(evidence.get("reasoning_tokens")) is int and evidence["reasoning_tokens"] > 0):
+        raise ProviderRequestError("UPSTREAM_THINKING_OFF_VIOLATION", "Upstream response contradicts explicit thinking OFF")
+    actual = evidence.get("effective_mode")
+    expected = thinking["effective"]["mode"]
+    if actual and actual != expected and (thinking["policy"] == "require" or not authorization.get("allow_thinking_degradation", False)):
+        raise ProviderRequestError("UPSTREAM_THINKING_CONTRACT_VIOLATION", "Observed thinking mode differs from the frozen mode")
+    return {"status": "negative_evidence_checked", "evidence": evidence}

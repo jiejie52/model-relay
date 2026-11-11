@@ -129,12 +129,12 @@ def observed_response_facts(
     # Only the frozen, certified protocol profile defines extra evidence fields.
     # These are observations; authorization is checked by the execution plane.
     for fact, header in (evidence_headers or {}).items():
-        if fact in {"paid_fallback", "native_constraint_enforced", "protocol_downgraded", "provider_fallback", "json_repaired"}:
+        if fact in {"paid_fallback", "native_constraint_enforced", "protocol_downgraded", "provider_fallback", "json_repaired", "thinking_parameter_stripped", "thinking_degraded"}:
             value = _header_bool(response_headers, header)
         elif fact == "billing_tier":
             value = _header_value(response_headers, header)
             value = value.lower() if value and value.lower() in {"free", "paid"} else None
-        elif fact == "actual_model": value = _header_value(response_headers, header)
+        elif fact in {"actual_model", "effective_thinking_mode"}: value = _header_value(response_headers, header)
         else:
             continue
         if value is not None: observed[fact] = value
