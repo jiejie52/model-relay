@@ -153,8 +153,20 @@ class ProtocolProfileSpec:
     cache: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    supports_native_history_material_reuse: bool = False
+    history_material_part_kinds: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if type(self.supports_native_history_material_reuse) is not bool:
+            raise ValueError("History material reuse must be a boolean")
+        if not self.supports_native_history_material_reuse and self.history_material_part_kinds:
+            raise ValueError("Disabled history reuse cannot declare material Part kinds")
+
     def canonical(self) -> dict[str, Any]:
         return {
+            **({"supports_native_history_material_reuse": True,
+                "history_material_part_kinds": list(self.history_material_part_kinds)}
+               if self.supports_native_history_material_reuse else {}),
             "profile_id": self.profile_id,
             "revision": self.revision,
             "protocol": self.protocol,
@@ -670,7 +682,9 @@ class ModelControlPlane:
         for offering in self.offerings.values():
             if "execution_authorization" in offering.metadata:
                 execution_authorization(offering.metadata["execution_authorization"])
+        from app.protocol_adapters.wire_projection.history_capabilities import validate_history_capability
         for profile in self.protocol_profiles.values():
+            validate_history_capability(profile.canonical())
             if "response_evidence_headers" in profile.metadata:
                 validate_response_evidence_headers(profile.metadata["response_evidence_headers"])
         if self.status != "published":
@@ -808,6 +822,8 @@ class ModelControlPlane:
             profile_id=profile_id,
             revision=revision,
             protocol=protocol,
+            supports_native_history_material_reuse=value.get("supports_native_history_material_reuse", False),
+            history_material_part_kinds=tuple(value.get("history_material_part_kinds") or ()),
             cache=dict(value.get("cache") or {}),
             metadata=dict(value.get("metadata") or {}),
         )
@@ -926,6 +942,8 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
             profile_id="gemini-native-aihubmix-v1",
             revision="relay-protocol-profile/gemini-aihubmix/2026-10-02.1",
             protocol="gemini_native",
+            supports_native_history_material_reuse=True,
+            history_material_part_kinds=("fileData", "inlineData"),
             cache={
                 "supported_mechanisms": ["stateful_resource"],
                 "resource_family": "cachedContents",
@@ -940,6 +958,8 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
             profile_id="gemini-native-aihubmix-v2",
             revision="relay-protocol-profile/gemini-aihubmix/2026-10-31.1",
             protocol="gemini_native",
+            supports_native_history_material_reuse=True,
+            history_material_part_kinds=("fileData", "inlineData"),
             cache={
                 "supported_mechanisms": ["stateful_resource", "implicit_prefix"],
                 "mechanism_profiles": {

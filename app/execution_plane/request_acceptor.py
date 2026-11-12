@@ -84,7 +84,7 @@ class RequestAcceptor:
             raise ExecutionRequestError(422, {"code": "AUDIT_CONTEXT_OVERRIDE_FORBIDDEN"})
 
         protected_metadata = [
-            str(key) for key in body.metadata if str(key).startswith("_relay_cache")
+            str(key) for key in body.metadata if str(key).startswith(("_relay_cache", "_relay_material"))
         ]
         if protected_metadata:
             raise ExecutionRequestError(
@@ -272,6 +272,38 @@ class RequestAcceptor:
         if session.get("context_policy") == "conversation" and isinstance(session.get("material_manifest"), list):
             effective_material_ids = [str(x) for x in session.get("material_manifest") or []] + effective_material_ids
         effective_material_ids = list(dict.fromkeys(effective_material_ids))
+        placement_plan = None
+        from app.execution_plane.context_material_planner import placement_enabled, plan_effective_materials
+        from app.core.material_placement import MaterialPlacementError, placement_summary
+        route_for_placement = (session.get("metadata") or {}).get("_relay_route") or {}
+        placement_profile = route_for_placement.get("protocol_profile") or {}
+        mode = settings.material_placement_mode
+        if placement_enabled(session, placement_profile, mode):
+            artifacts = ExecutionArtifacts(repo, services.storage, settings)
+            placement_history = (await artifacts.load_json(session["history_object_id"],
+                tenant_id=tenant_id, conversation_hash=conversation_hash)) if session.get("history_object_id") else []
+            ledger = session.get("committed_material_ledger") or []
+            if not isinstance(ledger, list) or any(not isinstance(o, dict) or not isinstance(o.get("material_id"), str) for o in ledger):
+                raise ExecutionRequestError(409, {"code": "HISTORY_MATERIAL_OCCURRENCE_CORRUPTED"})
+            check_ids = list(dict.fromkeys(effective_material_ids + [o["material_id"] for o in ledger]))
+            canonical_rows = await repo.get_materials(check_ids, tenant_id=tenant_id, conversation_hash=conversation_hash)
+            try:
+                placement_plan = plan_effective_materials(session=session, explicit_material_ids=body.material_ids,
+                    history=placement_history, profile=placement_profile, material_rows=canonical_rows,
+                    deduplicate_auto=mode not in {"legacy_v1", "shadow"}, safety_seconds=settings.historical_material_safety_seconds).canonical()
+            except MaterialPlacementError as exc:
+                raise ExecutionRequestError(409, {"code": exc.code}) from exc
+            effective_material_ids = placement_plan["current_effective_material_ids"]
+            log_info(logger, "material_placement_planned", session_id=str(session_id), **placement_summary(placement_plan))
+            if mode == "shadow":
+                shadow = plan_effective_materials(session=session, explicit_material_ids=body.material_ids,
+                    history=placement_history, profile=placement_profile, material_rows=canonical_rows).canonical()
+                log_info(logger, "material_placement_shadow", session_id=str(session_id),
+                    shadow_auto_materials_skipped=len(shadow["historical_only_material_ids"]),
+                    actual_auto_materials_skipped=0, actual_projection="legacy_v1")
+        elif mode == "shadow" and placement_profile.get("supports_native_history_material_reuse"):
+            log_info(logger, "material_placement_shadow", session_id=str(session_id),
+                verified_ledger_available=bool(session.get("committed_material_ledger")), actual_contract="material-placement/1")
 
         session_metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         frozen_route = session_metadata.get("_relay_route") if isinstance(session_metadata.get("_relay_route"), dict) else {}
@@ -491,6 +523,10 @@ class RequestAcceptor:
             "metadata": body.metadata,
         }
 
+        if placement_plan is not None:
+            base_snapshot["placement_contract_version"] = "material-placement/2"
+            base_snapshot["material_placement_plan"] = placement_plan
+            base_snapshot["historical_material_safety_seconds"] = settings.historical_material_safety_seconds
         try:
             resolve_structured_output(base_snapshot, fallback_name="structured_output")
         except StructuredOutputError as exc:
@@ -687,6 +723,8 @@ class RequestAcceptor:
 
         job_id = str(uuid4()) if body.execution.mode == "async" else None
         accept_metadata = dict(body.metadata)
+        if placement_plan is not None:
+            accept_metadata["_relay_material_placement"] = placement_plan
         if cache_contract_session and cache_plan is not None:
             accept_metadata["_relay_cache"] = {
                 "requested_cache_mode": body.requested_cache_mode,

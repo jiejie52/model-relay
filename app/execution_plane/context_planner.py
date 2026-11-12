@@ -206,6 +206,14 @@ def build_context_plan(
                     for segment in segments],
                 "structured_output": snapshot.get("structured_output"),
             })
+    placement = snapshot.get("material_placement_plan")
+    if placement is not None:
+        plan["material_placement"] = {
+            "contract_version": placement["contract_version"],
+            "plan_digest": placement["plan_digest"],
+            "historical_material_occurrences_digest": stable_hash(placement["verified_history_occurrences"]),
+            "current_turn_material_ids": placement["current_effective_material_ids"],
+        }
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 

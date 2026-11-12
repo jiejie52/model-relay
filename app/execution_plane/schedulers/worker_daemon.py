@@ -37,7 +37,8 @@ from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
 
-WORKER_VERSION = "8.6.0"
+from app.config import RELAY_VERSION, BUILD_GIT_SHA
+WORKER_VERSION = RELAY_VERSION
 
 settings = get_settings()
 configure_logging(settings)
@@ -156,7 +157,7 @@ class RelayWorker:
     def control_app(self) -> FastAPI:
         app = FastAPI(
             title="Model Relay Worker Control",
-            version=WORKER_VERSION,
+            version=WORKER_VERSION, build_git_sha=BUILD_GIT_SHA,
             docs_url=None,
             redoc_url=None,
             openapi_url=None,
@@ -169,7 +170,7 @@ class RelayWorker:
                 "ok": True,
                 "service": "relay-worker",
                 "configuration": public_configuration_status(self.configuration_report),
-                "version": WORKER_VERSION,
+                "version": WORKER_VERSION, "build_git_sha": BUILD_GIT_SHA,
                 "worker_id": self.worker_id,
                 "state": self.lifecycle_state,
                 "follow_api": self._follow_api_enabled,
@@ -243,7 +244,7 @@ class RelayWorker:
             logger,
             "worker_started",
             worker_id=self.worker_id,
-            version=WORKER_VERSION,
+            version=WORKER_VERSION, build_git_sha=BUILD_GIT_SHA,
             deployment_id=settings.deployment_id,
             execution_pools=sorted(settings.worker_pool_set),
             route_revision=self.route_catalog.revision,

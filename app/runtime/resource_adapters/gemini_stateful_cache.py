@@ -11,7 +11,7 @@ from app.config import Settings
 from app.core.idempotency import stable_hash
 from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiAIHubMixGenAIClient
-from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V7, GEMINI_PHYSICAL_LAYOUT_VERSION_V6, GEMINI_PHYSICAL_LAYOUT_VERSION_V5, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES
+from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V7, GEMINI_PHYSICAL_LAYOUT_VERSION_V6, GEMINI_PHYSICAL_LAYOUT_VERSION_V5, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10, GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES
 from app.protocol_adapters.wire_projection.gemini_wire import PROJECTION_VERSION, prefix_fingerprint, prefix_payload, prefix_reuse_key, validate_cached_content_handle
 
 class GeminiStatefulCacheAdapter:
@@ -64,7 +64,7 @@ class GeminiStatefulCacheAdapter:
                 GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
                 GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
                 GEMINI_PHYSICAL_LAYOUT_VERSION,
-                GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
             } and self._payload_has_file_data(payload) and (snapshot.get("cache_contract") or {}).get("explicit_cache_material_mode") != "file_uri_allowed":
                 raise ProviderRequestError(
                     "GEMINI_CACHE_FILE_REF_FORBIDDEN",
@@ -76,12 +76,12 @@ class GeminiStatefulCacheAdapter:
             cache_create_request_bytes = (physical.get("dependencies") or {}).get("cache_create_request_bytes")
             cache_create_oversized_candidate_request_bytes = (physical.get("dependencies") or {}).get("cache_create_oversized_candidate_request_bytes")
             cache_create_max_request_bytes = (physical.get("dependencies") or {}).get("cache_create_max_request_bytes")
-            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V9}:
+            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10}:
                 # Layout/8 and /9 must never claim a stateful cache operation for
                 # a systemInstruction-only prefix. Repeat the invariant at the
                 # final protocol boundary before a resource operation is claimed.
                 physical_cacheable = physical_cacheable and bool(payload.get("contents"))
-            if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9 and physical_cacheable:
+            if layout_version in {GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10} and physical_cacheable:
                 request_body = {
                     "model": f"models/{physical.get('model') or snapshot.get('model') or ''}",
                     "ttl": f"{ttl_value}s",
@@ -128,7 +128,7 @@ class GeminiStatefulCacheAdapter:
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
                         GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
                         GEMINI_PHYSICAL_LAYOUT_VERSION,
-                        GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+                        GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
                     }
                     else "native_rest"
                 ),
@@ -240,7 +240,7 @@ class GeminiStatefulCacheAdapter:
             raise ProviderRequestError("CACHE_THINKING_PARAMETERS_FORBIDDEN", "Per-request thinking controls cannot enter cachedContents")
         model = self._model(spec)
         if (
-            str(spec.get("layout_version") or "") in {GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V9}
+            str(spec.get("layout_version") or "") in {GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10}
             and not (spec.get("provider_payload") or {}).get("contents")
         ):
             # Defense in depth: build_spec() should make this spec non-cacheable

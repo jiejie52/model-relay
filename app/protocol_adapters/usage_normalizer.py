@@ -8,6 +8,54 @@ def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
+def normalize_gemini_implicit_cache_observation(
+    *, response_json: Any, explicit_cached_content: bool = False,
+) -> dict[str, Any]:
+    """Classify Google's reported cached-token count without guessing on absence.
+
+    `cachedContentTokenCount` can also be present when Relay sent an explicit
+    CachedContent handle. In that case the count is still useful evidence, but
+    it cannot be attributed specifically to Google's implicit prefix cache.
+    """
+    result: dict[str, Any] = {
+        "provider_implicit_cache_status": "unknown",
+        "provider_implicit_cache_reason": "response_json_unavailable",
+        "google_cached_content_token_count": None,
+        "google_cache_usage_field": None,
+    }
+    if not isinstance(response_json, dict):
+        return result
+
+    usage_parent = "usageMetadata"
+    usage = response_json.get(usage_parent)
+    if usage is None:
+        usage_parent = "usage_metadata"
+        usage = response_json.get("usage_metadata")
+    if not isinstance(usage, dict):
+        result["provider_implicit_cache_reason"] = "usage_metadata_missing"
+        return result
+
+    field = next((name for name in ("cachedContentTokenCount", "cached_content_token_count") if name in usage), None)
+    if field is None:
+        result["provider_implicit_cache_reason"] = "cached_content_token_count_missing"
+        return result
+
+    count = _count(usage.get(field))
+    result["google_cache_usage_field"] = f"{usage_parent}.{field}"
+    result["google_cached_content_token_count"] = count
+    if count is None:
+        result["provider_implicit_cache_reason"] = "cached_content_token_count_invalid"
+    elif explicit_cached_content:
+        result["provider_implicit_cache_reason"] = "explicit_cached_content_request"
+    elif count > 0:
+        result["provider_implicit_cache_status"] = "provider_implicit_hit"
+        result["provider_implicit_cache_reason"] = "cached_content_token_count_positive"
+    else:
+        result["provider_implicit_cache_status"] = "provider_implicit_miss"
+        result["provider_implicit_cache_reason"] = "cached_content_token_count_zero"
+    return result
+
+
 def normalize_observed_cache_audit(
     *, protocol: str, response_json: dict[str, Any], response_headers: Mapping[str, str],
     track_facts: dict[str, Any], payload_stripped_bytes: int = 0,

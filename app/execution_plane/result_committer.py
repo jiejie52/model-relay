@@ -146,6 +146,21 @@ class ResultCommitter:
             )
             compact_result["text_truncated"] = True
 
+        committed_occurrences = []
+        if snapshot.get("placement_contract_version") is not None:
+            from app.core.material_placement import route_identity
+            transport = result.history_entry.get("transport_history") or {}
+            placement = snapshot["material_placement_plan"]
+            for raw_occ in thaw_json(fact.projected_material_occurrences):
+                occ = {**raw_occ, "history_version": int(request_row["expected_history_version"]) + 1,
+                    "transport_history_hash": stable_hash(transport)}
+                if (any(occ.get(k) != v for k, v in route_identity(session).items())
+                        or occ["source_request_id"] != request_id
+                        or occ["part_digest"] != stable_hash(transport["user_content"]["parts"][occ["part_index"]])):
+                    raise ExecutionConflictError("Projected occurrence does not match committed native history")
+                committed_occurrences.append(occ)
+            if [o["material_id"] for o in committed_occurrences] != placement["current_effective_material_ids"]:
+                raise ExecutionConflictError("Archived material occurrences are missing or reordered")
         history_object_id = None
         if cumulative_history and session.get("context_policy") == "conversation":
             new_history = list(history)
@@ -158,6 +173,9 @@ class ResultCommitter:
             )
             if int(upgrade.get("version") or 0) >= 3 and wire.get("normalize"):
                 entry = freeze_history_turn(entry)
+            if snapshot.get("placement_contract_version") is not None:
+                entry = freeze_history_turn(entry)
+                entry["material_occurrences"] = committed_occurrences
             new_history.append(entry)
             history_object_id = await self.artifacts.store_history(
                 request_row,
@@ -177,6 +195,7 @@ class ResultCommitter:
                 expected_history_version=int(request_row["expected_history_version"]),
                 fence_owner=fence.owner,
                 fence_epoch=fence.epoch,
+                **({"material_occurrences": committed_occurrences} if snapshot.get("placement_contract_version") is not None else {}),
             )
         else:
             ok = await self.repo.complete_request(
@@ -289,6 +308,8 @@ class ResultCommitter:
         active_fence = fence or plan.execution_fence
         if plan.snapshot.get("thinking") is not None and not object_id:
             raise ProviderRequestError("THINKING_EXECUTION_FACT_MISSING", "New thinking requests require archived execution facts")
+        if plan.snapshot.get("placement_contract_version") is not None and not object_id:
+            raise ExecutionConflictError("Material placement requests require archived execution facts")
         if object_id:
             identity = {"tenant_id": row["tenant_id"], "conversation_hash": row["conversation_hash"]}
             archive = await self.artifacts.load_json(object_id, **identity)
@@ -300,11 +321,16 @@ class ResultCommitter:
                 raise ExecutionConflictError("Archived raw response integrity mismatch")
             if plan.snapshot.get("thinking") is not None and not isinstance((archive.get("result", {}).get("observed") or {}).get("observed_thinking"), dict):
                 raise ProviderRequestError("THINKING_EVIDENCE_ARCHIVE_INVALID", "Archived thinking evidence is missing")
+            if plan.snapshot.get("placement_contract_version") is not None:
+                if (not isinstance(archive.get("projected_material_occurrences"), list)
+                        or archive.get("placement_plan_digest") != plan.snapshot["material_placement_plan"]["plan_digest"]):
+                    raise ExecutionConflictError("Archived material placement facts are missing or changed")
             result = StandardizedProviderResult(raw_bytes=raw, **archive["result"])
             fact = ActualExecutionFact(str(row["id"]), "result_stored", standardized_result=result,
                 provisional_raw_object_id=row["provisional_result_object_id"],
                 provisional_output_object_id=row.get("provisional_output_object_id"),
-                execution_observation=archive["observation"])
+                execution_observation=archive["observation"],
+                projected_material_occurrences=archive.get("projected_material_occurrences") or [])
             return await self.finalize(plan, fact)
         # Historical requests already contain their validated compact result and
         # history object. Preserve that frozen recovery format unchanged.

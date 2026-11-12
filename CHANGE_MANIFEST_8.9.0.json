@@ -1,0 +1,196 @@
+{
+  "version": "8.9.0",
+  "baseline": "model-relay-8.8.2.zip",
+  "baseline_sha256": "d186e0c3c9abca69a75e78781f6b14ed6f8aa7c356b88f10f7205069d88837eb",
+  "version_reason": "Correction and enhancement of existing Session automatic material placement; YY increment and ZZ reset",
+  "changes": [
+    {
+      "path": ".env.example",
+      "action": "modified",
+      "sha256": "e1ae1f13409974b24af57d10cce50d4e030c89609c0a6044c0df770fdb2a270d"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "c75e04ba1fee01cec512a4f5be2b3d401fcd9e68ee98f2621893d020dce508a3"
+    },
+    {
+      "path": "app/config.py",
+      "action": "modified",
+      "sha256": "7073f58ada73cddd9e2c6940bd8656669c456d973ba3af1739bd9d9ee4734271"
+    },
+    {
+      "path": "app/control_plane/definitions.py",
+      "action": "modified",
+      "sha256": "cfaada3076b3da1026a87513671bc31a15003a8966c80a5844edbd26cf866eac"
+    },
+    {
+      "path": "app/control_plane/governance/workbook.py",
+      "action": "modified",
+      "sha256": "50a998a28f134635167bd8e00c88e14f498059bb5e758cd2f33f0e9260cfe3e0"
+    },
+    {
+      "path": "app/core/idempotency.py",
+      "action": "modified",
+      "sha256": "624dee430d4f1383625a6e242242706a945e924b5ce23d0aec0ea25514f2e2c0"
+    },
+    {
+      "path": "app/execution_plane/context_planner.py",
+      "action": "modified",
+      "sha256": "17624f689c2ac7c940bc1342d457052a78bb76b6d738a488be2f299868166714"
+    },
+    {
+      "path": "app/execution_plane/contracts.py",
+      "action": "modified",
+      "sha256": "e93878db5e457d6144933f0e00931ec3811e78af9d846cfc08a110251402e2c9"
+    },
+    {
+      "path": "app/execution_plane/plan_loader.py",
+      "action": "modified",
+      "sha256": "72ca6b7443718f152dbeb96cef3b2a43ab45b6ef3eb11aee747751646314c19a"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "action": "modified",
+      "sha256": "d8f3e20f85b5eeada4f9b10af8c8507045fa2ba14bfe52d4dd332b5b14303347"
+    },
+    {
+      "path": "app/execution_plane/request_identity.py",
+      "action": "modified",
+      "sha256": "9e9665f3fd05f6e06a34ca604ab9d061eb3836356aae89df8d799e4c390b4616"
+    },
+    {
+      "path": "app/execution_plane/result_committer.py",
+      "action": "modified",
+      "sha256": "82d1f98489ada7a0857e33172d47f70338bb1480f7e321355048a007d51fe865"
+    },
+    {
+      "path": "app/execution_plane/schedulers/worker_daemon.py",
+      "action": "modified",
+      "sha256": "cdd4ba0ca17e8c5b480cbb6cf95548e8fec855883f5d341a3cb0b6dfaad146d2"
+    },
+    {
+      "path": "app/execution_plane/session_manager.py",
+      "action": "modified",
+      "sha256": "cbcd3e7cff82be7d7edd19c357b43c8f995ab389524caa4f88bdf877c4ea522e"
+    },
+    {
+      "path": "app/observability/http_wire_logger.py",
+      "action": "modified",
+      "sha256": "596b77cd32973e2d2134c08bb8472bd201e55027277a2c09083b7fb80b206066"
+    },
+    {
+      "path": "app/protocol_adapters/profiles/gemini_native.py",
+      "action": "modified",
+      "sha256": "af770f34cf2dab8ec1a5bfe922df6532f6c61f9c4b6a8185708e48ff26e4946d"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_physical.py",
+      "action": "modified",
+      "sha256": "f6d729909469cf3b6f50cfdec948b0ffac1aba4c5e29669179ae367b50e92543"
+    },
+    {
+      "path": "app/runtime/contracts.py",
+      "action": "modified",
+      "sha256": "d1d324063226a22d3dae0062b218a87af71d987c2fa79a0ed71e12b469f78dbf"
+    },
+    {
+      "path": "app/runtime/controlled_invoker.py",
+      "action": "modified",
+      "sha256": "b62e6e7b33c58130cdf4f7554bcfa48df58cafee883bd603bbae3baa480c537a"
+    },
+    {
+      "path": "app/runtime/dispatch_sealer.py",
+      "action": "modified",
+      "sha256": "45a4da503d77f06d69f6d8c4959ac40d7873553cd2405865130d27bbdc1d6622"
+    },
+    {
+      "path": "app/runtime/material_binder.py",
+      "action": "modified",
+      "sha256": "87d7431eedbbc512233cbce9322c0ee0a2e55677533413c0dd27efaad9889fc9"
+    },
+    {
+      "path": "app/runtime/physical_context.py",
+      "action": "modified",
+      "sha256": "91aee89386d6f0b6b3fc1c607e500b76c9800a80afb0a9c6166bb37ec4c766af"
+    },
+    {
+      "path": "app/runtime/prefix.py",
+      "action": "modified",
+      "sha256": "a936f9e4d22d63a630e089fe6fb93e14015227d8365750032584973d3a4840df"
+    },
+    {
+      "path": "app/runtime/resource_adapters/gemini_stateful_cache.py",
+      "action": "modified",
+      "sha256": "e996f1a90a534dfbdc2a3e2e3f182795344a4b3e52b664d5784578ae5b976612"
+    },
+    {
+      "path": "app/v2_repository.py",
+      "action": "modified",
+      "sha256": "f5b22a0ff64005d0f03371cffce3ea034877eb9a3039ae410adbea3ed3ec0537"
+    },
+    {
+      "path": "config/google_official.declaration.json",
+      "action": "modified",
+      "sha256": "56a7019fab005b2560b3a581a15b321de50e202d01e048f61bedecd6248633f5"
+    },
+    {
+      "path": "UPGRADE_8.9.0.md",
+      "action": "added",
+      "sha256": "41c7c8f1426e2f2c746433d7233078855b076f2b5510b78bd8ff3e15903b4c88"
+    },
+    {
+      "path": "app/core/material_placement.py",
+      "action": "added",
+      "sha256": "da4109774cee8b858413d1abd76a26e6d07586d81bc0f1d8d368b8ee5c9737dd"
+    },
+    {
+      "path": "app/execution_plane/context_material_planner.py",
+      "action": "added",
+      "sha256": "2c81dcbc7f3bc889babd09e1591231e85b466dbd16cd1e3c30f206ea5e1854e6"
+    },
+    {
+      "path": "app/observability/material_metrics.py",
+      "action": "added",
+      "sha256": "5da0edacfc26f3499824398bac95792c37beebcc96c37d1bc35174a307ade603"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_native_prefix.py",
+      "action": "added",
+      "sha256": "c8c77447ba1d39d43c283f850d4cf3df282f829d20e88a98f799b7e40ab16883"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/history_capabilities.py",
+      "action": "added",
+      "sha256": "b06e1d624ace1960fbf516e14f31184119205cf6f7b594d2826c52e4344c09c2"
+    },
+    {
+      "path": "app/runtime/material_history.py",
+      "action": "added",
+      "sha256": "5f33e341fa9001557d3c55cfa7f5a8b36e71854b049695d559ab7b8edd68b1d6"
+    },
+    {
+      "path": "sql/013_material_occurrence_placement.sql",
+      "action": "added",
+      "sha256": "55b89c60ce61dab29e8a787ceb45f29f5f61d01132ab76c45a6ee238359ba226"
+    }
+  ],
+  "deleted_files": [],
+  "test_files_added": false,
+  "dependency_files_changed": false,
+  "validation": {
+    "compile_import_workbook_sql_parse": "passed",
+    "direct_dependency_versions": "original requirements.txt installed in isolated validation target",
+    "local_checks": {
+      "contract": 41,
+      "compatibility": 109,
+      "admission": 12,
+      "wire": 13,
+      "database": 40
+    },
+    "database_engine": "PGlite PostgreSQL; pgcrypto declaration omitted only in local harness",
+    "real_provider_usage_abc": "not performed",
+    "dify_business_gate_quality": "not performed; workflow sources and production fixtures not supplied",
+    "production_deployment": "not performed"
+  }
+}

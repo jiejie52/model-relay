@@ -6,8 +6,11 @@ import logging
 import math
 from typing import Any
 
-from app.observability.http_wire_logger import wire_context
-from app.protocol_adapters.usage_normalizer import normalize_observed_cache_audit
+from app.observability.http_wire_logger import wire_context, wire_logging_enabled_for_context
+from app.protocol_adapters.usage_normalizer import (
+    normalize_gemini_implicit_cache_observation,
+    normalize_observed_cache_audit,
+)
 from app.protocol_adapters.cache_usage import normalize_cache_usage
 from app.core.idempotency import stable_hash
 from app.protocol_adapters.error_observation import provider_http_error_observation
@@ -37,6 +40,14 @@ class ControlledInvoker:
             if key and state.wire.get("affinity_token")}
         if affinity_headers != state.sealed_bundle.affinity_headers:
             raise ExecutionConflictError("Transport affinity differs from the sealed dispatch inputs")
+        # Legacy/non-cache-aware Requests may not have passed through
+        # build_wire_context. The model identity is nevertheless required by
+        # the model-scoped HTTP wire-log filter.
+        state.wire.setdefault("provider", state.snapshot.get("provider"))
+        state.wire.setdefault("channel", state.snapshot.get("channel_id"))
+        state.wire.setdefault("model", state.snapshot.get("model"))
+        state.wire.setdefault("request_id", state.request_id)
+        state.wire.setdefault("session_id", state.session_id)
         adapter = self.providers.get_v2(str(state.snapshot["connection_id"]))
         provider_started_ms = now_ms()
         metadata = state.snapshot.get("metadata") if isinstance(state.snapshot.get("metadata"), dict) else {}
@@ -86,6 +97,14 @@ class ControlledInvoker:
                 if isinstance(exc, ProviderHTTPError)
                 else None
             )
+            failed_cache_observation = {}
+            if (str(state.snapshot.get("provider") or "").lower() == "gemini"
+                    and wire_logging_enabled_for_context(self.settings, state.wire)):
+                failed_cache_observation = normalize_gemini_implicit_cache_observation(
+                    response_json=None,
+                    explicit_cached_content=(state.cache_binding or {}).get("mechanism") == "stateful_resource",
+                )
+                failed_cache_observation["provider_implicit_cache_reason"] = "provider_call_failed"
             log_error(
                 logger,
                 "provider_call_failed",
@@ -106,8 +125,17 @@ class ControlledInvoker:
                 exception_type=type(exc).__name__,
                 stream_interrupted=getattr(exc, "stream_interrupted", False),
                 bytes_received=getattr(exc, "bytes_received", None),
+                **failed_cache_observation,
             )
             raise
+        cache_mechanism = (state.cache_binding or {}).get("mechanism")
+        provider_cache_observation = {}
+        if (str(state.snapshot.get("provider") or "").lower() == "gemini"
+                and wire_logging_enabled_for_context(self.settings, state.wire)):
+            provider_cache_observation = normalize_gemini_implicit_cache_observation(
+                response_json=result.raw_json,
+                explicit_cached_content=cache_mechanism == "stateful_resource",
+            )
         log_info(
             logger,
             "provider_call_completed",
@@ -124,6 +152,7 @@ class ControlledInvoker:
             upstream_request_id=result.provider_request_id,
             provider_response_id=result.response_id,
             response_bytes=len(result.raw_bytes),
+            **provider_cache_observation,
         )
 
         raw_object_id = await self.artifacts.store_object(
@@ -164,7 +193,6 @@ class ControlledInvoker:
             cache_usage = usage_observation.canonical()
             cache_prefix = (state.cache_binding or {}).get("prefix") if isinstance((state.cache_binding or {}).get("prefix"), dict) else {}
             cache_metadata = (state.cache_binding or {}).get("metadata") if isinstance((state.cache_binding or {}).get("metadata"), dict) else {}
-            cache_mechanism = (state.cache_binding or {}).get("mechanism")
             cache_decision_reason = (state.cache_binding or {}).get("decision_reason") or plan.get("decision_reason")
             if cache_mechanism == "stateful_resource":
                 if str(cache_decision_reason or "").startswith("resource_created"):
@@ -385,6 +413,11 @@ class ControlledInvoker:
         observation = {"observed_thinking": (result.observed or {}).get("observed_thinking"),
                        "cache_summary": cache_summary, "cache_usage": cache_usage,
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
+        if state.snapshot.get("placement_contract_version") is not None:
+            from app.observability.material_metrics import material_metrics
+            metrics = material_metrics(state.snapshot, state.provider_physical_plan, state.historical_pinned_bindings, result, cache_binding=state.cache_binding)
+            observation["material_metrics"] = metrics
+            log_info(logger, "material_placement_execution", request_id=state.request_id, session_id=state.session_id, **metrics)
         # Archive the standardized response and observations for execution-plane
         # recovery. Raw response bytes stay in their original object.
         archived_result = {name: getattr(result, name) for name in (
@@ -394,6 +427,9 @@ class ControlledInvoker:
             "schema_version": "relay-execution-fact/1", "request_id": state.request_id,
             "snapshot_hash": stable_hash(state.snapshot), "raw_sha256": __import__("hashlib").sha256(result.raw_bytes).hexdigest(),
             "result": archived_result, "observation": observation, "audit_context": state.snapshot.get("audit_context") or {},
+            **({"projected_material_occurrences": state.projected_material_occurrences,
+                "placement_plan_digest": state.snapshot["material_placement_plan"]["plan_digest"]}
+               if state.snapshot.get("placement_contract_version") is not None else {}),
         }), "application/json")
         marker = {"_relay_execution_fact": fact_object_id, "schema_version": "relay-result-pending-commit/1"}
         if state.fence is not None:
@@ -409,4 +445,5 @@ class ControlledInvoker:
                 "provider_response_id": result.response_id})
         return ActualExecutionFact(state.request_id, "result_stored", state.material_bindings, state.cache_binding,
             {"seal_id": state.request_id, "seal_hash": state.sealed_bundle.seal_hash}, result,
-            raw_object_id, output_object_id, execution_observation=observation)
+            raw_object_id, output_object_id, execution_observation=observation,
+            projected_material_occurrences=state.projected_material_occurrences)

@@ -17,7 +17,7 @@ from app.config import Settings
 from app.core.idempotency import CANONICAL_REQUEST_VERSIONS
 from app.protocol_adapters.wire_projection.schema_projector import project_schema_for_provider
 from app.canonical_schema import resolve_structured_output
-from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V7, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
+from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V7, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10, SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
 from app.protocol_adapters.wire_projection.gemini_wire import project_current_user_content, project_history_contents, project_system_instruction, validate_cached_content_handle
 
 
@@ -210,7 +210,7 @@ class GeminiNativeAdapter:
         if physical.get("layout_version") not in {
             GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
             GEMINI_PHYSICAL_LAYOUT_VERSION,
-            GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+            GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
         }:
             return
         if not payload.get("cachedContent"):
@@ -244,7 +244,7 @@ class GeminiNativeAdapter:
                 )
             if binding.get("mechanism") == "implicit_prefix":
                 prefix = binding.get("prefix") if isinstance(binding.get("prefix"), dict) else {}
-                if physical.get("layout_version") != GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
+                if physical.get("layout_version") not in {GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10}:
                     raise ProviderRequestError(
                         "GEMINI_IMPLICIT_PREFIX_LAYOUT_UNSUPPORTED",
                         "Gemini implicit-prefix binding requires physical layout/9",
@@ -297,7 +297,7 @@ class GeminiNativeAdapter:
                         "CACHE_CONTEXT_MISMATCH",
                         "Gemini CacheExecutionBinding does not match the frozen physical plan",
                     )
-                if physical.get("layout_version") == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
+                if physical.get("layout_version") in {GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10}:
                     cached_history_version = metadata.get("cached_history_version")
                     if cached_history_version is None:
                         cached_history_version = binding_prefix.get("prefix_version")

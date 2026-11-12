@@ -9,12 +9,14 @@ from app.shared_connection_contract import frozen_connection_fields
 def dispatch_input_digest(*, snapshot, session, history, material_ids, material_bindings,
                           tenant_id, conversation_hash, request_id, session_id, context_plan,
                           cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers,
-                          connection_spec_hash=None,account_scope_id=None):
+                          connection_spec_hash=None,account_scope_id=None, material_occurrences=None, historical_bindings=None):
     from app.core.idempotency import stable_hash
     spec,scope=frozen_connection_fields(snapshot,(session.get('metadata') or {}).get('_relay_route'))
     if connection_spec_hash is not None and connection_spec_hash!=spec or account_scope_id is not None and account_scope_id!=scope:
         raise ValueError('Dispatch identity differs from frozen snapshot')
     return stable_hash({**({'connection_spec_hash':spec,'account_scope_id':scope} if spec else {}),"schema_version": "relay-prepared-execution/2",
+        **({"material_occurrences": material_occurrences, "historical_bindings": historical_bindings}
+           if snapshot.get("placement_contract_version") is not None else {}),
         "snapshot": {k: v for k, v in snapshot.items() if k != "_relay_cache_execution"},
         "session": session, "history": history, "material_ids": material_ids,
         "material_bindings": material_bindings, "tenant_id": tenant_id,
@@ -41,6 +43,8 @@ class SealedDispatchBundle:
     seal_id: str = ""
     seal_hash: str = ""
     affinity_headers: dict[str, str] = field(default_factory=dict)
+    material_occurrences: list = field(default_factory=list, kw_only=True)
+    historical_bindings: list = field(default_factory=list, kw_only=True)
     connection_spec_hash: str = field(default='',kw_only=True)
     account_scope_id: str = field(default='',kw_only=True)
 
@@ -51,7 +55,7 @@ class SealedDispatchBundle:
             raise ValueError('Sealed bundle connection identity mismatch')
         object.__setattr__(self,'connection_spec_hash',spec)
         object.__setattr__(self,'account_scope_id',scope)
-        for name in ("snapshot", "session", "history", "material_ids", "material_bindings", "context_plan", "cache_execution_binding", "execution_fence", "provider_physical_plan", "affinity_headers"):
+        for name in ("snapshot", "session", "history", "material_ids", "material_bindings", "context_plan", "cache_execution_binding", "execution_fence", "provider_physical_plan", "affinity_headers", "material_occurrences", "historical_bindings"):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
 
     @property
@@ -79,7 +83,7 @@ class SealedDispatchBundle:
         actual = dispatch_input_digest(**{name: getattr(self, name) for name in (
             "snapshot", "session", "history", "material_ids", "material_bindings", "tenant_id",
             "conversation_hash", "request_id", "session_id", "context_plan", "cache_execution_binding",
-            "execution_fence", "provider_physical_plan", "affinity_headers","connection_spec_hash","account_scope_id")})
+            "execution_fence", "provider_physical_plan", "affinity_headers","connection_spec_hash","account_scope_id", "material_occurrences", "historical_bindings")})
         if actual != self.seal_hash:
             raise ExecutionConflictError("Sealed adapter inputs do not match the atomic dispatch digest")
         return True
@@ -97,9 +101,10 @@ class ActualExecutionFact:
     raw_error_envelope: dict[str, Any] | None = None
     failure_stage: str | None = None
     execution_observation: dict[str, Any] = field(default_factory=dict)
+    projected_material_occurrences: list = field(default_factory=list, kw_only=True)
 
     def __post_init__(self):
-        for name in ("material_binding", "cache_binding", "seal_record", "raw_error_envelope", "execution_observation"):
+        for name in ("material_binding", "cache_binding", "seal_record", "raw_error_envelope", "execution_observation", "projected_material_occurrences"):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
 
 @dataclass
@@ -130,12 +135,20 @@ class RuntimeState:
     execution_snapshot: dict = field(default_factory=dict)
     sealed_bundle: Any = None
     failure_stage: str = "pre_dispatch_check"
+    historical_pinned_bindings: list = field(default_factory=list)
+    projected_material_occurrences: list = field(default_factory=list)
 
     @classmethod
     def from_plan(cls, plan, started):
         row, session, snapshot = map(thaw_json, (plan.request_record, plan.session_record, plan.snapshot))
         ids = list(snapshot.get("material_ids") or [])
-        if session.get("context_policy") == "conversation": ids = list(session.get("material_manifest") or []) + ids
+        if snapshot.get("placement_contract_version") is not None:
+            from app.core.material_placement import verify_placement
+            placement = verify_placement(snapshot.get("material_placement_plan"), session=session, history=thaw_json(plan.history))
+            ids = list(placement["current_effective_material_ids"])
+        elif session.get("context_policy") == "conversation":
+            # Preserve the accepted wire of in-flight legacy Requests.
+            ids = list(session.get("material_manifest") or []) + ids
         return cls(plan, row, session, snapshot, thaw_json(plan.history), str(row["id"]), str(row["session_id"]),
                    list(dict.fromkeys(ids)), snapshot.get("provider")=="gemini" and snapshot.get("protocol", "gemini_native")=="gemini_native",
                    snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)

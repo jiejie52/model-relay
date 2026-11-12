@@ -1,0 +1,43 @@
+{
+  "version": "8.8.2",
+  "baseline": "model-relay-8.8.1.zip",
+  "baseline_sha256": "7d52deb3cf05a092b670d4525a48edf989431a83c86aef20e3aa61c7d8251baf",
+  "reason": "在 8.8.1 基础上移除 HTTP Wire Body 阈值环境变量，将上限固定为 262144 bytes。",
+  "changes": [
+    {
+      "path": "app/config.py",
+      "action": "modified",
+      "sha256": "fdd7372e5f466cd8ce4222a11474699d20452dbc17d214845cfa42f9cdc10942"
+    },
+    {
+      "path": "app/observability/http_wire_logger.py",
+      "action": "modified",
+      "sha256": "678874c0df74ef4361c808fb3e2405076e54e67cdfc907572b147284372a7f5b"
+    },
+    {
+      "path": ".env.example",
+      "action": "modified",
+      "sha256": "b76917b986c0a17ad82dd2a87d03b9e35c6475f65cc1263fcf54a6fd2e70d3b1"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "6d8e687378f1fd1193f3e22a6c42637f6b59d0a5827e248894369c9fab77f3ec"
+    },
+    {
+      "path": "UPGRADE_8.8.2.md",
+      "action": "added",
+      "sha256": "c143452dcdad4d628aebd0903abbd9c170ae29a37f1c30d13fa687a56e823940"
+    }
+  ],
+  "deleted_files": [],
+  "test_files_added": false,
+  "validation": {
+    "python_compileall": "passed",
+    "body_limit": "passed: hard-coded 262144 bytes; no Settings field or environment variable",
+    "model_glob_matching": "passed: gemini-****, unmatched model, empty configuration",
+    "gemini_cache_observation": "unchanged from 8.8.1; existing implementation retained",
+    "real_provider_request": "not performed",
+    "production_deployment": "not performed"
+  }
+}

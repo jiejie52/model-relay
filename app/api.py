@@ -43,7 +43,8 @@ from app.observability import configure_logging, elapsed_ms, error as log_error,
 
 
 
-API_VERSION = "8.8.0"
+from app.config import RELAY_VERSION, BUILD_GIT_SHA
+API_VERSION = RELAY_VERSION
 
 
 settings = get_settings()
@@ -202,7 +203,7 @@ async def lifespan(_: FastAPI):
     log_info(
         logger,
         "api_started",
-        version=API_VERSION,
+        version=API_VERSION, build_git_sha=BUILD_GIT_SHA,
         deployment_id=settings.deployment_id,
         execution_pool=settings.execution_pool,
         connection_policy=settings.connection_availability_mode,
@@ -230,7 +231,7 @@ async def lifespan(_: FastAPI):
         await backend.close()
 
 
-app = FastAPI(title="Model Relay API", version=API_VERSION, lifespan=lifespan)
+app = FastAPI(title="Model Relay API", version=API_VERSION, build_git_sha=BUILD_GIT_SHA, lifespan=lifespan)
 app.include_router(dify_relay_gateway_router)
 app.include_router(relay_v2_router)
 
@@ -318,7 +319,7 @@ async def health() -> dict[str, Any]:
         "ok": True,
         "service": "relay-api",
         "configuration": public_configuration_status(getattr(app.state,'configuration_report',{})),
-        "version": API_VERSION,
+        "version": API_VERSION, "build_git_sha": BUILD_GIT_SHA,
         "deployment_id": settings.deployment_id,
         "execution_pool": settings.execution_pool,
         "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,

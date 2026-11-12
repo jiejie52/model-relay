@@ -18,6 +18,13 @@ class AtomicDispatchSealer:
     def __init__(self, repo): self.repo = repo
 
     async def seal_before_dispatch(self, state):
+        if state.snapshot.get("placement_contract_version") is not None:
+            from app.runtime.material_history import verify_pre_seal_material_invariants
+            verify_pre_seal_material_invariants(state)
+            from app.observability.material_metrics import material_metrics
+            from app.observability import info as log_info
+            log_info(logger, "material_placement_pre_seal", request_id=state.request_id, session_id=state.session_id,
+                **material_metrics(state.snapshot, state.provider_physical_plan, state.historical_pinned_bindings, cache_binding=state.cache_binding))
         inputs = dict(snapshot=state.snapshot, session=state.session, history=state.history,
             material_ids=state.material_ids, material_bindings=state.material_bindings,
             tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"],
@@ -35,6 +42,9 @@ class AtomicDispatchSealer:
         if spec and (state.plan.connection_spec_hash!=spec or state.plan.account_scope_id!=scope):
             raise ProviderRequestError('CONNECTION_IDENTITY_MISMATCH','Dispatch connection differs from FrozenExecutionPlan')
         inputs.update(connection_spec_hash=spec,account_scope_id=scope)
+        if state.snapshot.get("placement_contract_version") is not None:
+            inputs.update(material_occurrences=state.projected_material_occurrences,
+                historical_bindings=state.historical_pinned_bindings)
         prepared_payload_hash = dispatch_input_digest(**inputs)
         if state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
@@ -56,11 +66,16 @@ class AtomicDispatchSealer:
                     "Cache execution binding was rejected by the Request execution fence",
                 )
 
-            sealed = await self.repo.seal_cache_and_dispatch_v3(
+            seal_method = self.repo.seal_materials_and_dispatch_v89 if state.snapshot.get("placement_contract_version") is not None else self.repo.seal_cache_and_dispatch_v3
+            sealed = await seal_method(
                 request_id=state.request_id,
                 binding_version=state.cache_binding_obj.binding_version,
                 binding_hash=binding_hash,
                 payload_hash=prepared_payload_hash,
+                **({"material_occurrences": state.projected_material_occurrences,
+                    "historical_bindings": state.historical_pinned_bindings,
+                    "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
+                   if state.snapshot.get("placement_contract_version") is not None else {}),
                 fence_owner=state.fence.owner,
                 fence_epoch=state.fence.epoch,
             )

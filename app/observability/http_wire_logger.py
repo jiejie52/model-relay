@@ -1,6 +1,7 @@
 """Provider HTTP boundary: affinity, exact entity observations, and opt-in diagnostics."""
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import inspect
 import json
@@ -20,6 +21,8 @@ from app.observability import info as log_info, warning as log_warning
 
 logger = logging.getLogger("relay.http.wire")
 _current: ContextVar[dict[str, Any] | None] = ContextVar("relay_wire_context", default=None)
+_WIRE_LOG_DIRECTORY = "/tmp/relay-http-wire"
+_WIRE_LOG_MAX_BODY_BYTES = 262144
 _ROUTER_HEADERS = (
     "x-aihubmix-request-id", "x-aihubmix-router-sticky", "x-aihubmix-router-resolved-model",
     "x-aihubmix-router-fallback", "x-aihubmix-router-reason",
@@ -57,7 +60,19 @@ def wire_phase() -> str | None:
     return (_current.get() or {}).get("phase")
 
 
-def _headers(headers: httpx.Headers, redact: bool) -> list[tuple[str, str]]:
+def _model_patterns(settings: Any) -> tuple[str, ...]:
+    raw = str(getattr(settings, "relay_http_wire_log_providers", "") or "")
+    return tuple(item.strip().casefold() for item in raw.split(",") if item.strip())
+
+
+def wire_logging_enabled_for_context(settings: Any, context: dict[str, Any] | None) -> bool:
+    model = str((context or {}).get("model") or "").strip().casefold()
+    if not model:
+        return False
+    return any(fnmatch.fnmatchcase(model, pattern) for pattern in _model_patterns(settings))
+
+
+def _headers(headers: httpx.Headers) -> list[tuple[str, str]]:
     entries = []
     for name, value in headers.multi_items():
         if (
@@ -74,6 +89,12 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
         self.wrapped = wrapped
         self.settings = settings
         self.provider = provider
+        self._full_audit_authorized = full_body_audit_enabled(settings)
+        self._full_audit_expiry_warned = False
+        if getattr(settings, "http_wire_body_audit_mode", "redacted_structure") == "full_hex_debug":
+            log_warning(logger, "wire_full_hex_debug_window", active=self._full_audit_authorized,
+                expires_at=getattr(settings, "http_wire_full_debug_until", None))
+
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         ctx = _current.get() or {}
@@ -83,9 +104,7 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if ctx.get("secondary_affinity_header"):
                 request.headers[ctx["secondary_affinity_header"]] = affinity
 
-        enabled = self.settings.relay_http_wire_log_enabled
-        filters = {item.strip().lower() for item in self.settings.relay_http_wire_log_providers.split(",")}
-        enabled = enabled and bool(filters & {"*", self.provider, str(ctx.get("provider") or ""), str(ctx.get("channel") or "")})
+        enabled = wire_logging_enabled_for_context(self.settings, ctx)
         body = None
         if ctx.get("normalize") and "application/json" in request.headers.get("content-type", ""):
             body = await request.aread()
@@ -164,7 +183,8 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 logger, "provider_http_connection",
                 request_id=ctx.get("request_id"), session_id=ctx.get("session_id"),
                 connection_id=getattr(connection, "connection_id", None),
-                provider=self.provider, phase=ctx.get("phase"), process_id=os.getpid(),
+                provider=self.provider, model=ctx.get("model"),
+                phase=ctx.get("phase"), process_id=os.getpid(),
                 host=request.url.host, http_version=response.http_version if response else None,
                 trace_observed=trace["observed"],
                 tcp_connect_started=trace["tcp_connect_started"] if trace["observed"] else None,
@@ -180,27 +200,38 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
               digest: str | None = None, size: int | None = None,
               head: bytes | None = None, tail: bytes | None = None) -> None:
         try:
-            limit = self.settings.relay_http_wire_log_max_body_bytes
+            limit = _WIRE_LOG_MAX_BODY_BYTES
             facts: dict[str, Any] = {}
+            full_audit = self._full_audit_authorized and full_body_audit_enabled(self.settings)
+            if self._full_audit_authorized and not full_audit and not self._full_audit_expiry_warned:
+                self._full_audit_expiry_warned = True
+                log_warning(logger, "wire_full_hex_debug_expired", effective_mode="redacted_structure")
             if body is not None:
                 facts = {"body_sha256": hashlib.sha256(body).hexdigest(), "body_bytes": len(body)}
-                if len(body) <= limit:
+                if not full_audit:
+                    facts["body_structure"] = redacted_body_structure(body)
+                elif len(body) <= limit:
                     facts["body_hex"] = body.hex()
                 else:
-                    fd, dump_path = _open_dump(self.settings.relay_http_wire_log_directory)
+                    fd, dump_path = _open_dump()
                     with os.fdopen(fd, "wb") as target:
                         target.write(body)
                     facts["body_head_hex"] = body[:256].hex()
                     facts["body_tail_hex"] = body[-256:].hex()
             if digest is not None:
                 facts.update(body_sha256=digest, body_bytes=size)
-            if dump_path and head is not None and tail is not None:
+            if full_audit and dump_path and head is not None and tail is not None:
                 facts.update(body_head_hex=head.hex(), body_tail_hex=tail.hex())
+            if not full_audit and dump_path:
+                Path(dump_path).unlink(missing_ok=True)
+                dump_path = None
+            facts["body_audit_mode"] = "full_hex_debug" if full_audit else "redacted_structure"
             log_info(logger, "provider_http_wire", direction=direction, method=request.method,
                      url=sanitize_wire_url(request.url,drop_query=True),
-                     headers=_headers(headers, self.settings.relay_http_wire_log_redact_auth),
+                     headers=_headers(headers),
                      status=status, body_complete=complete, wire_dump_path=dump_path,
                      request_id=ctx.get("request_id"), session_id=ctx.get("session_id"),
+                     provider=self.provider, channel=ctx.get("channel"), model=ctx.get("model"),
                      phase=ctx.get("phase"), **(ctx.get("prefix_diff") or {}), **facts)
         except Exception as exc:
             log_warning(logger, "provider_http_wire_logging_failed", error_type=type(exc).__name__)
@@ -209,9 +240,36 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
         await self.wrapped.aclose()
 
 
-def _open_dump(directory: str) -> tuple[int, str]:
-    Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
-    return tempfile.mkstemp(prefix="wire-", suffix=".bin", dir=directory)
+def _open_dump() -> tuple[int, str]:
+    Path(_WIRE_LOG_DIRECTORY).mkdir(mode=0o700, parents=True, exist_ok=True)
+    return tempfile.mkstemp(prefix="wire-", suffix=".bin", dir=_WIRE_LOG_DIRECTORY)
+
+
+def full_body_audit_enabled(settings):
+    if getattr(settings, "http_wire_body_audit_mode", "redacted_structure") != "full_hex_debug":
+        return False
+    from datetime import datetime, timezone
+    try:
+        deadline = datetime.fromisoformat(str(getattr(settings, "http_wire_full_debug_until", "")).replace("Z", "+00:00"))
+        seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+        return 0 < seconds <= 3600
+    except (ValueError, TypeError):
+        return False
+
+
+def redacted_body_structure(body):
+    def walk(value):
+        if isinstance(value, dict):
+            return {k: (v if k == "role" and v in ("user", "model", "assistant", "system", "tool") else walk(v))
+                    for k, v in value.items()}
+        if isinstance(value, list):
+            return [walk(v) for v in value]
+        raw = value.encode() if isinstance(value, str) else json.dumps(value).encode()
+        return {"type": type(value).__name__, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    try:
+        return walk(json.loads(body))
+    except (ValueError, UnicodeError):
+        return {"kind": "opaque", "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
 
 
 class _ResponseCapture(httpx.AsyncByteStream):
@@ -227,6 +285,7 @@ class _ResponseCapture(httpx.AsyncByteStream):
         path = None
         capture = True
         complete = False
+        full_audit = self.transport._full_audit_authorized and full_body_audit_enabled(self.transport.settings)
         try:
             async for chunk in self.inner:
                 if capture:
@@ -235,15 +294,16 @@ class _ResponseCapture(httpx.AsyncByteStream):
                         size += len(chunk)
                         head = (head + chunk[:256])[:256]
                         tail = (tail + chunk[-256:])[-256:]
-                        if target is None and size > self.transport.settings.relay_http_wire_log_max_body_bytes:
-                            fd, path = _open_dump(self.transport.settings.relay_http_wire_log_directory)
+                        if full_audit and target is None and size > _WIRE_LOG_MAX_BODY_BYTES:
+                            fd, path = _open_dump()
                             target = os.fdopen(fd, "wb")
                             target.write(buffer)
                             buffer.clear()
-                        if target is None:
-                            buffer.extend(chunk)
-                        else:
-                            target.write(chunk)
+                        if full_audit:
+                            if target is None:
+                                buffer.extend(chunk)
+                            else:
+                                target.write(chunk)
                     except OSError:
                         capture = False
                 yield chunk
@@ -255,7 +315,7 @@ class _ResponseCapture(httpx.AsyncByteStream):
                 except OSError:
                     capture = False
             self.transport._emit("inbound_body", self.request, self.response.headers,
-                                 bytes(buffer) if target is None and capture else None,
+                                 bytes(buffer) if full_audit and target is None and capture else None,
                                  self.ctx, self.response.status_code, complete=complete and capture,
                                  dump_path=path, digest=digest.hexdigest(), size=size, head=head, tail=tail)
 
@@ -264,7 +324,10 @@ class _ResponseCapture(httpx.AsyncByteStream):
 
 
 def provider_transport(settings: Any, provider: str, wrapped=None, url: str | None = None, *, always: bool = False):
-    if wrapped is None and not always and not settings.relay_http_wire_log_enabled and not _current.get():
+    # A context is still required for affinity injection and payload
+    # normalization even when its model does not match the wire-log filter.
+    # Without a context there is no reliable model identity to match.
+    if wrapped is None and not always and not _current.get():
         return None
     if wrapped is None:
         # Explicit transport bypasses HTTPX automatic environment proxy mounting.

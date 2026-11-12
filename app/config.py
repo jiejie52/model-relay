@@ -7,6 +7,10 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+RELAY_VERSION = "8.9.0"
+BUILD_GIT_SHA = os.getenv("BUILD_GIT_SHA", "unknown")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -20,11 +24,13 @@ class Settings(BaseSettings):
     dependency_http_log_level: str = "WARNING"
     uvicorn_access_log: bool = False
 
-    relay_http_wire_log_enabled: bool = False
-    relay_http_wire_log_providers: str = "*"
-    relay_http_wire_log_max_body_bytes: int = Field(262144, ge=1)
-    relay_http_wire_log_redact_auth: bool = True
-    relay_http_wire_log_directory: str = "/tmp/relay-http-wire"
+    # A comma-separated list of model-name glob patterns. An empty value keeps
+    # HTTP wire logging disabled; a matching model enables it automatically.
+    relay_http_wire_log_providers: str = ""
+    material_placement_mode: Literal["legacy_v1", "shadow", "enforce_new_sessions", "enforce_all_verified"] = "enforce_new_sessions"
+    historical_material_safety_seconds: int = Field(120, ge=30, le=3600)
+    http_wire_body_audit_mode: Literal["redacted_structure", "full_hex_debug"] = "redacted_structure"
+    http_wire_full_debug_until: str | None = None
     relay_inline_cache_budget_bytes: int = Field(60 * 1024 * 1024, gt=0, le=60 * 1024 * 1024)
     relay_cache_roll_max_uncached_tokens: int = Field(16384, gt=0)
     relay_implicit_prefix_min_tokens: int = Field(1024, gt=0)

@@ -77,7 +77,7 @@ class PhysicalContextProjector:
                     "Gemini physical projection requires the frozen ContextPlan",
                 )
             state.cache_material_projection = None
-            if uses_cache_material_projection_layout(state.session):
+            if (state.snapshot.get("placement_contract_version") is None or not state.snapshot["material_placement_plan"].get("deduplicate_auto", True)) and uses_cache_material_projection_layout(state.session):
                 state.cache_material_projection = await self.bindings.prepare_gemini_cache_projection(
                     material_ids=state.material_ids,
                     material_bindings=state.material_bindings,

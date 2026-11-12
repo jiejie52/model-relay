@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from app.immutable import freeze_json
 from app.shared_contracts import ExecutionFence
+from app.core.material_placement import CommittedMaterialOccurrence, EffectiveMaterialPlacementPlan
 
 @dataclass(frozen=True)
 class FrozenExecutionPlan:
@@ -16,6 +17,11 @@ class FrozenExecutionPlan:
     history: list[dict[str, Any]] = field(default_factory=list)
     connection_spec_hash: str = field(default='',kw_only=True)
     account_scope_id: str = field(default='',kw_only=True)
+
+    @property
+    def material_placement_plan(self):
+        value = self.snapshot.get("material_placement_plan")
+        return EffectiveMaterialPlacementPlan(value) if value is not None else None
 
     def __post_init__(self):
         from app.shared_connection_contract import frozen_connection_fields

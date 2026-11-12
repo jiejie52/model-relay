@@ -116,6 +116,8 @@ class SessionManager:
         material_transport = (route.capability_contract or {}).get("metadata", {}).get("material_transport")
         if material_transport:
             session_metadata["_relay_material_transport"] = {"version": "supply-material-transport/1", **material_transport}
+        if settings.material_placement_mode != "legacy_v1":
+            session_metadata["_relay_material_placement"] = {"contract_version": "material-placement/2"}
         context = context_settings(body.context_policy)
         session_metadata["_relay_cache_v66"] = context
         if route_group:

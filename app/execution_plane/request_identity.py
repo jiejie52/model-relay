@@ -13,3 +13,6 @@ def semantic_intent_hash(intent, resolved):
         from app.thinking_contracts import thinking_identity
         value["thinking_identity"] = thinking_identity(resolved.thinking)
     return caller_intent_hash(value)
+
+
+from app.core.material_placement import material_identity

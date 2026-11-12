@@ -32,6 +32,11 @@ class ExecutionPlanLoader:
                 and session.get("context_policy") == "conversation" and session.get("history_object_id")):
             history = await self.artifacts.load_json(session["history_object_id"], tenant_id=row["tenant_id"], conversation_hash=row["conversation_hash"])
             if not isinstance(history, list): raise ValueError("Session history is not a list")
+        if snapshot.get("placement_contract_version") is not None:
+            from app.core.material_placement import verify_placement
+            verify_placement(snapshot.get("material_placement_plan"), session=session, history=history)
+            if row.get("material_placement_plan") != snapshot["material_placement_plan"]:
+                raise ExecutionConflictError("Persisted material placement differs from the frozen Request")
         return FrozenExecutionPlan(row, session,
             {key: snapshot.get(key) for key in ("think_level", "thinking", "effective_options", "structured_output", "requested_cache_mode")},
             snapshot.get("context_plan") or {}, snapshot.get("cache_plan") or {}, fence, snapshot, history)

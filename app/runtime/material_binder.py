@@ -1352,6 +1352,19 @@ class MaterialBinder:
         }
 
     async def bind_for_plan(self, state):
+        if state.snapshot.get("placement_contract_version") is not None:
+            return await self.bind_for_current_turn(state)
+        return await self._bind_legacy_plan(state)
+
+    async def bind_for_current_turn(self, state):
+        from app.runtime.material_history import bind_for_current_turn
+        return await bind_for_current_turn(self, state, self._bind_legacy_plan)
+
+    async def verify_and_pin_historical(self, state):
+        from app.runtime.material_history import verify_and_pin_historical
+        return await verify_and_pin_historical(self.repo, state)
+
+    async def _bind_legacy_plan(self, state):
         existing_binding_snapshot = state.request_row.get("material_binding_snapshot")
         if not isinstance(existing_binding_snapshot, list):
             existing_binding_snapshot = None
@@ -1372,6 +1385,7 @@ class MaterialBinder:
             session_id=state.session_id,
             gemini_inline_cache_strategy=(
                 state.native_gemini
+                and (state.snapshot.get("placement_contract_version") is None or not state.snapshot["material_placement_plan"].get("deduplicate_auto", True))
                 and uses_inline_cache_transport_layout(state.session)
             ),
             gemini_session_material_ids=(

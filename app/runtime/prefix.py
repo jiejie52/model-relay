@@ -20,7 +20,7 @@ def prepare_implicit_prefix_binding(
             and (snapshot or {}).get("protocol", "gemini_native") == "gemini_native"):
         physical = provider_physical_plan if isinstance(provider_physical_plan, dict) else {}
         if (
-            str(physical.get("layout_version") or "") != "gemini-physical-cache-layout/9"
+            str(physical.get("layout_version") or "") not in {"gemini-physical-cache-layout/9", "gemini-physical-cache-layout/10"}
             or not bool(physical.get("implicit_prefix_eligible"))
             or not str(physical.get("implicit_prefix_fingerprint") or "")
             or not isinstance(physical.get("implicit_prefix_payload"), dict)

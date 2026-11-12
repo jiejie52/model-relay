@@ -1,0 +1,58 @@
+{
+  "version": "8.8.1",
+  "baseline": "model-relay-8.8.0.zip",
+  "baseline_sha256": "b4b92d021f2ae064fde4c33e424fcad60d2b547c977c7b11cd8e5d11b329ea61",
+  "reason": "按模型名简化 HTTP Wire 日志配置，并为 Gemini Provider 调用增加原生隐式缓存 Token 观测。",
+  "changes": [
+    {
+      "path": "UPGRADE_8.8.1.md",
+      "action": "added",
+      "sha256": "1bd94ac523a6b9084284d9317dd9a0720c613e61db6718cb12e4e7531cd4fe76"
+    },
+    {
+      "path": ".env.example",
+      "action": "modified",
+      "sha256": "b0a9e55d51484b116e9db186af263a38de480714b3a15f9097ab5ebd77cd7351"
+    },
+    {
+      "path": "app/api.py",
+      "action": "modified",
+      "sha256": "87a9d230c75b730908f525f63888e84f4ed64be3235e19b7775c270ca1dee774"
+    },
+    {
+      "path": "app/config.py",
+      "action": "modified",
+      "sha256": "0942bdf9d488cf7e976cc6016f356a761c6c8de589f03fddc5248eed2a620df5"
+    },
+    {
+      "path": "app/observability/http_wire_logger.py",
+      "action": "modified",
+      "sha256": "03e5d44b623ef14266cea2ecf612b89c12ae362d87e264b4815301bbc547ef48"
+    },
+    {
+      "path": "app/protocol_adapters/usage_normalizer.py",
+      "action": "modified",
+      "sha256": "d9dd9f18be241b67d8cf34c66ee254b17efc47eeb0a7700a4bff7d7d55f0ad0b"
+    },
+    {
+      "path": "app/runtime/affinity.py",
+      "action": "modified",
+      "sha256": "fe0c78cbb6daad4a345526fa73dfaa57ff9b72425c8e3f1a5de01e286338d75b"
+    },
+    {
+      "path": "app/runtime/controlled_invoker.py",
+      "action": "modified",
+      "sha256": "13e4b5de112feda5823a7136b480de3d8068fb4b8c8a3c35a500628b2623246d"
+    }
+  ],
+  "deleted_files": [],
+  "test_files_added": false,
+  "validation": {
+    "python_compileall": "passed",
+    "model_glob_matching": "passed: gemini-****, comma-separated patterns, unmatched model, empty config",
+    "gemini_cache_observation": "passed: positive hit, zero miss, missing/invalid unknown, snake_case compatibility, explicit CachedContent unknown, failed call unknown",
+    "settings_model": "passed",
+    "real_provider_request": "not performed",
+    "production_deployment": "not performed"
+  }
+}

@@ -10,7 +10,7 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/8.8.0'
+COMPILER_VERSION = 'relay-excel/8.9.0'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
 from app.control_plane.governance.thinking_mappings import FIELDS as THINKING_FIELDS, CONTRACT_OPTIONAL, compile_thinking_mappings
@@ -87,6 +87,8 @@ def unique(rows, key):
         out[identity]=row
     return out
 
+from app.protocol_adapters.wire_projection.history_capabilities import history_material_capability
+
 def compile_workbook(content, settings):
     declarations=parse_v2_declarations(content)
     ext=declarations.get('extensions',{})
@@ -135,6 +137,7 @@ def compile_workbook(content, settings):
         if required not in ('是','否'):fail(row,'要求原生约束证据','只能填写是或否')
         if source=='first_party_native_payload' and (value(row,'协议族')!='gemini_native' or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
         profiles[pid]=ModelControlPlane._profile_from_mapping({'profile_id':pid,'revision':COMPILER_VERSION,'protocol':value(row,'协议族'),
+            **history_material_capability(value(row,'协议族')),
             'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
                 'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')

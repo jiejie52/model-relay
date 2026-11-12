@@ -59,6 +59,7 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
     return {
         "request_id": request_id, "session_id": str(session["id"]),
         "provider": snapshot.get("provider"), "channel": channel,
+        "model": snapshot.get("model"),
         "scope": stable_hash([session["id"], snapshot.get("route_binding_hash"), epoch,
                               route.get("account_scope_hash"), snapshot.get("protocol_profile_hash")]),
         "phase": "cache_prepare", "normalize": managed,

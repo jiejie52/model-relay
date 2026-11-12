@@ -370,7 +370,7 @@ class RelayV2Repository(RelayRepository):
         job_id: str | None,
         route_pin: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = await self.backend.rpc(
+        result = await self._placement_rpc(
             "accept_relay_request_v66" if route_pin is not None else "accept_relay_request_v3",
             {
                 **({"p_route_pin": route_pin} if route_pin is not None else {}),
@@ -878,8 +878,9 @@ class RelayV2Repository(RelayRepository):
         expected_history_version: int,
         fence_owner: str,
         fence_epoch: int,
+        material_occurrences: list | None = None,
     ) -> bool:
-        result = await self.backend.rpc(
+        result = await self._placement_rpc(
             "complete_relay_request_v66",
             {
                 "p_request_id": request_id,
@@ -892,6 +893,7 @@ class RelayV2Repository(RelayRepository):
                 "p_provider_response_id": provider_response_id,
                 "p_fence_owner": fence_owner,
                 "p_fence_epoch": fence_epoch,
+                **({"_material_occurrences": material_occurrences} if material_occurrences is not None else {}),
             },
         )
         return bool(result)
@@ -1179,3 +1181,19 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0] if rows else None
 
+
+    async def _placement_rpc(self, name, arguments):
+        args = dict(arguments)
+        if name in {"accept_relay_request_v3", "accept_relay_request_v66"} and (args.get("p_metadata") or {}).get("_relay_material_placement"):
+            return await self.backend.rpc("accept_relay_request_v89", {"p_args": args})
+        if "_material_occurrences" in args:
+            occurrences = args.pop("_material_occurrences")
+            return await self.backend.rpc("complete_material_request_v89", {
+                "p_args": args, "p_material_occurrences": occurrences})
+        return await self.backend.rpc(name, args)
+
+    async def seal_materials_and_dispatch_v89(self, *, material_occurrences, historical_bindings, safety_seconds, **kwargs):
+        return bool(await self.backend.rpc("seal_materials_and_dispatch_v89", {
+            "p_args": {"p_" + key: value for key, value in kwargs.items()},
+            "p_material_occurrences": material_occurrences,
+            "p_historical_bindings": historical_bindings, "p_safety_seconds": safety_seconds}))

@@ -18,7 +18,9 @@ GEMINI_PHYSICAL_LAYOUT_VERSION_V6 = "gemini-physical-cache-layout/6"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V7 = "gemini-physical-cache-layout/7"
 GEMINI_PHYSICAL_LAYOUT_VERSION = "gemini-physical-cache-layout/8"
 GEMINI_PHYSICAL_LAYOUT_VERSION_V9 = "gemini-physical-cache-layout/9"
+GEMINI_PHYSICAL_LAYOUT_VERSION_V10 = "gemini-physical-cache-layout/10"
 SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS = {
+    GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V2,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V3,
     GEMINI_PHYSICAL_LAYOUT_VERSION_V4,
@@ -196,6 +198,10 @@ def build_gemini_physical_cache_plan(
     if not model:
         raise ProviderRequestError("MODEL_REQUIRED", "Gemini physical projection requires a frozen model")
 
+    if snapshot.get("placement_contract_version") is not None and snapshot["material_placement_plan"].get("deduplicate_auto", True):
+        from app.protocol_adapters.wire_projection.gemini_native_prefix import build_native_prefix_plan
+        return build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
+            material_ids=material_ids, material_bindings=material_bindings, context_plan=context_plan)
     if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
         return _build_gemini_physical_cache_plan_v9(
             snapshot=snapshot,

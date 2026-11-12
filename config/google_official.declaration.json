@@ -111,6 +111,8 @@
       "profile_id": "gemini-native-google-official",
       "revision": "8.0.0-draft",
       "protocol": "gemini_native",
+      "supports_native_history_material_reuse": true,
+      "history_material_part_kinds": ["fileData", "inlineData"],
       "cache": {
         "supported_mechanisms": [
           "stateful_resource",

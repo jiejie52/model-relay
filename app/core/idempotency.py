@@ -144,4 +144,7 @@ def request_identity(snapshot: dict[str, Any]) -> str:
         identity["requested_cache_mechanism"] = snapshot.get("requested_cache_mechanism")
     if version == "relay-request/2.4":
         identity["execution_authorization"] = snapshot.get("execution_authorization") or {}
+    if snapshot.get("placement_contract_version") is not None:
+        from app.core.material_placement import material_identity
+        identity["material_placement_identity"] = material_identity(snapshot)
     return stable_hash(identity)
