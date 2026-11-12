@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from app.protocol_adapters.base import ProviderRequestError
+from app.core.provider_binding_state import provider_binding_is_usable
 from app.observability import error as log_error, info as log_info, warning as log_warning
 from app.utils import safe_segment, utcnow
 from app.v2_repository import RelayV2Repository
@@ -1312,10 +1313,7 @@ class MaterialBinder:
 
     @staticmethod
     def _binding_usable(binding: dict[str, Any] | None) -> bool:
-        if not binding:
-            return False
-        state = str(binding.get("state") or binding.get("processing_state") or "").lower()
-        if state not in {"active", "ready", "processed"}:
+        if not provider_binding_is_usable(binding):
             return False
         expires = binding.get("expires_at")
         if not expires:

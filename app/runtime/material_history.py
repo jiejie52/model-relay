@@ -1,9 +1,61 @@
 """Verify resources referenced by immutable history without rebinding them."""
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+import logging
+
 from app.core.idempotency import stable_hash
 from app.core.material_placement import verify_placement, route_identity
+from app.core.provider_binding_state import provider_binding_state_failure_reason
+from app.observability import error as log_error
 from app.protocol_adapters.base import ProviderRequestError
 from app.utils import utcnow
+
+
+logger = logging.getLogger("model-relay-material-bindings")
+
+
+def _generation(value, *, default=None):
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _remaining_ttl_seconds(expires_at):
+    if not expires_at:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int((parsed - utcnow()).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_binding_validation_failure(state, snapshot, row, reason, *, historical, stage=None):
+    identity = route_identity(state.session)
+    log_error(
+        logger,
+        "provider_binding_validation_failed",
+        request_id=state.request_id,
+        session_id=state.session_id,
+        material_id=snapshot.get("material_id"),
+        connection_id=snapshot.get("connection_id") or identity.get("connection_id"),
+        expected_generation=_generation(snapshot.get("binding_generation")),
+        actual_generation=_generation(row.get("generation"), default=1) if row else None,
+        binding_state=row.get("state") if row else None,
+        processing_state=row.get("processing_state") if row else None,
+        validation_failure_reason=reason,
+        remaining_ttl_seconds=_remaining_ttl_seconds(row.get("expires_at")) if row else None,
+        failure_stage=stage or (
+            "runtime_historical_binding_validation" if historical
+            else "runtime_current_turn_binding_validation"
+        ),
+        historical=historical,
+        failure_class="relay_validation",
+    )
 
 
 async def checked_binding(repo, snapshot, state, *, historical):
@@ -11,22 +63,63 @@ async def checked_binding(repo, snapshot, state, *, historical):
     identity = route_identity(state.session)
     if (snapshot.get("connection_id") != identity["connection_id"]
             or snapshot.get("account_scope_hash") != identity["account_scope_id"]):
+        _log_binding_validation_failure(
+            state, snapshot, None, "BINDING_SCOPE_MISMATCH", historical=historical,
+            stage="runtime_frozen_scope_validation",
+        )
         raise ProviderRequestError(code, "Material binding differs from frozen execution scope")
-    material = await repo.get_material(snapshot["material_id"],
-        tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"])
+
+    material = await repo.get_material(
+        snapshot["material_id"],
+        tenant_id=state.request_row["tenant_id"],
+        conversation_hash=state.request_row["conversation_hash"],
+    )
     if (not material or material.get("sha256") != snapshot.get("content_sha256")
             or material.get("status") in {"failed", "deleted", "reupload_required"}):
+        _log_binding_validation_failure(
+            state, snapshot, None, "CANONICAL_MATERIAL_INVALID", historical=historical,
+            stage="runtime_canonical_material_validation",
+        )
         raise ProviderRequestError(code, "Canonical material is unavailable or changed")
+
     if snapshot.get("representation") == "gemini_inline_data":
         return {**snapshot, "provider_binding_id": None}
-    row = await repo.get_provider_binding(material_id=snapshot["material_id"],
-        connection_id=identity["connection_id"], account_scope_hash=identity["account_scope_id"],
-        purpose=snapshot.get("purpose"), representation=snapshot.get("representation"))
-    if (not row or row.get("state") not in {"ready", "ready_provider"}
-            or int(row.get("generation") or 1) != snapshot.get("binding_generation")
-            or (row.get("external_uri") or row.get("file_uri")) != snapshot.get("external_uri")):
+
+    row = await repo.get_provider_binding(
+        material_id=snapshot["material_id"],
+        connection_id=identity["connection_id"],
+        account_scope_hash=identity["account_scope_id"],
+        purpose=snapshot.get("purpose"),
+        representation=snapshot.get("representation"),
+    )
+    if not row:
+        _log_binding_validation_failure(
+            state, snapshot, None, "BINDING_NOT_FOUND", historical=historical,
+        )
         raise ProviderRequestError(code, "Frozen Provider binding is expired, replaced or unavailable")
-    from datetime import datetime, timezone
+
+    state_failure = provider_binding_state_failure_reason(row)
+    if state_failure:
+        _log_binding_validation_failure(
+            state, snapshot, row, state_failure, historical=historical,
+        )
+        raise ProviderRequestError(code, "Frozen Provider binding is expired, replaced or unavailable")
+
+    expected_generation = _generation(snapshot.get("binding_generation"))
+    actual_generation = _generation(row.get("generation"), default=1)
+    if expected_generation is None or actual_generation is None or actual_generation != expected_generation:
+        _log_binding_validation_failure(
+            state, snapshot, row, "BINDING_GENERATION_MISMATCH", historical=historical,
+        )
+        raise ProviderRequestError(code, "Frozen Provider binding is expired, replaced or unavailable")
+
+    actual_uri = row.get("external_uri") or row.get("file_uri")
+    if actual_uri != snapshot.get("external_uri"):
+        _log_binding_validation_failure(
+            state, snapshot, row, "BINDING_URI_MISMATCH", historical=historical,
+        )
+        raise ProviderRequestError(code, "Frozen Provider binding is expired, replaced or unavailable")
+
     expiry = row.get("expires_at")
     try:
         parsed = datetime.fromisoformat(str(expiry).replace("Z", "+00:00")) if expiry else None
@@ -36,9 +129,14 @@ async def checked_binding(repo, snapshot, state, *, historical):
         if parsed is None or parsed <= utcnow() + timedelta(seconds=margin):
             raise ValueError("expired or unknown expiry")
     except (TypeError, ValueError) as exc:
-        raise ProviderRequestError(code, "Historical file lifetime is insufficient; rebuild or migrate the Session") from exc
-    return {**snapshot, "provider_binding_id": str(row["id"]), "expires_at": expiry}
+        _log_binding_validation_failure(
+            state, snapshot, row, "BINDING_EXPIRED", historical=historical,
+        )
+        raise ProviderRequestError(
+            code, "Historical file lifetime is insufficient; rebuild or migrate the Session"
+        ) from exc
 
+    return {**snapshot, "provider_binding_id": str(row["id"]), "expires_at": expiry}
 
 async def verify_and_pin_historical(repo, state):
     placement = state.snapshot["material_placement_plan"]

@@ -1,0 +1,91 @@
+{
+  "version": "8.9.1",
+  "baseline": "model-relay-8.9.0.zip",
+  "baseline_sha256": "0b5720748a128f6242a319e79408fa7e82c2e627484e3414439f5faa804d863b",
+  "version_reason": "Bug fix for Provider Binding state-contract mismatch and Python/SQL validation parity; structured diagnostics supplement the repair without introducing a new execution method; ZZ increment.",
+  "changes": [
+    {
+      "path": "app/api_v2/router.py",
+      "action": "modified",
+      "sha256": "5a53ff6206b8e691c1b8784f83fb18835cbc5451e8f8dfd755a86051ff514f3d"
+    },
+    {
+      "path": "app/config.py",
+      "action": "modified",
+      "sha256": "974a943b4f3df3075800d63e76eabac4080031bb62f70de4385b203e72c35e03"
+    },
+    {
+      "path": "app/core/provider_binding_state.py",
+      "action": "added",
+      "sha256": "c3b137425f78dd67d86f67d806c4234b9140438e768fa53b2df1d3183599baf7"
+    },
+    {
+      "path": "app/execution_plane/material_reachability.py",
+      "action": "modified",
+      "sha256": "7a1df41321147e5149eed33be35dbcd9983f1bb09879603a8dd43416a6c36d81"
+    },
+    {
+      "path": "app/runtime/dispatch_sealer.py",
+      "action": "modified",
+      "sha256": "3f7bda12528d32760a62ebf7a0d5d6fa5da9a1444f4fa905688cb12ac3910ee9"
+    },
+    {
+      "path": "app/runtime/material_binder.py",
+      "action": "modified",
+      "sha256": "921f43504d926777562cc0ead1b55287e94de5ade1acf1a844945a495eb8d09a"
+    },
+    {
+      "path": "app/runtime/material_history.py",
+      "action": "modified",
+      "sha256": "6ebd54387a20f4b3a39db32c6e27be7a00a9dcf13dc318f038dfba58e7859a9d"
+    },
+    {
+      "path": "sql/014_provider_binding_state_contract.sql",
+      "action": "added",
+      "sha256": "2a00b0ad7e18f7fe536f7ee766c8c08acddc661cd384aa6f968b97eba6999e15"
+    },
+    {
+      "path": "UPGRADE_8.9.1.md",
+      "action": "added",
+      "sha256": "c47e1334330b23b7b7bf57d3c25eea246a291b5396b6f29afcd894c63b89b67e"
+    }
+  ],
+  "deleted_files": [],
+  "test_files_added": false,
+  "dependency_files_changed": false,
+  "source_copy": {
+    "original_file_count": 220,
+    "added_files_before_manifest": 3,
+    "git_directory_in_original_archive": false,
+    "gitignore_preserved": true,
+    "dockerignore_preserved": true,
+    "gitattributes_preserved": true
+  },
+  "validation": {
+    "python_compileall": "passed",
+    "api_worker_imports": "passed with local placeholder values for required Settings only",
+    "provider_binding_state_contract": {
+      "cases": 12,
+      "result": "passed",
+      "coverage": [
+        "active",
+        "ready",
+        "ready_provider legacy compatibility",
+        "processed",
+        "unspecified",
+        "file_state_unspecified",
+        "processing",
+        "failed",
+        "missing/unknown state"
+      ]
+    },
+    "checked_binding_paths": "passed for valid Binding, processing-state failure, generation mismatch and URI mismatch",
+    "sql_error_diagnostic_parser": "passed; only whitelisted non-secret diagnostic fields are emitted",
+    "sql_migration_review": "manual static review completed; no PostgreSQL/PGlite/SQL parser available in the local environment, so database parser/execution validation was not performed",
+    "tests_in_source_archive": "not present; no tests files added",
+    "real_provider_usage_abc": "not performed",
+    "dify_business_gate_quality": "not performed",
+    "production_database_migration": "not performed",
+    "production_deployment": "not performed"
+  }
+}

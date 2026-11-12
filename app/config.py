@@ -7,7 +7,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-RELAY_VERSION = "8.9.0"
+RELAY_VERSION = "8.9.1"
 BUILD_GIT_SHA = os.getenv("BUILD_GIT_SHA", "unknown")
 
 

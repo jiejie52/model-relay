@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from app.core.raw_error import raw_body_inline_fields
+from app.core.provider_binding_state import provider_binding_is_usable
 from app.materials.ingress import MaterialIngressError
 from app.materials.document_projection import DOCX, projection_authorized
 from app.observability import error as log_error, info as log_info, warning as log_warning, elapsed_ms, now_ms
@@ -204,7 +205,7 @@ async def _material_response(request: Request, row: dict[str, Any]) -> MaterialR
     external_status = "ready" if status_value in {"ready", "ready_provider"} else status_value
     ready_for: list[str] = []
     public_provider = str(intent.get("provider") or (binding or {}).get("provider") or "") or None
-    if binding and str(binding.get("state") or binding.get("processing_state") or "").lower() in {"active", "ready", "processed"}:
+    if provider_binding_is_usable(binding):
         if public_provider:
             ready_for.append(public_provider)
     elif status_value == "ready" and fallback and public_provider:

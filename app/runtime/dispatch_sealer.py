@@ -1,14 +1,84 @@
 from __future__ import annotations
 
 
+import json
 import logging
 
 from app.core.idempotency import stable_hash
+from app.observability import error as log_error
 from app.protocol_adapters.base import ProviderRequestError
+from app.supabase import SupabaseError
 from app.utils import utcnow
 
 
 logger = logging.getLogger("model-relay-runtime")
+
+
+_PROVIDER_BINDING_SQL_MESSAGES = {
+    "HISTORICAL_MATERIAL_BINDING_EXPIRED",
+    "MATERIAL_BINDING_SCOPE_MISMATCH",
+}
+_PROVIDER_BINDING_DIAGNOSTIC_FIELDS = {
+    "request_id",
+    "session_id",
+    "material_id",
+    "connection_id",
+    "expected_generation",
+    "actual_generation",
+    "binding_state",
+    "processing_state",
+    "validation_failure_reason",
+    "remaining_ttl_seconds",
+    "failure_stage",
+}
+
+
+def _provider_binding_sql_diagnostic(exc: SupabaseError):
+    try:
+        body = json.loads(exc.body or "{}")
+    except (TypeError, ValueError):
+        return {}, None, None
+    if not isinstance(body, dict):
+        return {}, None, None
+
+    detail = body.get("details")
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            detail = {}
+    if not isinstance(detail, dict):
+        detail = {}
+
+    fields = {
+        key: value for key, value in detail.items()
+        if key in _PROVIDER_BINDING_DIAGNOSTIC_FIELDS and value is not None
+    }
+    return fields, str(body.get("message") or ""), str(body.get("code") or "")
+
+
+def _log_provider_binding_sql_failure(exc: SupabaseError, state) -> None:
+    fields, sql_message, sqlstate = _provider_binding_sql_diagnostic(exc)
+    if not fields.get("validation_failure_reason") and sql_message not in _PROVIDER_BINDING_SQL_MESSAGES:
+        return
+    log_error(
+        logger,
+        "provider_binding_validation_failed",
+        request_id=fields.get("request_id") or state.request_id,
+        session_id=fields.get("session_id") or state.session_id,
+        material_id=fields.get("material_id"),
+        connection_id=fields.get("connection_id") or state.snapshot.get("connection_id"),
+        expected_generation=fields.get("expected_generation"),
+        actual_generation=fields.get("actual_generation"),
+        binding_state=fields.get("binding_state"),
+        processing_state=fields.get("processing_state"),
+        validation_failure_reason=fields.get("validation_failure_reason") or sql_message or "BINDING_SQL_VALIDATION_FAILED",
+        remaining_ttl_seconds=fields.get("remaining_ttl_seconds"),
+        failure_stage=fields.get("failure_stage") or "atomic_dispatch_seal_sql",
+        sqlstate=sqlstate or None,
+        sql_http_status=exc.status_code,
+        failure_class="relay_validation",
+    )
 
 
 from app.runtime.contracts import SealedDispatchBundle, dispatch_input_digest
@@ -67,18 +137,23 @@ class AtomicDispatchSealer:
                 )
 
             seal_method = self.repo.seal_materials_and_dispatch_v89 if state.snapshot.get("placement_contract_version") is not None else self.repo.seal_cache_and_dispatch_v3
-            sealed = await seal_method(
-                request_id=state.request_id,
-                binding_version=state.cache_binding_obj.binding_version,
-                binding_hash=binding_hash,
-                payload_hash=prepared_payload_hash,
-                **({"material_occurrences": state.projected_material_occurrences,
-                    "historical_bindings": state.historical_pinned_bindings,
-                    "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
-                   if state.snapshot.get("placement_contract_version") is not None else {}),
-                fence_owner=state.fence.owner,
-                fence_epoch=state.fence.epoch,
-            )
+            try:
+                sealed = await seal_method(
+                    request_id=state.request_id,
+                    binding_version=state.cache_binding_obj.binding_version,
+                    binding_hash=binding_hash,
+                    payload_hash=prepared_payload_hash,
+                    **({"material_occurrences": state.projected_material_occurrences,
+                        "historical_bindings": state.historical_pinned_bindings,
+                        "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
+                       if state.snapshot.get("placement_contract_version") is not None else {}),
+                    fence_owner=state.fence.owner,
+                    fence_epoch=state.fence.epoch,
+                )
+            except SupabaseError as exc:
+                if state.snapshot.get("placement_contract_version") is not None:
+                    _log_provider_binding_sql_failure(exc, state)
+                raise
             if not sealed:
                 raise ProviderRequestError(
                     "CACHE_BINDING_FENCE_REJECTED",
