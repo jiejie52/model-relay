@@ -149,7 +149,11 @@ def verify_placement(plan, *, session, history):
         raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")
     explicit = plan["current_explicit_material_ids"]
     inherited = {o["material_id"] for o in verified}
-    candidates = list(dict.fromkeys(session.get("material_manifest") or []))
+    context_policy = plan.get("context_policy", "conversation")
+    if context_policy not in {"conversation", "explicit", "session_materials_only"}:
+        raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")
+    candidates = (list(dict.fromkeys(session.get("material_manifest") or []))
+        if context_policy != "explicit" else [])
     deduplicate = plan.get("deduplicate_auto", True)
     if type(deduplicate) is not bool:
         raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")

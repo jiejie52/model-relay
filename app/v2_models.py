@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 ContextPolicy = Literal["conversation", "explicit"]
+RequestContextPolicy = Literal["conversation", "explicit", "session_materials_only"]
 ExecutionMode = Literal["sync", "async"]
 MaterialPurpose = Literal["inference_input", "archive"]
 CacheMode = Literal["off", "auto", "on"]
@@ -86,6 +87,9 @@ class ExecutionSpec(BaseModel):
 
 class SessionRequestCreate(BaseModel):
     input: Any
+    # Per-Request context view; omitted retains the Session default. Does not
+    # change the frozen Session policy or its cumulative history commits.
+    context_policy: RequestContextPolicy | None = None
     instructions: str | None = None
     material_ids: list[str] = Field(default_factory=list)
     # Contract 2.1 callers omit these. They remain optional during the Relay-first

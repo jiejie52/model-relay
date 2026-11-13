@@ -48,6 +48,18 @@ class RequestAcceptor:
         if not session:
             raise ExecutionRequestError(status_code=404, detail="Session not found")
 
+        # A Request can narrow what the model sees, without mutating Session
+        # policy, historical material ledgers, route identity or commit semantics.
+        session_policy = str(session.get("context_policy") or "conversation")
+        request_policy = body.context_policy or session_policy
+        if session_policy == "explicit" and request_policy != "explicit":
+            raise ExecutionRequestError(422, {"code": "CONTEXT_POLICY_OVERRIDE_NOT_ALLOWED",
+                "message": "An explicit Session cannot inherit Session materials or history"})
+        model_history_visible = (request_policy == "conversation"
+            and session_policy == "conversation"
+            and session.get("history_mode", "cumulative") != "ephemeral_turn")
+        session_materials_visible = request_policy in {"conversation", "session_materials_only"}
+
         settings = services.settings
         if str(session.get("execution_pool") or "") != settings.execution_pool:
             raise ExecutionRequestError(
@@ -169,6 +181,8 @@ class RequestAcceptor:
             "requested_cache_mode": requested_cache_mode,
             "metadata": body.metadata,
         }
+        if body.context_policy is not None:
+            public_intent["context_policy"] = body.context_policy
         if cache_contract_session and cache_mechanism_explicit:
             public_intent["requested_cache_mechanism"] = body.requested_cache_mechanism
             public_intent["requested_cache_mechanism_explicit"] = True
@@ -232,6 +246,12 @@ class RequestAcceptor:
                     "options": replay_options.requested_options, "effective_options": replay_options.effective_options,
                     "provider_payload": body.provider_payload, "structured_output": body.structured_output,
                     "execution": body.execution.model_dump(mode="json")}
+                # Legacy persisted Requests must not silently accept changing
+                # the presence/value of a per-Request override on replay.
+                replay.pop("request_context_policy", None)
+                if body.context_policy is not None:
+                    replay["request_context_policy"] = body.context_policy
+                    replay["context_policy"] = request_policy
                 if replay_options.thinking is not None: replay["thinking"] = replay_options.thinking
                 if request_identity(replay) != existing.get("request_hash"):
                     raise ValueError("request identity differs")
@@ -269,7 +289,7 @@ class RequestAcceptor:
             effective_instructions = body.instructions
 
         effective_material_ids = list(body.material_ids)
-        if session.get("context_policy") == "conversation" and isinstance(session.get("material_manifest"), list):
+        if session_materials_visible and isinstance(session.get("material_manifest"), list):
             effective_material_ids = [str(x) for x in session.get("material_manifest") or []] + effective_material_ids
         effective_material_ids = list(dict.fromkeys(effective_material_ids))
         placement_plan = None
@@ -290,14 +310,17 @@ class RequestAcceptor:
             try:
                 placement_plan = plan_effective_materials(session=session, explicit_material_ids=body.material_ids,
                     history=placement_history, profile=placement_profile, material_rows=canonical_rows,
-                    deduplicate_auto=mode not in {"legacy_v1", "shadow"}, safety_seconds=settings.historical_material_safety_seconds).canonical()
+                    context_policy=request_policy,
+                    deduplicate_auto=model_history_visible and mode not in {"legacy_v1", "shadow"},
+                    safety_seconds=settings.historical_material_safety_seconds).canonical()
             except MaterialPlacementError as exc:
                 raise ExecutionRequestError(409, {"code": exc.code}) from exc
             effective_material_ids = placement_plan["current_effective_material_ids"]
             log_info(logger, "material_placement_planned", session_id=str(session_id), **placement_summary(placement_plan))
             if mode == "shadow":
                 shadow = plan_effective_materials(session=session, explicit_material_ids=body.material_ids,
-                    history=placement_history, profile=placement_profile, material_rows=canonical_rows).canonical()
+                    history=placement_history, profile=placement_profile, material_rows=canonical_rows,
+                    context_policy=request_policy, deduplicate_auto=model_history_visible).canonical()
                 log_info(logger, "material_placement_shadow", session_id=str(session_id),
                     shadow_auto_materials_skipped=len(shadow["historical_only_material_ids"]),
                     actual_auto_materials_skipped=0, actual_projection="legacy_v1")
@@ -491,6 +514,10 @@ class RequestAcceptor:
             "input": body.input,
             "instructions": effective_instructions,
             "material_ids": body.material_ids,
+            # Only explicitly supplied overrides appear in legacy identities;
+            # old accepted Request snapshots remain bit-for-bit compatible.
+            **({"request_context_policy": body.context_policy, "context_policy": request_policy,
+                "model_history_visible": model_history_visible} if body.context_policy is not None else {}),
             "effective_material_ids": effective_material_ids,
             "material_hashes": material_hashes,
             "material_total_bytes": material_total_bytes,
@@ -596,12 +623,19 @@ class RequestAcceptor:
             plan_seed["cache_upgrade"] = cache_upgrade
             if is_v66:
                 plan_seed["protocol_profile"] = frozen_route.get("protocol_profile") or {}
+            # History identity is still frozen for concurrency/recovery, but
+            # its contents are not part of this Request's model-visible IR.
+            visible_session = {**session, "context_policy": (
+                "explicit" if request_policy == "explicit" else "conversation"),
+                "history_mode": (session.get("history_mode", "cumulative")
+                    if model_history_visible else "ephemeral_turn")}
             context_plan = build_context_plan(
                 snapshot=plan_seed,
-                session=session,
+                session=visible_session,
                 material_rows=material_rows,
-                history_identity=history_identity,
-                history=planning_history if planning_history is not None else ([] if is_v66 else None),
+                history_identity=history_identity if model_history_visible else None,
+                history=(planning_history if planning_history is not None else ([] if is_v66 else None))
+                    if model_history_visible else [],
             )
             evidence_key = reuse_evidence_key(plan_seed, context_plan)
             observed_reuse: dict[str, Any] = {"observed_compatible_uses": 0}
@@ -612,7 +646,7 @@ class RequestAcceptor:
                 context_plan=context_plan,
                 material_rows=material_rows,
                 large_min_bytes=economics_policy.get("large_attachment_min_bytes", 1024 * 1024),
-                context_policy=str(session.get("context_policy") or "conversation"),
+                context_policy="explicit" if request_policy == "explicit" else "conversation",
             )
             # The frozen plan authorizes candidates. Inventory and measured
             # reuse/cost evidence are read only by the runtime arbiter.
@@ -651,7 +685,8 @@ class RequestAcceptor:
                 "cache_policy": (dict(frozen_route.get("cache_policy")) if isinstance(frozen_route.get("cache_policy"), dict) else None),
                 "cache_contract_hash": frozen_route.get("cache_contract_hash"),
                 "cache_contract": (dict(frozen_route.get("cache_contract")) if isinstance(frozen_route.get("cache_contract"), dict) else None),
-                "context_policy": session.get("context_policy"),
+                "context_policy": request_policy,
+                "model_history_visible": model_history_visible,
                 "history_version": int(session.get("history_version") or 0),
                 "history_object_hash": (history_identity or {}).get("sha256"),
                 "requested_cache_mode": body.requested_cache_mode,

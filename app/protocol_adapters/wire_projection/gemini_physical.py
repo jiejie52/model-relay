@@ -165,6 +165,8 @@ def build_gemini_physical_cache_plan(
     material_bindings: list[dict[str, Any]],
     context_plan: dict[str, Any],
     cache_material_projection: dict[str, Any] | None = None,
+    placement_session: dict[str, Any] | None = None,
+    placement_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Freeze Gemini's provider-facing cache layout from canonical inputs.
 
@@ -201,7 +203,8 @@ def build_gemini_physical_cache_plan(
     if snapshot.get("placement_contract_version") is not None and snapshot["material_placement_plan"].get("deduplicate_auto", True):
         from app.protocol_adapters.wire_projection.gemini_native_prefix import build_native_prefix_plan
         return build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
-            material_ids=material_ids, material_bindings=material_bindings, context_plan=context_plan)
+            material_ids=material_ids, material_bindings=material_bindings, context_plan=context_plan,
+            placement_session=placement_session, placement_history=placement_history)
     if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
         return _build_gemini_physical_cache_plan_v9(
             snapshot=snapshot,

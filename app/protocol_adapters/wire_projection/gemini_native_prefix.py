@@ -9,8 +9,11 @@ LAYOUT = "gemini-physical-cache-layout/10"
 PROJECTOR = "gemini-physical-projector/10"
 
 
-def build_native_prefix_plan(*, snapshot, session, history, material_ids, material_bindings, context_plan):
-    placement = verify_placement(snapshot["material_placement_plan"], session=session, history=history)
+def build_native_prefix_plan(*, snapshot, session, history, material_ids, material_bindings, context_plan,
+                             placement_session=None, placement_history=None):
+    placement = verify_placement(snapshot["material_placement_plan"],
+        session=placement_session if placement_session is not None else session,
+        history=placement_history if placement_history is not None else history)
     native = project_history_contents(history)
     current = project_current_user_content(snapshot, material_ids=material_ids, material_bindings=material_bindings)
     system = project_system_instruction(snapshot)

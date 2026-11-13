@@ -15,7 +15,7 @@ def placement_enabled(session, profile, mode):
             or bool(session.get("committed_material_ledger"))))
 
 
-def plan_effective_materials(*, session, explicit_material_ids, history, profile, material_rows, deduplicate_auto=True, safety_seconds=120):
+def plan_effective_materials(*, session, explicit_material_ids, history, profile, material_rows, context_policy="conversation", deduplicate_auto=True, safety_seconds=120):
     kinds = list(profile.get("history_material_part_kinds") or [])
     if not kinds or not route_identity(session)["connection_spec_hash"] or not route_identity(session)["account_scope_id"]:
         raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")
@@ -27,13 +27,16 @@ def plan_effective_materials(*, session, explicit_material_ids, history, profile
         if not row or row.get("sha256") != occ["content_sha256"] or row.get("status") in {"deleted", "failed", "reupload_required"}:
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
     explicit = list(dict.fromkeys(explicit_material_ids))
-    candidates = list(dict.fromkeys(session.get("material_manifest") or []))
-    inherited = {o["material_id"] for o in verified}
+    if context_policy not in {"conversation", "explicit", "session_materials_only"}:
+        raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")
+    candidates = (list(dict.fromkeys(session.get("material_manifest") or []))
+        if context_policy != "explicit" else [])
+    inherited = {o["material_id"] for o in verified} if deduplicate_auto else set()
     auto = [m for m in candidates if m not in explicit and (not deduplicate_auto or m not in inherited)]
     historical = [m for m in candidates if m not in explicit and deduplicate_auto and m in inherited]
     decisions = [{"material_id": m, "disposition": "inject_explicit" if m in explicit else
         "inherit_historical" if m in historical else "inject_auto"} for m in dict.fromkeys(candidates + explicit)]
-    plan = {"contract_version": PLACEMENT_V2, "deduplicate_auto": deduplicate_auto, "binding_safety_seconds": safety_seconds, "identity": route_identity(session),
+    plan = {"contract_version": PLACEMENT_V2, "context_policy": context_policy, "deduplicate_auto": deduplicate_auto, "binding_safety_seconds": safety_seconds, "identity": route_identity(session),
         "history_version": int(session.get("history_version") or 0),
         "manifest_hash": stable_hash(session.get("material_manifest") or []),
         "history_digest": stable_hash(history), "history_material_part_kinds": kinds,

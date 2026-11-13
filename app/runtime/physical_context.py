@@ -100,6 +100,8 @@ class PhysicalContextProjector:
                 material_bindings=state.material_bindings,
                 context_plan=state.context_plan,
                 cache_material_projection=state.cache_material_projection,
+                placement_session=state.plan.session_record,
+                placement_history=state.plan.history,
             )
             log_info(
                 logger,

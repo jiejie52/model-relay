@@ -1,3 +1,9 @@
+# Model Relay 9.0.0
+
+以 8.9.1 完整源码为基线，新增 **Request 级 `context_policy` 可选覆盖**：`conversation` / `explicit` / `session_materials_only`。累计 Session 可以让单次 Request 只看到 Session 固定材料而不回放历史，历史持久化与恢复机制保持原策略。`adaptive` 尚未实现。使用方式、部署和限制见 [UPGRADE_9.0.0.md](UPGRADE_9.0.0.md)。
+
+以下保留历史说明。
+
 # Model Relay 8.6.0
 
 以 8.5.0 为基线落实代码评审的五项缺口：统一 fileUri 缓存预算、原生直连证据、材料可达性、上传流围栏与 URL 脱敏、强类型连接指纹及跨合同编译校验。没有新增 SQL 或依赖。部署与兼容边界见 [UPGRADE_8.6.0.md](UPGRADE_8.6.0.md)，逐项对应见 [REVIEW_RESOLUTION_8.6.0.md](REVIEW_RESOLUTION_8.6.0.md)，验证明细见 ACCEPTANCE_8.6.0.json。

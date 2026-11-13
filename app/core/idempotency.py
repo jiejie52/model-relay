@@ -54,6 +54,8 @@ def caller_intent_hash(value: dict[str, Any]) -> str:
         "requested_cache_mode": value.get("requested_cache_mode"),
         "metadata": value.get("metadata") or {},
     }
+    if value.get("context_policy") is not None:
+        identity["context_policy"] = value["context_policy"]
     if value.get("requested_cache_mechanism_explicit"):
         identity["requested_cache_mechanism"] = value.get("requested_cache_mechanism")
     if value.get("thinking_identity") is not None:
@@ -95,6 +97,10 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     if "thinking" in snapshot:
         from app.thinking_contracts import thinking_identity
         identity["thinking_identity"] = thinking_identity(snapshot["thinking"])
+
+    if snapshot.get("request_context_policy") is not None:
+        identity["request_context_policy"] = snapshot["request_context_policy"]
+        identity["model_history_visible"] = snapshot.get("model_history_visible")
 
     if version == "relay-request/2.1":
         identity["provider_payload"] = snapshot.get("provider_payload") or {}

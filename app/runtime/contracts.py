@@ -146,9 +146,17 @@ class RuntimeState:
             from app.core.material_placement import verify_placement
             placement = verify_placement(snapshot.get("material_placement_plan"), session=session, history=thaw_json(plan.history))
             ids = list(placement["current_effective_material_ids"])
-        elif session.get("context_policy") == "conversation":
-            # Preserve the accepted wire of in-flight legacy Requests.
+        elif snapshot.get("context_policy", session.get("context_policy")) in {"conversation", "session_materials_only"}:
+            # Preserve old Request wire while honoring new per-Request views.
             ids = list(session.get("material_manifest") or []) + ids
-        return cls(plan, row, session, snapshot, thaw_json(plan.history), str(row["id"]), str(row["session_id"]),
+        visible = snapshot.get("model_history_visible")
+        if visible is None:
+            visible = (session.get("context_policy") == "conversation"
+                and snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn")
+        model_history = thaw_json(plan.history) if visible else []
+        context_mode = snapshot.get("context_policy", session.get("context_policy"))
+        model_session = {**session, "context_policy": (
+            "explicit" if context_mode == "explicit" else "conversation")}
+        return cls(plan, row, model_session, snapshot, model_history, str(row["id"]), str(row["session_id"]),
                    list(dict.fromkeys(ids)), snapshot.get("provider")=="gemini" and snapshot.get("protocol", "gemini_native")=="gemini_native",
                    snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)

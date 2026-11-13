@@ -1,0 +1,123 @@
+{
+  "release": "model-relay-9.0.0",
+  "baseline_version": "8.9.1",
+  "baseline_archive_sha256": "3163f05e887511a43ad564306dcf16beb8c5c17e21bebd92451f892c5b1e867d",
+  "baseline_original_files": 224,
+  "version_reason": "New Request-scoped context_policy capability; major component increment 8.9.1 -> 9.0.0.",
+  "feature": {
+    "parameter": "POST /v2/sessions/{session_id}/requests: context_policy",
+    "optional": true,
+    "allowed_values": [
+      "conversation",
+      "explicit",
+      "session_materials_only"
+    ],
+    "default": "inherited from Session",
+    "session_policy_unchanged": true,
+    "storage_history_unchanged": true,
+    "database_migration": false,
+    "adaptive_implemented": false
+  },
+  "changed_files": [
+    {
+      "path": "README.md",
+      "status": "modified",
+      "sha256": "add877f35d96d251e9ab053ce3e48d42163552343ace61ef31d15fa350cc85a7",
+      "old_sha256": "c6d067844a858985a0b27410ac98d6d591341f823cb58ce13e887110153be952"
+    },
+    {
+      "path": "app/config.py",
+      "status": "modified",
+      "sha256": "b1dc95a966c05a70ab29e1eca2885cd39e9f077dd99df3b845d582549ed57e9e",
+      "old_sha256": "974a943b4f3df3075800d63e76eabac4080031bb62f70de4385b203e72c35e03"
+    },
+    {
+      "path": "app/core/idempotency.py",
+      "status": "modified",
+      "sha256": "eb51351e2d1aaaa5c8146c40293a20c5b644cc8b3c110f188e09f2dcd416e0dc",
+      "old_sha256": "624dee430d4f1383625a6e242242706a945e924b5ce23d0aec0ea25514f2e2c0"
+    },
+    {
+      "path": "app/core/material_placement.py",
+      "status": "modified",
+      "sha256": "79abba92e3b0fe5093de4921a44b85c5733ab2451f4811c1646b4180e7074665",
+      "old_sha256": "da4109774cee8b858413d1abd76a26e6d07586d81bc0f1d8d368b8ee5c9737dd"
+    },
+    {
+      "path": "app/execution_plane/context_material_planner.py",
+      "status": "modified",
+      "sha256": "bf73c5876399f1515059bff92b009816927fa23056ff1fd606b1b7dca4e8bcd7",
+      "old_sha256": "2c81dcbc7f3bc889babd09e1591231e85b466dbd16cd1e3c30f206ea5e1854e6"
+    },
+    {
+      "path": "app/execution_plane/request_acceptor.py",
+      "status": "modified",
+      "sha256": "455939506a25189da971fc81903ad81ec47f72228f99efb1e04af8236f5b7c5d",
+      "old_sha256": "d8f3e20f85b5eeada4f9b10af8c8507045fa2ba14bfe52d4dd332b5b14303347"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_native_prefix.py",
+      "status": "modified",
+      "sha256": "d818d56702b23fdd391738cd1a1512bbb6106732722ae1e402cb89567a66ef2f",
+      "old_sha256": "c8c77447ba1d39d43c283f850d4cf3df282f829d20e88a98f799b7e40ab16883"
+    },
+    {
+      "path": "app/protocol_adapters/wire_projection/gemini_physical.py",
+      "status": "modified",
+      "sha256": "ad7f9f4d03efb81520c6c9a12319a22c9d2c6e86335218d419849da44a2f346f",
+      "old_sha256": "f6d729909469cf3b6f50cfdec948b0ffac1aba4c5e29669179ae367b50e92543"
+    },
+    {
+      "path": "app/runtime/contracts.py",
+      "status": "modified",
+      "sha256": "84646dd7252da06d326aea03951ca48b1099a403da728cc3c11b83a519a141ab",
+      "old_sha256": "d1d324063226a22d3dae0062b218a87af71d987c2fa79a0ed71e12b469f78dbf"
+    },
+    {
+      "path": "app/runtime/material_history.py",
+      "status": "modified",
+      "sha256": "cedc3a10400f5c54cb5f6373d601d8bc31c9cf68b471e0a78d0398fcd26b8727",
+      "old_sha256": "6ebd54387a20f4b3a39db32c6e27be7a00a9dcf13dc318f038dfba58e7859a9d"
+    },
+    {
+      "path": "app/runtime/physical_context.py",
+      "status": "modified",
+      "sha256": "e1d1d55ce2f9ebfdf1c565c57ebb4ea7b725b9da8e7b998da5e47c1a48d848a3",
+      "old_sha256": "91aee89386d6f0b6b3fc1c607e500b76c9800a80afb0a9c6166bb37ec4c766af"
+    },
+    {
+      "path": "app/v2_models.py",
+      "status": "modified",
+      "sha256": "f8b2ae418783605693d5d2156126fca69932e5792bb947d88d277bb0d851e2bd",
+      "old_sha256": "40af2b876f9a1d68a3b21e0c10410ba1eb582ef3bd7ae56d2ce7c4409f9b5d9b"
+    },
+    {
+      "path": "UPGRADE_9.0.0.md",
+      "status": "added",
+      "sha256": "7bc3747c3371c54dce43aee372f433dfb469a243f550d9d5d64d964712b90689"
+    }
+  ],
+  "removed_files": [],
+  "source_files_preserved": true,
+  "hidden_files_preserved": [
+    ".dockerignore",
+    ".gitignore",
+    ".gitattributes",
+    ".env.example"
+  ],
+  "git_directory_present_in_original_archive": false,
+  "dependencies_changed": false,
+  "sql_changed": false,
+  "test_files_added": false,
+  "local_validation": {
+    "python_compileall": "pass",
+    "request_schema_enum_and_rejection": "pass",
+    "backward_idempotency_identity": "pass",
+    "material_placement_and_history_ledger_smoke": "pass",
+    "runtime_model_history_isolation": "pass",
+    "gemini_native_layout_10_smoke": "pass",
+    "gemini_physical_layout_9_smoke": "pass",
+    "api_worker_import_dummy_configuration": "pass",
+    "live_provider_sql_dify_integration": "not_run"
+  }
+}

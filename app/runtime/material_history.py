@@ -163,7 +163,10 @@ async def bind_for_current_turn(binder, state, bind_legacy):
 
 
 def verify_pre_seal_material_invariants(state):
-    placement = verify_placement(state.snapshot["material_placement_plan"], session=state.session, history=state.history)
+    # The ledger covers the entire committed Session, including turns not
+    # projected to this Request. The wire digest checks only visible turns.
+    placement = verify_placement(state.snapshot["material_placement_plan"],
+        session=state.plan.session_record, history=state.plan.history)
     if [b["material_id"] for b in state.material_bindings] != placement["current_effective_material_ids"]:
         raise ProviderRequestError("CURRENT_TURN_MATERIAL_BINDING_MISMATCH", "Current bindings differ from the frozen placement")
     physical = state.provider_physical_plan or {}
