@@ -81,9 +81,20 @@ def project_gemini_interactions_payload(
     previous_interaction_id: str | None = None
     store: bool = False
 
-    if continuation_active:
+    req_policy = (
+        snapshot.get("request_context_policy")
+        or snapshot.get("context_policy")
+        or session.get("context_policy")
+        or "conversation"
+    )
+    is_non_cumulative = (
+        req_policy in ("explicit", "session_materials_only")
+        or session.get("history_mode") == "ephemeral_turn"
+    )
+
+    if continuation_active and not is_non_cumulative:
         previous_interaction_id = str(upstream_handle)
-        store = True
+        store = True if binding.get("store_upstream_state") is not False else False
 
         # Determine delta turns
         bound_delta = binding.get("bound_delta_turns")
@@ -106,9 +117,14 @@ def project_gemini_interactions_payload(
             # Replay history[k:N] turns preserving thought steps and signatures, followed by current input.
             payload_input = _format_delta_multi_turn_input(delta_turns, user_content)
 
-    elif effective_mode == "stateful_root_init" or (
-        snapshot.get("continuation_intent_plan", {}).get("continuation_mode") != "off"
-        and not fallback
+    elif not is_non_cumulative and (
+        effective_mode == "stateful_root_init"
+        or (
+            effective_mode not in ("disabled", "stateless_full_replay")
+            and snapshot.get("continuation_intent_plan", {}).get("continuation_mode") != "off"
+            and not fallback
+            and binding.get("store_upstream_state") is not False
+        )
     ):
         # First turn in a stateful continuation session: genesis anchor
         previous_interaction_id = None
@@ -119,10 +135,10 @@ def project_gemini_interactions_payload(
             payload_input = _format_current_turn_input(user_content)
 
     else:
-        # Stateless or continuation disabled
+        # Stateless or continuation disabled (includes explicit / session_materials_only / fallback)
         previous_interaction_id = None
         store = False
-        if history:
+        if history and not is_non_cumulative:
             payload_input = _format_delta_multi_turn_input(history, user_content)
         else:
             payload_input = _format_current_turn_input(user_content)
@@ -145,7 +161,22 @@ def project_gemini_interactions_payload(
         or session.get("system_instructions")
     )
     if instructions:
-        payload["system_instruction"] = {"parts": [{"text": str(instructions)}]}
+        if isinstance(instructions, str):
+            inst_text = instructions.strip()
+        elif isinstance(instructions, dict):
+            parts = instructions.get("parts") or []
+            texts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+            if texts:
+                inst_text = "\n".join(texts).strip()
+            elif "text" in instructions:
+                inst_text = str(instructions["text"]).strip()
+            else:
+                inst_text = json.dumps(instructions, ensure_ascii=False).strip()
+        else:
+            inst_text = str(instructions).strip()
+
+        if inst_text:
+            payload["system_instruction"] = inst_text
 
     # 7. Interaction-scoped tools
     tools = snapshot.get("tools")
