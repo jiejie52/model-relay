@@ -87,6 +87,7 @@ class ResultCommitter:
         )
 
         spec = resolve_structured_output(snapshot, fallback_name="structured_output")
+        rendered_json_object_text = None
         if (spec is not None and snapshot.get("structured_output_guarantee") in {"native_constrained", "native_json_schema"}
                 and (result.observed or {}).get("json_repaired") is True):
             exc = StructuredOutputError("STRUCTURED_OUTPUT_NATIVE_CONSTRAINT_LOST",
@@ -102,6 +103,12 @@ class ResultCommitter:
                     raise StructuredOutputError("STRUCTURED_OUTPUT_INVALID_JSON_OBJECT",
                                                 "Provider output must be a JSON object")
                 validate_against_schema(parsed, spec)
+                if spec.mode == "json_object":
+                    # Presentation only: preserve the archived raw body and native
+                    # history exactly, including signatures and reported Usage.
+                    rendered_json_object_text = json.dumps(
+                        parsed, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
             except Exception as exc:
                 if isinstance(exc, StructuredOutputError):
                     structured_exc = exc
@@ -116,7 +123,7 @@ class ResultCommitter:
                 raise structured_exc
 
         full_text_object_id = None
-        visible_text = result.text
+        visible_text = rendered_json_object_text if rendered_json_object_text is not None else result.text
         text_truncated = False
         if len(visible_text.encode("utf-8")) > self.settings.relay_result_soft_limit_bytes:
             full_text_object_id = await self.artifacts.store_object(

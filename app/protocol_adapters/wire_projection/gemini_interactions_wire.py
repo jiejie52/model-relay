@@ -229,7 +229,9 @@ def project_gemini_interactions_response_format(spec: StructuredOutputSpec | Non
     if spec is None:
         return None
     if spec.mode == "json_object":
-        schema = {"type": "object"}
+        # JSON format is a wire hint, not a fabricated business schema.
+        # Relay validates and serializes the object after the response is archived.
+        return {"type": "text", "mime_type": "application/json"}
     elif spec.mode == "json_schema" and isinstance(spec.schema, dict):
         schema = copy.deepcopy(spec.schema)
     else:

@@ -20,7 +20,7 @@ from app.protocol_adapters.error_observation import provider_http_error_observat
 from app.observability import warning as log_warning
 
 VALIDATOR_VERSION='deployment-probes/1'
-GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/3'
+GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/4'
 logger = logging.getLogger("model-relay-deployment-validation")
 
 
@@ -171,6 +171,8 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                             validate(parsed, schema)
                         elif not isinstance(parsed, dict):
                             raise ValueError('JSON object expected')
+                        if not isinstance(parsed, dict) or parsed.get('ok') is not True:
+                            raise ValueError('Probe must answer the requested ok=true object')
                     except Exception:
                         raise ProbeFailure('native_schema_probe_failed' if native else 'json_object_probe_failed') from None
                     facets.append('json_object')

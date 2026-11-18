@@ -1,3 +1,7 @@
+# Model Relay 10.1.3
+
+Interactions 的 `json_object` 请求不再补入空壳 `schema:{"type":"object"}`。上游只接收 JSON 格式声明；Relay 对返回对象执行后置校验与规范化序列化，保留 `result.text` 的现有接口。真实 `json_schema` 继续完整下发并校验。部署步骤见 [UPGRADE_10.1.3.md](UPGRADE_10.1.3.md)。
+
 # Model Relay 10.1.2
 
 修复 Google Interactions 启动探测报 400 后供给不可用、进而触发 `ROUTE_FALLBACK_FORBIDDEN` 的两处协议投影错误：思考档位以小写发送，文件与内联材料使用 MIME 对应的内容块。探测与实际调用共用投影，文件探测使用有效 PDF。部署与验证范围见 [UPGRADE_10.1.2.md](UPGRADE_10.1.2.md)。
