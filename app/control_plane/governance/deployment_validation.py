@@ -13,14 +13,14 @@ from app.control_plane.connections import ConnectionRuntime
 from app.runtime.transport_guard import provider_transport
 from app.protocol_adapters.wire_projection.schema_projector import project_schema_for_provider
 from app.canonical_schema import StructuredOutputSpec
-from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_response_format
+from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_response_format, project_interactions_content_part
 from app.protocol_adapters.profiles.gemini_interactions import extract_interactions_text
 from app.protocol_adapters.base import ProviderHTTPError
 from app.protocol_adapters.error_observation import provider_http_error_observation
 from app.observability import warning as log_warning
 
 VALIDATOR_VERSION='deployment-probes/1'
-GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/2'
+GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/3'
 logger = logging.getLogger("model-relay-deployment-validation")
 
 
@@ -60,6 +60,29 @@ def _project_probe_thinking(payload, cap, protocol):
     project_thinking(payload, {"thinking": {"version": THINKING_CONTRACT_VERSION, "effective": e}}, protocol)
     return True
 
+def _interactions_probe_document():
+    """A small valid PDF probes Files API document input without new dependencies."""
+    stream = b"BT /F1 12 Tf 72 720 Td (Relay deployment verification.) Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    raw = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(raw))
+        raw.extend(str(index).encode() + b" 0 obj\n" + obj + b"\nendobj\n")
+    xref = len(raw)
+    raw.extend(b"xref\n0 6\n0000000000 65535 f \n")
+    for offset in offsets:
+        raw.extend(f"{offset:010d} 00000 n \n".encode())
+    raw.extend(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" + str(xref).encode() + b"\n%%EOF\n")
+    return bytes(raw)
+
+
 async def verify_supply(settings, plane, supply, *, journal=None):
     spec=plane.connection(supply.connection_id); cap=plane.contract(supply.capability_contract_id)
     profile=plane.protocol_profile(supply.protocol_profile_id)
@@ -80,7 +103,8 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                             phase='deployment_probe', request_method=method, request_url=url,
                             raw_body_source='response.content')
                         log_warning(logger, 'deployment_probe_http_error', connection_id=spec.connection_id,
-                            protocol=spec.protocol, provider_http_error=provider_http_error_observation(error))
+                            protocol=spec.protocol, model=supply.model_pattern, offering_id=supply.offering_id,
+                            provider_http_error=provider_http_error_observation(error))
                     raise ProbeFailure('upstream_http_'+str(response.status_code))
                 return response
             model=supply.metadata.get('upstream_model',supply.model_pattern)
@@ -95,16 +119,17 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                 file_part=None
                 if 'provider_files_api' in modes:
                     minimum=max([p.get('minimum_cacheable_tokens',1024) for p in cap.cache.get('mechanism_profiles',{}).values()] or [1])
-                    raw=('configuration verification '*(minimum*2 if mechanisms else 2)).encode()
+                    mime_type = 'application/pdf' if protocol == 'gemini_interactions' else 'text/plain'
+                    raw = _interactions_probe_document() if protocol == 'gemini_interactions' else ('configuration verification '*(minimum*2 if mechanisms else 2)).encode()
                     if len(raw)>2*1024*1024: raise ProbeFailure('validation_fixture_exceeds_limit')
                     url=spec.upload_base_url
                     if not url: raise ProbeFailure('upload_endpoint_missing')
                     url=url.rstrip('/')+('' if url.rstrip('/').endswith('/files') else '/files')
                     start=await request('POST',url,headers={'X-Goog-Upload-Protocol':'resumable','X-Goog-Upload-Command':'start',
-                        'X-Goog-Upload-Header-Content-Length':str(len(raw)),'X-Goog-Upload-Header-Content-Type':'text/plain'},json={'file':{'display_name':'relay-deployment-verification'}})
+                        'X-Goog-Upload-Header-Content-Length':str(len(raw)),'X-Goog-Upload-Header-Content-Type':mime_type},json={'file':{'display_name':'relay-deployment-verification'}})
                     upload_url=start.headers.get('x-goog-upload-url')
                     if not upload_url: raise ProbeFailure('upload_url_missing')
-                    result=(await request('POST',upload_url,headers={'Content-Type':'text/plain','X-Goog-Upload-Offset':'0',
+                    result=(await request('POST',upload_url,headers={'Content-Type':mime_type,'X-Goog-Upload-Offset':'0',
                         'X-Goog-Upload-Command':'upload, finalize'},content=raw)).json()
                     file=result.get('file',result);file_name=file.get('name')
                     if not file_name or not re.fullmatch(r'files/[A-Za-z0-9._-]+',file_name): raise ProbeFailure('invalid_file_handle')
@@ -114,7 +139,8 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                         await asyncio.sleep(.2)
                         file=(await request('GET',runtime.api_url(file_name))).json()
                     if file.get('state')!='ACTIVE' or not file.get('uri'): raise ProbeFailure('file_not_ready')
-                    file_part={'fileData':{'fileUri':file['uri'],'mimeType':'text/plain'}} if protocol=='gemini_native' else {'type':'file','uri':file['uri'],'mime_type':'text/plain'}
+                    native_file_part={'fileData':{'fileUri':file['uri'],'mimeType':mime_type}}
+                    file_part = native_file_part if protocol == 'gemini_native' else project_interactions_content_part(native_file_part)
                     facets.append('provider_files_api')
                 if protocol == 'gemini_interactions':
                     gen_cfg = {'max_output_tokens': min(1024, cap.supported_options.get('max_output_tokens', {}).get('max', 1024))}

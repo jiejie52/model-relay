@@ -1,3 +1,7 @@
+# Model Relay 10.1.2
+
+修复 Google Interactions 启动探测报 400 后供给不可用、进而触发 `ROUTE_FALLBACK_FORBIDDEN` 的两处协议投影错误：思考档位以小写发送，文件与内联材料使用 MIME 对应的内容块。探测与实际调用共用投影，文件探测使用有效 PDF。部署与验证范围见 [UPGRADE_10.1.2.md](UPGRADE_10.1.2.md)。
+
 # Model Relay 10.1.1
 
 修复 Gemini Interactions 的 JSON 响应格式：Relay 的 `json_object` / `json_schema` 统一投影为官方 `response_format.type=text`、`mime_type=application/json`，Schema 放入 `schema` 字段。实际调用与部署探针使用同一投影；同步保留完整响应归档与解析修复。升级步骤及验证范围见 [UPGRADE_10.1.1.md](UPGRADE_10.1.1.md)。

@@ -18,6 +18,7 @@ from app.canonical_schema import StructuredOutputSpec, resolve_structured_output
 from app.core.context_codec import canonical_structure
 from app.observability.http_wire_logger import normalization_active
 from app.protocol_adapters.base import ProviderRequestError
+from app.protocol_adapters.thinking_projection import project_thinking
 from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
 from app.protocol_adapters.wire_projection.gemini_wire import (
     project_current_user_content,
@@ -199,22 +200,10 @@ def project_gemini_interactions_payload(
                 else:
                     generation_config[opt_key] = opt_val
 
-    # Apply thinking semantics
-    thinking = snapshot.get("thinking")
-    if isinstance(thinking, dict):
-        effective = thinking.get("effective") or {}
-        wire_action = effective.get("wire_action")
-        level = effective.get("level")
-        budget = effective.get("budget_tokens")
-        if wire_action == "send_level" and level:
-            generation_config["thinking_level"] = str(level).upper()
-        elif wire_action == "send_budget" and budget is not None:
-            generation_config["thinking_budget"] = int(budget)
-        elif wire_action == "send_toggle" and level == "disabled":
-            generation_config["thinking_budget"] = 0
-
     if generation_config:
         payload["generation_config"] = generation_config
+    # Use the same frozen-semantics projection as deployment qualification.
+    project_thinking(payload, snapshot, "gemini_interactions")
 
     # 9. Structured output / response format
     spec = resolve_structured_output(
@@ -255,27 +244,29 @@ def _format_current_turn_input(user_content: dict[str, Any]) -> list[dict[str, A
     if len(parts) == 1 and "text" in parts[0] and not any(k in parts[0] for k in ("fileData", "inlineData")):
         return str(parts[0]["text"])
 
-    steps: list[dict[str, Any]] = []
-    for part in parts:
-        if "text" in part:
-            steps.append({"type": "text", "text": str(part["text"])})
-        elif "fileData" in part:
-            fd = part["fileData"]
-            steps.append({
-                "type": "file",
-                "uri": fd.get("fileUri") or fd.get("uri"),
-                "mime_type": fd.get("mimeType"),
-            })
-        elif "inlineData" in part:
-            id_data = part["inlineData"]
-            steps.append({
-                "type": "inline_data",
-                "mime_type": id_data.get("mimeType"),
-                "data": id_data.get("data"),
-            })
-        else:
-            steps.append(dict(part))
-    return steps
+    return [project_interactions_content_part(part) for part in parts]
+
+
+def project_interactions_content_part(part: dict[str, Any]) -> dict[str, Any]:
+    """Translate a Gemini native material part into a typed Interactions block.
+
+    Both Files API URIs and inline bytes use the same MIME-derived content
+    type. Never send generateContent's generic fileData/inlineData vocabulary.
+    """
+    if "text" in part:
+        return {"type": "text", "text": str(part["text"])}
+    if "fileData" in part:
+        value, source_key, target_key = part["fileData"], "fileUri", "uri"
+        content = value.get(source_key) or value.get("uri")
+    elif "inlineData" in part:
+        value, target_key = part["inlineData"], "data"
+        content = value.get("data")
+    else:
+        return copy.deepcopy(part)
+    mime = str(value.get("mimeType") or "application/octet-stream").split(";", 1)[0].strip().lower()
+    media_type = mime.split("/", 1)[0]
+    kind = media_type if media_type in {"image", "audio", "video"} else "document"
+    return {"type": kind, target_key: content, "mime_type": mime}
 
 
 def _format_delta_multi_turn_input(
@@ -337,24 +328,4 @@ def _extract_user_steps(user_content: Any) -> list[dict[str, Any]]:
         return [{"type": "text", "text": str(user_content)}]
 
     parts = user_content.get("parts") or []
-    res: list[dict[str, Any]] = []
-    for part in parts:
-        if "text" in part:
-            res.append({"type": "text", "text": str(part["text"])})
-        elif "fileData" in part:
-            fd = part["fileData"]
-            res.append({
-                "type": "file",
-                "uri": fd.get("fileUri") or fd.get("uri"),
-                "mime_type": fd.get("mimeType"),
-            })
-        elif "inlineData" in part:
-            id_data = part["inlineData"]
-            res.append({
-                "type": "inline_data",
-                "mime_type": id_data.get("mimeType"),
-                "data": id_data.get("data"),
-            })
-        else:
-            res.append(dict(part))
-    return res
+    return [project_interactions_content_part(part) for part in parts]

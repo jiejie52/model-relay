@@ -51,7 +51,7 @@ def project_thinking(payload, snapshot, protocol):
     if protocol == "gemini_interactions":
         cfg = payload.setdefault("generation_config", {})
         if action == "send_level":
-            cfg["thinking_level"] = str(level).upper()
+            cfg["thinking_level"] = str(level).lower()
         elif action == "send_budget":
             cfg["thinking_budget"] = int(budget)
         elif action == "send_toggle" and level == "disabled":
