@@ -31,11 +31,14 @@ def normalize_gemini_implicit_cache_observation(
     if usage is None:
         usage_parent = "usage_metadata"
         usage = response_json.get("usage_metadata")
+    if usage is None:
+        usage_parent = "usage"
+        usage = response_json.get("usage")
     if not isinstance(usage, dict):
         result["provider_implicit_cache_reason"] = "usage_metadata_missing"
         return result
 
-    field = next((name for name in ("cachedContentTokenCount", "cached_content_token_count") if name in usage), None)
+    field = next((name for name in ("cachedContentTokenCount", "cached_content_token_count", "total_cached_tokens") if name in usage), None)
     if field is None:
         result["provider_implicit_cache_reason"] = "cached_content_token_count_missing"
         return result
@@ -67,6 +70,12 @@ def normalize_observed_cache_audit(
         completion = _count(usage.get("candidatesTokenCount", usage.get("candidates_token_count")))
         cached = _count(usage.get("cachedContentTokenCount", usage.get("cached_content_token_count")))
         details = usage.get("cacheTokensDetails", usage.get("cache_tokens_details"))
+    elif protocol == "gemini_interactions":
+        usage = response_json.get("usage") or {}
+        prompt = _count(usage.get("total_input_tokens"))
+        completion = _count(usage.get("total_output_tokens"))
+        cached = _count(usage.get("total_cached_tokens"))
+        details = None
     elif protocol == "claude_messages":
         usage = response_json.get("usage") or {}
         uncached = _count(usage.get("input_tokens"))

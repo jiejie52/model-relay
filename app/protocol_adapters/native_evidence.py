@@ -16,6 +16,10 @@ def native_response_facts(data,payload,context,connection,observed):
     if host not in metadata.get('allowed_hosts',[]) or metadata.get('affinity_policy',{}).get('enabled'):
         return observed
     result={**observed,'evidence_source_mode':'first_party_native_payload','native_constraint_enforced':None}
+    if observed.get('protocol') == 'gemini_interactions':
+        if observed.get("native_constraint_enforced") is False:
+            result["native_constraint_enforced"] = False
+        return _interaction_facts(data, payload, context, result)
     model=data.get('modelVersion')
     if not isinstance(model,str) or not model.strip(): return result
     result['actual_model']=model
@@ -40,4 +44,37 @@ def native_response_facts(data,payload,context,connection,observed):
     except Exception:return result
     result.update(native_constraint_enforced=True,json_repaired=False,
         native_evidence_basis='sealed_schema_request+normal_finish+valid_raw_json')
+    return result
+
+
+def _interaction_facts(data, payload, context, result):
+    model = data.get("model")
+    if isinstance(model, str) and model.strip():
+        result["actual_model"] = model
+        if isinstance(data.get("usage"), dict):
+            result["billing_tier"] = "official_direct"
+    if result.get("native_constraint_enforced") is False or result.get("protocol_downgraded") is True or result.get("json_repaired") is True:
+        return result
+    schema = payload.get("response_format")
+    if data.get("status") != "completed" or not isinstance(schema, dict):
+        return result
+    # Support the tested direct schema and the documented text/schema envelope.
+    if schema.get("type") == "text" and schema.get("mime_type") == "application/json":
+        schema = schema.get("schema")
+    if not isinstance(schema, dict) or not schema.get("type"):
+        return result
+    from app.protocol_adapters.profiles.gemini_interactions import _content_texts
+    steps = data.get("steps") or []
+    text = "".join(t for step in steps if isinstance(step, dict) and step.get("type") == "model_output"
+                   for t in _content_texts(step.get("content", step.get("text"))))
+    try:
+        parsed = json.loads(text)
+        validate(parsed, schema)
+        original = (context.snapshot.get("structured_output") or {}).get("schema")
+        if original:
+            validate(parsed, original)
+    except Exception:
+        return result
+    result.update(native_constraint_enforced=True, json_repaired=False,
+                  native_evidence_basis="sealed_schema_request+completed_interaction+valid_raw_json")
     return result

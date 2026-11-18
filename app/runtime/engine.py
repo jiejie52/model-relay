@@ -76,7 +76,7 @@ class RelayRuntimeEngine:
                 conversation_hash=state.request_row["conversation_hash"], session_id=state.session_id, request_id=state.request_id)
             error = {**error, "exception_type": type(exc).__name__, "failure_code": getattr(exc, "code", None),
                      "unknown_completion": current.get("provider_dispatch_state")=="dispatch_started" and
-                         (bool(getattr(exc, "stream_interrupted", False)) or
+                         (bool(getattr(exc, "stream_interrupted", False)) or bool(getattr(exc, "unknown_completion", False)) or
                           not (getattr(exc, "status_code", None) is not None or type(exc).__name__=="ProviderRequestError"))}
             return ActualExecutionFact(state.request_id, current.get("provider_dispatch_state", "not_sent"),
                 state.material_bindings, state.cache_binding, raw_error_envelope=error, failure_stage=state.failure_stage)

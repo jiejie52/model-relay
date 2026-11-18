@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+import time
 from uuid import uuid4
+from app.observability.response_capture import response_capture_scope, attach_response_evidence
 from app.shared_contracts import ExecutionFence
 from app.execution_plane.schedulers.common import RequestExecutionService
 
@@ -16,9 +18,19 @@ class InlineScheduler(RequestExecutionService):
                 lease_seconds=int(self.settings.sync_request_deadline_seconds)+30)
             if epoch is None: return await self.repo.get_request(request_row["id"])
             fence = ExecutionFence(owner, epoch, kind="sync_request")
+        diagnostics = {}
         try:
-            await asyncio.wait_for(self.execute_guarded(request_row, fence), self.settings.sync_request_deadline_seconds)
+            # Child tasks share this request-local evidence dictionary. wait_for
+            # replaces CancelledError with TimeoutError, but cannot erase it.
+            with response_capture_scope(diagnostics):
+                await asyncio.wait_for(self.execute_guarded(request_row, fence), self.settings.sync_request_deadline_seconds)
         except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                if diagnostics.get("_started") is not None:
+                    diagnostics["elapsed_ms"] = round((time.monotonic() - diagnostics["_started"]) * 1000)
+                diagnostics.update(reason_code="sync_deadline_exceeded",
+                                   deadline_seconds=self.settings.sync_request_deadline_seconds)
+            attach_response_evidence(exc, diagnostics)
             await self.record_failure(request_row, fence, exc)
         finally:
             if fence is not None:

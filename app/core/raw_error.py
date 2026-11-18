@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import Settings
+from app.observability.response_capture import safe_response_headers
 from app.persistence.object_storage import StorageRegistry
 from app.protocol_adapters.base import ProviderHTTPError
 from app.protocol_adapters.wire_projection.http_wire import decode_entity
@@ -44,20 +45,48 @@ class RawErrorRecorder:
         upstream_headers: dict[str, str] | None = None
         phase: str | None = None
 
+        evidence_exc = exc
+        seen = set()
+        while not getattr(evidence_exc, "provider_response_diagnostics", None) and id(evidence_exc) not in seen:
+            seen.add(id(evidence_exc))
+            cause = evidence_exc.__cause__ or evidence_exc.__context__
+            if cause is None:
+                break
+            evidence_exc = cause
+        diagnostics = dict(getattr(evidence_exc, "provider_response_diagnostics", None) or {})
+        captured_body = getattr(evidence_exc, "provider_response_body", None)
+        body_source = (getattr(exc, "raw_body_source", None) or "provider_entity") if isinstance(exc, ProviderHTTPError) else "relay_diagnostic"
+        body_complete = diagnostics.get("body_complete")
         if isinstance(exc, ProviderHTTPError):
             raw = exc.body
             upstream_http_status = exc.status_code
             upstream_request_id = exc.request_id
             content_type = exc.content_type or "application/octet-stream"
             content_encoding = exc.content_encoding
-            upstream_headers = dict(exc.response_headers) if getattr(exc, "response_headers", None) else None
+            upstream_headers = safe_response_headers(exc.response_headers) if getattr(exc, "response_headers", None) else None
+            body_complete = True
             phase = getattr(exc, "phase", None)
         elif isinstance(exc, SupabaseError):
+            body_source = "supabase_entity"
+            body_complete = True
             raw = exc.raw_body
             upstream_http_status = exc.status_code
             content_type = exc.content_type or "application/octet-stream"
+        elif isinstance(captured_body, bytes):
+            raw = captured_body
+            body_source = "provider_entity"
+            upstream_http_status = diagnostics.get("http_status")
+            upstream_request_id = diagnostics.get("upstream_request_id")
+            upstream_headers = diagnostics.get("response_headers")
+            content_type = diagnostics.get("content_type") or "application/octet-stream"
+            content_encoding = diagnostics.get("content_encoding")
+            phase = diagnostics.get("phase")
         else:
-            # For non-HTTP failures there is no upstream entity body to preserve.
+            upstream_http_status = diagnostics.get("http_status")
+            upstream_headers = diagnostics.get("response_headers")
+            upstream_request_id = diagnostics.get("upstream_request_id")
+            phase = diagnostics.get("phase")
+            # When no entity arrived, preserve an explicitly Relay-generated diagnostic.
             # Store Relay's exact exception class/message/cause as a separate
             # Relay-generated diagnostic object and label the source correctly.
             diagnostic = {
@@ -65,6 +94,7 @@ class RawErrorRecorder:
                 "message": str(exc),
                 "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
                 "cause_message": str(exc.__cause__) if exc.__cause__ else None,
+                "response_diagnostics": diagnostics,
             }
             raw = json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             content_type = "application/json; charset=utf-8"
@@ -129,6 +159,11 @@ class RawErrorRecorder:
             "content_type": content_type,
             "content_encoding": content_encoding,
             "body_encoding": body_encoding,
+            "body_source": body_source,
+            "body_complete": body_complete,
+            "response_diagnostics": diagnostics,
+            "reason_code": diagnostics.get("reason_code"),
+            "interaction_status": getattr(exc, "interaction_status", None),
             "body_size": body_size,
             "body_sha256": body_sha256,
             "body_object_id": body_object_id,
@@ -142,11 +177,15 @@ class RawErrorRecorder:
             "message": (
                 body_text
                 if body_text is not None and isinstance(exc, (ProviderHTTPError, SupabaseError))
-                else str(exc)
+                else (str(exc) or (
+                    f"Sync request deadline exceeded ({diagnostics.get('deadline_seconds')}s; "
+                    f"phase={diagnostics.get('phase', 'execution')})"
+                    if diagnostics.get("reason_code") == "sync_deadline_exceeded" else type(exc).__name__))
             ),
             "archive_error": archive_error,
         }
-        provider_success_object_id = getattr(exc, "provider_success_object_id", None)
+        provider_success_object_id = (getattr(exc, "provider_success_object_id", None)
+                                      or getattr(evidence_exc, "provider_success_object_id", None))
         provider_output_object_id = getattr(exc, "provider_output_object_id", None)
         if provider_success_object_id:
             result["provider_success_object_id"] = provider_success_object_id

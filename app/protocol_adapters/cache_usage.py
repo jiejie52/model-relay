@@ -40,8 +40,12 @@ def normalize_cache_usage(
             prompt_total = uncached + read + write
             cache_read_ratio = read / prompt_total if prompt_total > 0 else None
         evidence = "provider_usage" if read is not None or write is not None else "unknown"
-    elif protocol_n == "gemini_native":
+    elif protocol_n in {"gemini_native", "gemini_interactions"}:
         gemini_raw = raw.get("raw") if isinstance(raw.get("raw"), dict) else raw
+        if protocol_n == "gemini_interactions":
+            gemini_raw = {**gemini_raw,
+                "cachedContentTokenCount": gemini_raw.get("total_cached_tokens", raw.get("cached_tokens")),
+                "promptTokenCount": gemini_raw.get("total_input_tokens", raw.get("prompt_tokens"))}
         counter = gemini_raw.get("cachedContentTokenCount", gemini_raw.get("cached_content_token_count"))
         read = counter if type(counter) is int and counter >= 0 else None
         prompt_total = _int_or_none(gemini_raw.get("promptTokenCount", gemini_raw.get("prompt_token_count")))
@@ -81,9 +85,9 @@ def normalize_cache_usage(
         status = "hit"
     elif write is not None and write > 0:
         status = "write_only"
-    elif protocol_n == "gemini_native" and read is None:
+    elif protocol_n in {"gemini_native", "gemini_interactions"} and read is None:
         status = "unknown"
-    elif read == 0 and (effective_mechanism is not None or protocol_n == "gemini_native"):
+    elif read == 0 and (effective_mechanism is not None or protocol_n in {"gemini_native", "gemini_interactions"}):
         status = "miss"
     elif effective_mechanism is None and requested_mode == "off" and read in {None, 0}:
         status = "not_requested"

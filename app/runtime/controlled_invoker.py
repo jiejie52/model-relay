@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import asyncio
+import hashlib
+import time
 import logging
 import math
 from typing import Any
 
 from app.observability.http_wire_logger import wire_context, wire_logging_enabled_for_context
+from app.observability.response_capture import (
+    current_response_capture, response_capture_scope, response_diagnostics, attach_response_evidence,
+)
 from app.protocol_adapters.usage_normalizer import (
     normalize_gemini_implicit_cache_observation,
     normalize_observed_cache_audit,
@@ -68,13 +74,43 @@ class ControlledInvoker:
             material_count=len(state.material_ids),
             cache_mechanism=(state.cache_binding or {}).get("mechanism"),
         )
+        diagnostics = current_response_capture()
+        if diagnostics is None:
+            diagnostics = {}
+        diagnostics.clear()
+        diagnostics.update(phase="model_inference", request_id=state.request_id, session_id=state.session_id,
+                           provider=state.snapshot.get("provider"), model=state.snapshot.get("model"),
+                           protocol=state.snapshot.get("protocol"), _started=time.monotonic())
+
+        async def archive_response(raw, evidence):
+            # Evidence is archived before protocol parsing, without publishing
+            # result_stored or changing the request/session execution state.
+            await ensure_execution_allowed(states=("dispatch_started",))
+            filename = "raw-response.json" if evidence["body_complete"] else "raw-response.partial.bin"
+            evidence["body_object_id"] = await self.artifacts.store_object(
+                state.request_row, filename, raw,
+                evidence.get("content_type") or "application/octet-stream")
+            evidence["metadata_object_id"] = await self.artifacts.store_object(
+                state.request_row, "response-metadata.json", json_bytes(response_diagnostics(evidence)),
+                "application/json")
+
+        diagnostics["_recorder"] = archive_response
         try:
             state.wire["phase"] = "inference"
-            with wire_context(state.wire):
+            with response_capture_scope(diagnostics), wire_context(state.wire):
                 result = await adapter.execute(
                     state.sealed_bundle
                 )
+        except asyncio.CancelledError as exc:
+            attach_response_evidence(exc, diagnostics)
+            log_warning(logger, "provider_call_cancelled", request_id=state.request_id,
+                        session_id=state.session_id, phase=diagnostics.get("phase"),
+                        response_headers_received=diagnostics.get("response_headers_received", False),
+                        bytes_received=diagnostics.get("bytes_received", 0),
+                        upstream_http_status=diagnostics.get("http_status"))
+            raise
         except Exception as exc:
+            attach_response_evidence(exc, diagnostics)
             if state.wire.get("affinity_token") and state.fence is not None and isinstance(exc, ProviderHTTPError):
                 route_observation = state.wire.get("route_observation") or {}
                 expires = state.cache_binding_obj.expires_at if state.cache_binding else None
@@ -128,6 +164,7 @@ class ControlledInvoker:
                 **failed_cache_observation,
             )
             raise
+        diagnostics["phase"] = "response_parsed"
         cache_mechanism = (state.cache_binding or {}).get("mechanism")
         provider_cache_observation = {}
         if (str(state.snapshot.get("provider") or "").lower() == "gemini"
@@ -155,12 +192,15 @@ class ControlledInvoker:
             **provider_cache_observation,
         )
 
-        raw_object_id = await self.artifacts.store_object(
-            state.request_row,
-            "raw-response.json",
-            result.raw_bytes,
-            "application/json",
-        )
+        diagnostics["phase"] = "response_archive"
+        raw_object_id = diagnostics.get("body_object_id") if (
+            diagnostics.get("body_complete") and
+            diagnostics.get("body_sha256") == hashlib.sha256(result.raw_bytes).hexdigest()) else None
+        if not raw_object_id:
+            raw_object_id = await self.artifacts.store_object(
+                state.request_row, "raw-response.json", result.raw_bytes, "application/json")
+        result = replace(result, observed={**(result.observed or {}),
+            "response_capture": response_diagnostics(diagnostics)})
         output_object_id = await self.artifacts.store_object(
             state.request_row,
             "response-output.json",
@@ -180,6 +220,7 @@ class ControlledInvoker:
                 },
             )
 
+        diagnostics["phase"] = "result_processing"
         cache_summary = None
         cache_usage = None
         if state.is_v3:
@@ -408,9 +449,10 @@ class ControlledInvoker:
                 **{k: v for k, v in cache_usage.items() if k != "affinity_audit"},
             }
 
+        diagnostics["phase"] = "result_persistence"
         await ensure_execution_allowed(states=("dispatch_started",))
         result = replace(result, normalized_usage={**result.normalized_usage, **(cache_usage or {})})
-        observation = {"observed_thinking": (result.observed or {}).get("observed_thinking"),
+        observation = {"response_capture": response_diagnostics(diagnostics), "observed_thinking": (result.observed or {}).get("observed_thinking"),
                        "cache_summary": cache_summary, "cache_usage": cache_usage,
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
         if state.snapshot.get("placement_contract_version") is not None:
@@ -443,6 +485,7 @@ class ControlledInvoker:
                 "provisional_result_object_id": raw_object_id, "provisional_output_object_id": output_object_id,
                 "provisional_history_object_id": None, "provisional_compact_result": marker,
                 "provider_response_id": result.response_id})
+        diagnostics["phase"] = "result_stored"
         return ActualExecutionFact(state.request_id, "result_stored", state.material_bindings, state.cache_binding,
             {"seal_id": state.request_id, "seal_hash": state.sealed_bundle.seal_hash}, result,
             raw_object_id, output_object_id, execution_observation=observation,

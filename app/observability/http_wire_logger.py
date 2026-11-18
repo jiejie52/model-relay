@@ -1,6 +1,8 @@
 """Provider HTTP boundary: affinity, exact entity observations, and opt-in diagnostics."""
 from __future__ import annotations
 
+import asyncio
+import time
 import fnmatch
 import hashlib
 import inspect
@@ -18,6 +20,7 @@ import httpx
 from app.core.cache_fingerprint import compute_lcp_diff, physical_chain
 from app.core.context_codec import normalize_native_payload, serialize_wire
 from app.observability import info as log_info, warning as log_warning
+from app.observability.response_capture import (current_response_capture, attach_response_evidence, safe_response_headers)
 
 logger = logging.getLogger("relay.http.wire")
 _current: ContextVar[dict[str, Any] | None] = ContextVar("relay_wire_context", default=None)
@@ -138,11 +141,16 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
             if body is None and isinstance(request.stream, httpx.ByteStream):
                 body = await request.aread()
             self._emit("outbound", request, request.headers, body, ctx)
+        diagnostics = current_response_capture() if ctx.get("phase") == "inference" else None
         trace = None
-        if enabled:
+        if enabled or diagnostics is not None:
             # HTTPX/httpcore emit these before a response is available. Do not
             # log trace arguments: they may contain addresses or TLS details.
-            trace = {"observed": False, "tcp_connect_started": False, "tls_handshake_started": False}
+            trace = {"observed": False, "tcp_connect_started": False, "tls_handshake_started": False,
+                     "tcp_connect_completed": False, "tls_handshake_completed": False}
+            if diagnostics is not None:
+                diagnostics.update(phase="waiting_response_headers", response_headers_received=False,
+                                   bytes_received=0, body_complete=False)
             previous_trace = request.extensions.get("trace")
 
             async def trace_connection(name, info):
@@ -151,6 +159,23 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                     trace["tcp_connect_started"] = True
                 elif name == "connection.start_tls.started":
                     trace["tls_handshake_started"] = True
+                elif name == "connection.connect_tcp.complete":
+                    trace["tcp_connect_completed"] = True
+                elif name == "connection.start_tls.complete":
+                    trace["tls_handshake_completed"] = True
+                trace["last_transport_event"] = name
+                if diagnostics is not None:
+                    diagnostics.update(trace)
+                    if name.endswith(".started"):
+                        phases = {"connect_tcp": "tcp_connect", "start_tls": "tls_handshake",
+                                  "send_request_headers": "request_headers_send",
+                                  "send_request_body": "request_body_send",
+                                  "receive_response_headers": "waiting_response_headers"}
+                        event = name.rsplit(".", 2)[-2]
+                        if event in phases:
+                            diagnostics["phase"] = phases[event]
+                    if diagnostics.get("_started") is not None:
+                        diagnostics["elapsed_ms"] = round((time.monotonic() - diagnostics["_started"]) * 1000)
                 if previous_trace is not None:
                     result = previous_trace(name, info)
                     if inspect.isawaitable(result):
@@ -161,12 +186,20 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
         error_type = None
         try:
             response = await self.wrapped.handle_async_request(request)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             error_type = type(exc).__name__
+            if diagnostics is not None:
+                diagnostics["transport_exception_type"] = error_type
+                if diagnostics.get("_started") is not None:
+                    diagnostics["elapsed_ms"] = round((time.monotonic() - diagnostics["_started"]) * 1000)
+                attach_response_evidence(exc, diagnostics)
             raise
         finally:
-            if trace is not None:
+            if trace is not None and enabled:
                 self._emit_connection_diagnostic(request, response, ctx, trace, error_type)
+        if diagnostics is not None:
+            diagnostics.update(phase="response_headers_received", response_headers_received=True,
+                               http_status=response.status_code, response_headers=safe_response_headers(response.headers))
         if ctx.get("phase") == "inference":
             ctx["route_observation"] = {name: response.headers[name] for name in _ROUTER_HEADERS if name in response.headers}
         if enabled:
@@ -189,6 +222,10 @@ class WireLoggingAsyncTransport(httpx.AsyncBaseTransport):
                 trace_observed=trace["observed"],
                 tcp_connect_started=trace["tcp_connect_started"] if trace["observed"] else None,
                 tls_handshake_started=trace["tls_handshake_started"] if trace["observed"] else None,
+                tcp_connect_completed=trace["tcp_connect_completed"] if trace["observed"] else None,
+                tls_handshake_completed=trace["tls_handshake_completed"] if trace["observed"] else None,
+                last_transport_event=trace.get("last_transport_event"),
+                response_headers_received=response is not None,
                 error_type=error_type,
             )
         except Exception as exc:

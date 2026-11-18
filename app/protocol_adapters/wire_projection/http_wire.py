@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import gzip
 import logging
 import zlib
@@ -7,6 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.observability import error as log_error
+from app.observability.response_capture import capture_response, attach_response_evidence
 
 
 logger = logging.getLogger("model-relay-upstream")
@@ -27,7 +29,9 @@ async def read_raw_response(response, *, log_context: dict[str, Any] | None = No
         async for chunk in response.aiter_raw():
             total += len(chunk)
             chunks.append(chunk)
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
+        diagnostics = await capture_response(response, b"".join(chunks), complete=False)
+        attach_response_evidence(exc, diagnostics)
         headers = getattr(response, "headers", {}) or {}
         request = getattr(response, "request", None)
         method = getattr(request, "method", None)
@@ -62,7 +66,9 @@ async def read_raw_response(response, *, log_context: dict[str, Any] | None = No
         except Exception:
             pass
         raise
-    return b"".join(chunks)
+    raw = b"".join(chunks)
+    await capture_response(response, raw, complete=True)
+    return raw
 
 
 def decode_entity(raw: bytes, content_encoding: str | None) -> bytes:

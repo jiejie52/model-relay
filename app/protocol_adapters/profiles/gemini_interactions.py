@@ -5,14 +5,14 @@ native context continuation, previous_interaction_id support, and incremental de
 """
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any
 
 import httpx
 
 from app.config import Settings
-from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
+from app.observability.response_capture import safe_response_headers
+from app.protocol_adapters.base import ProviderHTTPError
 from app.protocol_adapters.native_evidence import native_response_facts
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
 from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_payload
@@ -113,59 +113,66 @@ class GeminiInteractionsAdapter:
                 raw,
                 "Gemini interactions response must be a JSON object",
                 content_type=response_headers.get("content-type"),
+                content_encoding=response_headers.get("content-encoding"),
                 request_id=self._request_id(response_headers),
                 response_headers=response_headers,
                 phase="gemini_interactions_parse",
             )
 
-        # Extract interaction ID (new anchor handle)
-        response_id = str(data.get("id") or data.get("interaction_id") or "") or None
+        # A 2xx transport response does not imply a completed generation.
+        # This synchronous adapter never polls, continues tools, or re-sends.
+        interaction_status = data.get("status")
+        if (interaction_status is not None and interaction_status != "completed") or data.get("error"):
+            exc = ProviderHTTPError(
+                status, raw, f"Gemini interaction did not complete (status={interaction_status!r})",
+                content_type=response_headers.get("content-type"),
+                content_encoding=response_headers.get("content-encoding"),
+                request_id=self._request_id(response_headers), response_headers=response_headers,
+                phase="gemini_interactions_status",
+            )
+            exc.interaction_status = interaction_status
+            exc.unknown_completion = interaction_status not in (None, "completed", "failed", "cancelled", "incomplete")
+            raise exc
 
-        # Extract steps & text
+        # store=false responses can legitimately omit the interaction ID.
+        response_id = str(data.get("id") or data.get("interaction_id") or "") or None
         steps = data.get("steps") if isinstance(data.get("steps"), list) else []
         model_texts: list[str] = []
-        thought_steps: list[dict[str, Any]] = []
-
         for step in steps:
-            if isinstance(step, dict):
-                stype = step.get("type")
-                if stype == "model_output":
-                    t = step.get("text") or (step.get("content") or {}).get("text")
-                    if t:
-                        model_texts.append(str(t))
-                elif stype == "thought":
-                    thought_steps.append(step)
-                elif stype == "text" and "text" in step:
-                    model_texts.append(str(step["text"]))
+            if not isinstance(step, dict):
+                continue
+            if step.get("type") == "model_output":
+                content = step.get("content")
+                if isinstance(content, (list, dict, str)):
+                    model_texts.extend(_content_texts(content))
+                elif isinstance(step.get("text"), str):
+                    model_texts.append(step["text"])
+            elif step.get("type") == "text" and isinstance(step.get("text"), str):
+                model_texts.append(step["text"])
+        # Retain legacy response compatibility without exposing thought/signature,
+        # tool arguments, or multimodal payloads as assistant text.
+        if not model_texts:
+            model_texts.extend(_content_texts(data.get("outputs")))
+        text = "".join(model_texts)
+        if not model_texts:
+            for key in ("output", "text"):
+                if isinstance(data.get(key), str):
+                    text = data[key]
+                    break
 
-        text = "\n".join(model_texts)
-        if not text and isinstance(data.get("output"), str):
-            text = data["output"]
-        elif not text and isinstance(data.get("text"), str):
-            text = data["text"]
-
-        # Usage metadata
-        usage_meta = data.get("usage") or data.get("usageMetadata") or data.get("usage_metadata") or {}
-        if not isinstance(usage_meta, dict):
-            usage_meta = {}
-
-        prompt_tokens = usage_meta.get("prompt_tokens") or usage_meta.get("promptTokenCount")
-        completion_tokens = (
-            usage_meta.get("candidates_tokens")
-            or usage_meta.get("candidatesTokenCount")
-            or usage_meta.get("completion_tokens")
-        )
-        total_tokens = usage_meta.get("total_tokens") or usage_meta.get("totalTokenCount")
-        cached_tokens = (
-            usage_meta.get("cached_tokens")
-            or usage_meta.get("cached_content_token_count")
-            or usage_meta.get("cachedContentTokenCount")
-        )
-
+        usage_meta = next((data[k] for k in ("usage", "usageMetadata", "usage_metadata")
+                           if isinstance(data.get(k), dict)), {})
+        prompt_tokens = _token_count(usage_meta, "total_input_tokens", "prompt_tokens", "promptTokenCount")
+        completion_tokens = _token_count(usage_meta, "total_output_tokens", "candidates_tokens",
+                                         "candidatesTokenCount", "completion_tokens")
+        total_tokens = _token_count(usage_meta, "total_tokens", "totalTokenCount")
+        cached_tokens = _token_count(usage_meta, "total_cached_tokens", "cached_tokens",
+                                     "cached_content_token_count", "cachedContentTokenCount")
         usage = {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
+            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens, "cached_tokens": cached_tokens,
+            "thinking_tokens": _token_count(usage_meta, "total_thought_tokens", "thoughtsTokenCount"),
+            "tool_use_tokens": _token_count(usage_meta, "total_tool_use_tokens"),
             "raw": usage_meta,
         }
 
@@ -188,9 +195,18 @@ class GeminiInteractionsAdapter:
             "continuation_handle": response_id,
             "previous_interaction_id": prev_interaction_id,
             "cached_tokens": cached_tokens,
-            "actual_model": data.get("model") or context.snapshot.get("model"),
+            "interaction_status": interaction_status,
+            "response_model": data.get("model"),
+            "actual_model": data.get("model"),
+            "response_headers": safe_response_headers(response_headers),
         }
 
+        observed.update(observed_response_facts(
+            response_headers, body_model=data.get("model"),
+            channel_id=context.snapshot.get("channel_id"), protocol="gemini_interactions",
+            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
+        ))
+        observed = native_response_facts(data, payload, context, self.connection, observed)
         return StandardizedProviderResult(
             raw_bytes=raw,
             raw_json=data,
@@ -198,7 +214,7 @@ class GeminiInteractionsAdapter:
             response_id=response_id,
             usage=usage,
             cached_tokens=cached_tokens,
-            response_output={"steps": steps, "text": text},
+            response_output={"steps": steps, "text": text, "status": interaction_status},
             history_entry={"transport_history": transport_history},
             http_status=status,
             provider_request_id=self._request_id(response_headers),
@@ -211,3 +227,17 @@ class GeminiInteractionsAdapter:
             if val:
                 return str(val)
         return None
+
+
+def _content_texts(content) -> list[str]:
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [text for item in content for text in _content_texts(item)]
+    if isinstance(content, dict) and content.get("type") in {None, "text"} and isinstance(content.get("text"), str):
+        return [content["text"]]
+    return []
+
+
+def _token_count(usage, *names):
+    return next((usage[name] for name in names if type(usage.get(name)) is int and usage[name] >= 0), None)

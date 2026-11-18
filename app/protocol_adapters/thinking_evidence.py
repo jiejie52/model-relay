@@ -14,6 +14,14 @@ def extract_thinking_evidence(data, protocol, observed):
             parts = [p for c in candidates if isinstance(c, dict)
                      for p in (c.get("content") or {}).get("parts", []) if isinstance(p, dict)]
             if any(p.get("thought") is True for p in parts): blocks = True
+    elif protocol == "gemini_interactions":
+        usage = data.get("usage") or {}
+        tokens = count(usage.get("total_thought_tokens"))
+        # A signature alone is continuation metadata, not visible thinking.
+        thoughts = [step for step in data.get("steps", []) if isinstance(step, dict)
+                    and step.get("type") == "thought"]
+        if any(step.get("text") or step.get("summary") for step in thoughts):
+            blocks = True
     else:
         usage = data.get("usage") or {}
         detail = usage.get("output_tokens_details") or usage.get("completion_tokens_details") or {}
