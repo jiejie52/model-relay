@@ -63,13 +63,19 @@ def checked_history(history, kinds, transport_kind):
         transport = turn.get("transport_history") if isinstance(turn, dict) else None
         if not isinstance(transport, dict) or transport.get("kind") != transport_kind:
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
-        for field, role in (("user_content", "user"), ("model_content", "model")):
-            content = transport.get(field)
-            if (not isinstance(content, dict) or content.get("role") != role
-                    or not isinstance(content.get("parts"), (list, tuple)) or not content["parts"]):
+        if transport_kind == "gemini_interactions":
+            u = transport.get("interaction_user_input") or transport.get("user_content")
+            m = transport.get("interaction_model_steps") or transport.get("steps") or transport.get("model_content")
+            if not u or not m:
                 raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
-            if any(not isinstance(p, dict) or not p for p in content["parts"]):
-                raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
+        else:
+            for field, role in (("user_content", "user"), ("model_content", "model")):
+                content = transport.get(field)
+                if (not isinstance(content, dict) or content.get("role") != role
+                        or not isinstance(content.get("parts"), (list, tuple)) or not content["parts"]):
+                    raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
+                if any(not isinstance(p, dict) or not p for p in content["parts"]):
+                    raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
         prior = turn.get("_relay_context_freeze")
         if prior and prior.get("transport_hash") != stable_hash(transport):
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")

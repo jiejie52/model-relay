@@ -70,6 +70,7 @@ class CapabilityContract:
     # what the exact model/channel offering may do; protocol projection and
     # policy remain separate frozen objects.
     cache: dict[str, Any] = field(default_factory=dict)
+    continuation: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self) -> dict[str, Any]:
@@ -83,6 +84,7 @@ class CapabilityContract:
             "features": list(self.features),
             "provider_defaults": self.provider_defaults,
             "cache": self.cache,
+            "continuation": self.continuation,
             "metadata": self.metadata,
         }
 
@@ -151,6 +153,7 @@ class ProtocolProfileSpec:
     revision: str
     protocol: str
     cache: dict[str, Any] = field(default_factory=dict)
+    continuation: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     supports_native_history_material_reuse: bool = False
@@ -171,6 +174,7 @@ class ProtocolProfileSpec:
             "revision": self.revision,
             "protocol": self.protocol,
             "cache": self.cache,
+            "continuation": self.continuation,
             "metadata": self.metadata,
         }
 
@@ -736,7 +740,7 @@ class ModelControlPlane:
             auth=offering.metadata.get('execution_authorization',{})
             if auth.get('evidence_source_mode')=='first_party_native_payload':
                 profile=self.protocol_profiles.get(offering.protocol_profile_id)
-                if (not profile or profile.protocol!='gemini_native' or profile.metadata.get('evidence_source_mode')!='first_party_native_payload'
+                if (not profile or profile.protocol not in ('gemini_native', 'gemini_interactions') or profile.metadata.get('evidence_source_mode')!='first_party_native_payload'
                         or not profile.metadata.get('allowed_hosts') or profile.metadata.get('affinity_policy',{}).get('enabled')):
                     raise ValueError('First-party evidence requires a native direct profile with authorized hosts and no gateway affinity')
             if policy not in {"ignore", "audit", "strict"}:
@@ -749,6 +753,7 @@ class ModelControlPlane:
                 "chat_completions",
                 "claude_messages",
                 "gemini_native",
+                "gemini_interactions",
                 "moonshot_chat",
             }:
                 raise ValueError(
@@ -806,6 +811,7 @@ class ModelControlPlane:
             features=tuple(str(x) for x in (value.get("features") or [])),
             provider_defaults=dict(value.get("provider_defaults") or {}),
             cache=dict(value.get("cache") or {}),
+            continuation=dict(value.get("continuation") or {}),
             metadata=dict(value.get("metadata") or {}),
         )
 
@@ -825,6 +831,7 @@ class ModelControlPlane:
             supports_native_history_material_reuse=value.get("supports_native_history_material_reuse", False),
             history_material_part_kinds=tuple(value.get("history_material_part_kinds") or ()),
             cache=dict(value.get("cache") or {}),
+            continuation=dict(value.get("continuation") or {}),
             metadata=dict(value.get("metadata") or {}),
         )
 
@@ -900,6 +907,7 @@ def _contract(
     features: tuple[str, ...] = (),
     provider_defaults: dict[str, Any] | None = None,
     cache: dict[str, Any] | None = None,
+    continuation: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> CapabilityContract:
     return CapabilityContract(
@@ -912,12 +920,33 @@ def _contract(
         features=features,
         provider_defaults=dict(provider_defaults or {}),
         cache=dict(cache or {}),
+        continuation=dict(continuation or {}),
         metadata=dict(metadata or {}),
     )
 
 
 def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
     return [
+        ProtocolProfileSpec(
+            profile_id="gemini-interactions-official-v1",
+            revision="relay-protocol-profile/gemini-interactions/2026-11-18.1",
+            protocol="gemini_interactions",
+            supports_native_history_material_reuse=True,
+            history_material_part_kinds=("fileData", "inlineData"),
+            continuation={
+                "request_anchor_field": "previous_interaction_id",
+                "response_anchor_field": "id",
+                "wire_endpoint": "/v1beta/interactions",
+            },
+            cache={
+                "supported_mechanisms": ["implicit_prefix"],
+                "usage_mapping": "gemini_native",
+            },
+            metadata={
+                "allowed_hosts": ["generativelanguage.googleapis.com"],
+                "evidence_source_mode": "first_party_native_payload",
+            },
+        ),
         ProtocolProfileSpec(
             profile_id="responses-aihubmix-v1",
             revision="relay-protocol-profile/responses-aihubmix/2026-09-30.1",

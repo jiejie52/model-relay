@@ -118,12 +118,18 @@ def freeze_history_turn(entry: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(transport, dict):
         return result
     blocks = []
-    for field in ("user_content", "model_content", "user_message", "assistant_message", "user_item", "response_output"):
+    for field in ("user_content", "model_content", "user_message", "assistant_message", "user_item", "response_output", "interaction_user_input", "interaction_model_steps", "steps"):
         if field in transport:
             value = transport[field]
             blocks.append({"field": field, "semantic_hash": stable_hash(value),
                            "wire_sha256": stable_hash(value),
                            "raw_byte_size": len(canonical_json_bytes(value))})
+    if transport.get("kind") == "gemini_interactions":
+        steps = transport.get("interaction_model_steps") or transport.get("steps") or []
+        for s in steps:
+            if isinstance(s, dict) and s.get("type") == "thought" and "signature" in s:
+                if not s["signature"]:
+                    raise ValueError("Empty thought signature in gemini_interactions history")
     frozen = {"format": "relay-frozen-turn/1", "transport_hash": stable_hash(transport), "blocks": blocks}
     prior = entry.get("_relay_context_freeze")
     if prior is not None and prior != frozen:

@@ -7,14 +7,16 @@ from app.protocol_adapters.profiles.claude_messages import ClaudeMessagesV2Adapt
 from app.protocol_adapters.profiles.openai_compatible import OpenAICompatibleResponsesProvider
 from app.protocol_adapters.profiles.responses_v2 import ResponsesV2Adapter
 from app.protocol_adapters.profiles.gemini_native import GeminiNativeAdapter
+from app.protocol_adapters.profiles.gemini_interactions import GeminiInteractionsAdapter
 from app.protocol_adapters.profiles.gemini_genai_sdk import GeminiGenAIClient
 from app.protocol_adapters.profiles.moonshot_chat import MoonshotChatAdapter
 from app.materials.provider_files.gemini_files import GeminiFileAdapter
 from app.materials.provider_files.kimi_official import KimiOfficialFileAdapter
 from app.runtime.resource_adapters.gemini_stateful_cache import GeminiStatefulCacheAdapter
 
-IMPLEMENTED_PROTOCOLS = frozenset({"responses", "chat_completions", "claude_messages", "gemini_native", "moonshot_chat"})
+IMPLEMENTED_PROTOCOLS = frozenset({"responses", "chat_completions", "claude_messages", "gemini_native", "gemini_interactions", "moonshot_chat"})
 RESOURCE_MECHANISMS = {"gemini_native": {"stateful_resource", "implicit_prefix"},
+    "gemini_interactions": {"implicit_prefix"},
     "claude_messages": {"breakpoint", "implicit_prefix"}, "responses": {"implicit_prefix"},
     "chat_completions": {"implicit_prefix"}, "moonshot_chat": {"implicit_prefix"}}
 
@@ -77,6 +79,10 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
                 if not spec.credential_ref: adapter.adapter_version = "gemini-native-aihubmix/8"
                 sdk = GeminiGenAIClient(runtime.settings, connection=runtime)
                 assembly.clients.append(sdk)
+            elif spec.protocol == "gemini_interactions":
+                adapter = GeminiInteractionsAdapter(runtime.settings, connection=runtime)
+                sdk = GeminiGenAIClient(runtime.settings, connection=runtime)
+                assembly.clients.append(sdk)
             elif spec.protocol == "moonshot_chat": adapter = MoonshotChatAdapter(runtime.settings, materials, repo, connection=runtime)
             else: raise ValueError("Unregistered protocol implementation")
             providers.register_v2(cid, ScopedAdapter(adapter, runtime), provider=None,
@@ -85,7 +91,7 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
             need_files = any(s.requires_file_adapter for s in supplies) or any(
                 "provider_files_api" in c.metadata.get("material_transport", {}).get("supported_material_transports", []) for c in contracts)
             if file_adapters is not None and need_files:
-                if spec.protocol == "gemini_native": resource = GeminiFileAdapter(runtime.settings, connection=runtime, sdk=sdk)
+                if spec.protocol in {"gemini_native", "gemini_interactions"}: resource = GeminiFileAdapter(runtime.settings, connection=runtime, sdk=sdk)
                 elif spec.protocol == "moonshot_chat": resource = KimiOfficialFileAdapter(runtime.settings, repo, storage, connection=runtime)
                 else: raise ValueError("No file implementation for this connection")
                 if not spec.credential_ref and spec.protocol == "gemini_native": resource.adapter_version = "gemini-aihubmix-files/2"

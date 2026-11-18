@@ -17,6 +17,24 @@
       "account_id": "REPLACE_WITH_ACCOUNT",
       "project_id": "REPLACE_WITH_PROJECT",
       "region": "global"
+    },
+    {
+      "connection_id": "gemini_google_interactions_prod",
+      "channel_id": "google_official",
+      "protocol": "gemini_interactions",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "rest_base_url": "https://generativelanguage.googleapis.com",
+      "sdk_endpoint_options": {
+        "base_url": "https://generativelanguage.googleapis.com"
+      },
+      "api_version": "v1beta",
+      "upload_base_url": "https://generativelanguage.googleapis.com/upload/v1beta",
+      "auth_type": "x_goog_api_key_header",
+      "credential_ref": "GOOGLE_GEMINI_API_KEY",
+      "provider": "gemini",
+      "account_id": "REPLACE_WITH_ACCOUNT",
+      "project_id": "REPLACE_WITH_PROJECT",
+      "region": "global"
     }
   ],
   "capability_contracts": [
@@ -104,6 +122,105 @@
           "image/jpeg"
         ]
       }
+    },
+    {
+      "contract_id": "gemini-2.5-pro-google-interactions-capability",
+      "revision": "8.0.0-draft",
+      "supported_options": {
+        "temperature": {
+          "type": "number",
+          "min": 0,
+          "max": 2
+        },
+        "top_p": {
+          "type": "number",
+          "min": 0,
+          "max": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "min": 1
+        }
+      },
+      "thinking": {
+        "mode": "budget",
+        "accepted_levels": [
+          "auto",
+          "low",
+          "medium",
+          "high"
+        ],
+        "wire_strategy": "gemini_thinking_budget",
+        "budget_map": {
+          "auto": -1,
+          "low": 1024,
+          "medium": 8192,
+          "high": 32768
+        }
+      },
+      "structured_output": {
+        "mode": "native_json_schema"
+      },
+      "input_modalities": [
+        "text",
+        "image",
+        "document"
+      ],
+      "features": [],
+      "provider_defaults": {},
+      "cache": {
+        "version": "relay-cache-contract/1",
+        "supported_mechanisms": [
+          "implicit_prefix"
+        ],
+        "verification_status": "unverified",
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "implicit_prefix": {
+            "verification_status": "unverified",
+            "minimum_cacheable_tokens": 4096,
+            "threshold_mode": "provider_enforced",
+            "final_threshold_guard": true
+          }
+        }
+      },
+      "continuation": {
+        "version": "relay-continuation-contract/1",
+        "anchor_class": "immutable_tree_anchor",
+        "verification_status": "verified",
+        "supports_branching": true,
+        "supports_multiturn_delta": true,
+        "requires_upstream_store": true,
+        "forbid_when_zero_retention": true,
+        "mutually_exclusive_cache_mechanisms": [
+          "stateful_resource"
+        ],
+        "retention_ttl_seconds": 86400,
+        "anchor_safety_margin_seconds": 300,
+        "head_invariants": [
+          "instructions",
+          "tools",
+          "account_scope_id",
+          "model"
+        ],
+        "re_specify_head_on_delta": true,
+        "requires_thought_signature_on_replay": true,
+        "max_delta_turns": 64
+      },
+      "metadata": {
+        "material_transport": {
+          "supported_material_transports": [
+            "provider_files_api"
+          ],
+          "external_url_max_total_bytes": 0
+        },
+        "native_material_mime_types": [
+          "application/pdf",
+          "text/plain",
+          "image/png",
+          "image/jpeg"
+        ]
+      }
     }
   ],
   "protocol_profiles": [
@@ -112,7 +229,10 @@
       "revision": "8.0.0-draft",
       "protocol": "gemini_native",
       "supports_native_history_material_reuse": true,
-      "history_material_part_kinds": ["fileData", "inlineData"],
+      "history_material_part_kinds": [
+        "fileData",
+        "inlineData"
+      ],
       "cache": {
         "supported_mechanisms": [
           "stateful_resource",
@@ -131,6 +251,43 @@
       },
       "metadata": {
         "adapter_type": "gemini_native",
+        "allowed_hosts": [
+          "generativelanguage.googleapis.com"
+        ],
+        "affinity_policy": {
+          "enabled": false
+        },
+        "response_evidence_headers": {},
+        "evidence_source_mode": "first_party_native_payload"
+      }
+    },
+    {
+      "profile_id": "gemini-interactions-google-official",
+      "revision": "8.0.0-draft",
+      "protocol": "gemini_interactions",
+      "supports_native_history_material_reuse": true,
+      "history_material_part_kinds": [
+        "fileData",
+        "inlineData"
+      ],
+      "continuation": {
+        "request_anchor_field": "previous_interaction_id",
+        "response_anchor_field": "id",
+        "wire_endpoint": "/v1beta/interactions"
+      },
+      "cache": {
+        "supported_mechanisms": [
+          "implicit_prefix"
+        ],
+        "composite_mode": "mutually_exclusive",
+        "mechanism_profiles": {
+          "implicit_prefix": {
+            "verification_status": "unverified"
+          }
+        }
+      },
+      "metadata": {
+        "adapter_type": "gemini_interactions",
         "allowed_hosts": [
           "generativelanguage.googleapis.com"
         ],
@@ -168,6 +325,30 @@
       "cache_policy_id": "google-official-session-cache",
       "deployment_id": "railway",
       "priority": 10,
+      "requires_file_adapter": true,
+      "enabled": false,
+      "metadata": {
+        "unavailable_action": "try_next",
+        "execution_authorization": {
+          "allow_provider_fallback": false,
+          "allow_paid_fallback": false,
+          "on_unknown_billing": "reject",
+          "expected_billing_tier": "official_direct",
+          "evidence_source_mode": "first_party_native_payload",
+          "require_native_constraint_evidence": true
+        }
+      }
+    },
+    {
+      "offering_id": "gemini-2.5-pro-google-interactions",
+      "provider": "gemini",
+      "model_pattern": "gemini-2.5-pro",
+      "connection_id": "gemini_google_interactions_prod",
+      "capability_contract_id": "gemini-2.5-pro-google-interactions-capability",
+      "protocol_profile_id": "gemini-interactions-google-official",
+      "cache_policy_id": "google-official-session-cache",
+      "deployment_id": "railway",
+      "priority": 15,
       "requires_file_adapter": true,
       "enabled": false,
       "metadata": {

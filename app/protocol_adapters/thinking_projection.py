@@ -4,9 +4,9 @@ from app.protocol_adapters.base import ProviderRequestError
 
 # Registered strategies define implemented protocol/action intersections.
 STRATEGIES = {
-    "none": ({"gemini_native", "responses", "chat_completions", "claude_messages", "moonshot_chat"}, {"omit"}),
-    "gemini_thinking_level": ({"gemini_native"}, {"omit", "send_level", "send_toggle"}),
-    "gemini_thinking_budget": ({"gemini_native"}, {"omit", "send_budget", "send_toggle"}),
+    "none": ({"gemini_native", "gemini_interactions", "responses", "chat_completions", "claude_messages", "moonshot_chat"}, {"omit"}),
+    "gemini_thinking_level": ({"gemini_native", "gemini_interactions"}, {"omit", "send_level", "send_toggle"}),
+    "gemini_thinking_budget": ({"gemini_native", "gemini_interactions"}, {"omit", "send_budget", "send_toggle"}),
     "openai_reasoning_effort": ({"responses", "chat_completions"}, {"omit", "send_level"}),
     "responses_reasoning_effort": ({"responses"}, {"omit", "send_level"}),
     "chat_reasoning_effort": ({"chat_completions", "moonshot_chat"}, {"omit", "send_level"}),
@@ -48,7 +48,7 @@ def project_thinking(payload, snapshot, protocol):
     if not registered or protocol not in registered[0] or action not in registered[1]:
         raise ProviderRequestError("THINKING_PROJECTION_UNSUPPORTED", "Frozen thinking has no registered projection")
     if action == "omit": return True
-    if protocol == "gemini_native":
+    if protocol in {"gemini_native", "gemini_interactions"}:
         native = {"thinkingLevel": level.upper()} if action == "send_level" else {"thinkingBudget": 0 if action == "send_toggle" else budget}
         payload.setdefault("generationConfig", {})["thinkingConfig"] = native
     elif protocol in {"responses", "chat_completions", "moonshot_chat"}:

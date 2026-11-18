@@ -103,7 +103,7 @@ def compile_workbook(content, settings):
     conn_rows=unique(ext['连接配置'],'连接ID')
     for cid,row in conn_rows.items():
         protocol=value(row,'协议族'); auth=value(row,'鉴权方式'); credential=value(row,'凭据引用')
-        expected={'gemini_native':'x_goog_api_key_header','claude_messages':'x_api_key_header',
+        expected={'gemini_native':'x_goog_api_key_header','gemini_interactions':'x_goog_api_key_header','claude_messages':'x_api_key_header',
             'responses':'bearer_header','chat_completions':'bearer_header','moonshot_chat':'bearer_header'}
         if protocol not in expected or auth!=expected[protocol]: fail(row,'协议族/鉴权方式','没有匹配的已注册实现')
         if not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*',credential): fail(row,'凭据引用','必须是环境变量名称')
@@ -135,10 +135,10 @@ def compile_workbook(content, settings):
         if source not in ('gateway_headers','first_party_native_payload'):fail(row,'证据来源','未知模式')
         required=value(row,'要求原生约束证据',True) or '否'
         if required not in ('是','否'):fail(row,'要求原生约束证据','只能填写是或否')
-        if source=='first_party_native_payload' and (value(row,'协议族')!='gemini_native' or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
+        if source=='first_party_native_payload' and (value(row,'协议族') not in ('gemini_native', 'gemini_interactions') or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
         profiles[pid]=ModelControlPlane._profile_from_mapping({'profile_id':pid,'revision':COMPILER_VERSION,'protocol':value(row,'协议族'),
             **history_material_capability(value(row,'协议族')),
-            'cache':{},'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
+            'cache':{},'continuation':({'request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if value(row,'协议族')=='gemini_interactions' else {}),'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
                 'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
     extra_thinking=unique(ext['思考合同配置'],'合同ID')
@@ -198,7 +198,7 @@ def compile_workbook(content, settings):
         connection=connections.get(value(binding,'连接ID')); profile=profiles.get(value(binding,'协议ID')); contract=contracts.get(value(binding,'合同ID'))
         if not connection or not profile or not contract: fail(binding,'连接ID/协议ID/合同ID','引用不存在')
         if connection.protocol!=profile.protocol: fail(binding,'协议ID','与连接协议不一致')
-        if connection.protocol=='gemini_native' and not set(contract.metadata['material_transport']['supported_material_transports']) & {'provider_files_api','external_signed_url'}:
+        if connection.protocol in {'gemini_native', 'gemini_interactions'} and not set(contract.metadata['material_transport']['supported_material_transports']) & {'provider_files_api','external_signed_url'}:
             fail(binding,'合同ID','当前原生材料绑定器需要 Files 或外链传输授权')
         from app.protocol_adapters.thinking_projection import validate_projection
         try: validate_projection(contract.thinking,connection.protocol)
@@ -226,10 +226,29 @@ def compile_workbook(content, settings):
             'mechanism_profiles':{mech:{'verification_status':'unverified','minimum_cacheable_tokens':cache['计划门槛 Token'] or 1024,
                 'threshold_mode':'count_tokens' if mech=='stateful_resource' else 'provider_enforced','final_threshold_guard':True,
                 'ttl_seconds':(cache['资源有效期 分钟'] or 60)*60} for mech in mechanisms}}
-        contracts[cap_id]=replace(contract,contract_id=cap_id,cache=cache_contract)
+        continuation_contract = {}
+        if connection.protocol == 'gemini_interactions':
+            continuation_contract = {
+                'version': 'relay-continuation-contract/1',
+                'anchor_class': 'immutable_tree_anchor',
+                'verification_status': 'verified',
+                'supports_branching': True,
+                'supports_multiturn_delta': True,
+                'requires_upstream_store': True,
+                'forbid_when_zero_retention': True,
+                'mutually_exclusive_cache_mechanisms': ['stateful_resource'],
+                'retention_ttl_seconds': 86400,
+                'anchor_safety_margin_seconds': 300,
+                'head_invariants': ['instructions', 'tools', 'account_scope_id', 'model'],
+                're_specify_head_on_delta': True,
+                'requires_thought_signature_on_replay': True,
+                'max_delta_turns': 64,
+            }
+        contracts[cap_id]=replace(contract,contract_id=cap_id,cache=cache_contract,continuation=continuation_contract)
         profile_id='excel-profile:'+stable_hash([profile.profile_id,connection.connection_id])[:20]
         profiles[profile_id]=replace(profile,profile_id=profile_id,cache={'supported_mechanisms':sorted(RESOURCE_MECHANISMS[connection.protocol]),
-            **({'token_count_connection_id':connection.connection_id} if connection.protocol=='gemini_native' else {}),'composite_mode':'mutually_exclusive'})
+            **({'token_count_connection_id':connection.connection_id} if connection.protocol=='gemini_native' else {}),'composite_mode':'mutually_exclusive'},
+            continuation=({'request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if connection.protocol=='gemini_interactions' else {}))
         policies[policy_id]=ModelControlPlane._cache_policy_from_mapping({'policy_id':policy_id,'revision':COMPILER_VERSION,'scope':'session',
             'mechanism_preference':mechanisms,'auto_prepare_failure':'uncached_same_context' if cache['自动准备失败时']=='原文无缓存继续' else 'fail',
             'metadata':{'default_mode':{'关闭':'off','自动':'auto','强制':'on'}[cache['默认策略']] if mechanisms else 'off','allow_force':cache['可选强制']=='是'}})

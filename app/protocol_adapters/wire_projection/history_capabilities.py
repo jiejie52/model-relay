@@ -2,6 +2,7 @@
 
 HISTORY_MATERIAL_CAPABILITIES = {
     "gemini_native": ("fileData", "inlineData"),
+    "gemini_interactions": ("fileData", "inlineData"),
 }
 
 

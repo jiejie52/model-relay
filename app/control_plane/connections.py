@@ -102,10 +102,10 @@ class ConnectionRuntime:
         root = self.rest_base
         return root[:-(len(self.api_version)+1)] if root.endswith("/"+self.api_version) else root
     @property
-    def auth_type(self): return self.spec.auth_type or ("x_goog_api_key_header" if self.spec.protocol == "gemini_native" else "bearer_header")
+    def auth_type(self): return self.spec.auth_type or ("x_goog_api_key_header" if self.spec.protocol in {"gemini_native", "gemini_interactions"} else "bearer_header")
     def api_url(self, path):
         root = self.rest_base
-        if self.spec.protocol == "gemini_native" and not root.endswith("/"+self.api_version): root += "/"+self.api_version
+        if self.spec.protocol in {"gemini_native", "gemini_interactions"} and not root.endswith("/"+self.api_version): root += "/"+self.api_version
         return root + "/" + path.lstrip("/")
     def headers(self):
         name = {"bearer_header": "Authorization", "x_goog_api_key_header": "x-goog-api-key", "x_api_key_header": "x-api-key"}[self.auth_type]

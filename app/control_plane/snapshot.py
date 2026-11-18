@@ -6,7 +6,7 @@ from typing import Any, Mapping
 from app.immutable import freeze_json
 from app.control_plane.definitions import ModelControlPlane, ConnectionSpec
 
-SUPPORTED_PROTOCOLS = frozenset({"responses", "chat_completions", "claude_messages", "gemini_native", "moonshot_chat"})
+SUPPORTED_PROTOCOLS = frozenset({"responses", "chat_completions", "claude_messages", "gemini_native", "gemini_interactions", "moonshot_chat"})
 
 @dataclass(frozen=True)
 class ImmutableConfigSnapshot:
