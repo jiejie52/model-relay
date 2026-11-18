@@ -224,17 +224,17 @@ def project_gemini_interactions_payload(
     )
     if spec is not None:
         if spec.mode == "json_object":
-            payload["response_format"] = {"type": "json_object"}
+            payload["response_format"] = {"type": "object"}
         elif spec.mode == "json_schema" and spec.schema is not None:
             projection = project_schema_for_provider(
                 spec.schema,
                 provider="gemini",
                 model=snapshot.get("model"),
             )
-            payload["response_format"] = {
-                "type": "json_schema",
-                "response_schema": projection.schema,
-            }
+            schema_dict = copy.deepcopy(projection.schema)
+            if "type" in schema_dict and isinstance(schema_dict["type"], str):
+                schema_dict["type"] = schema_dict["type"].lower()
+            payload["response_format"] = schema_dict
 
     return payload, user_content
 
