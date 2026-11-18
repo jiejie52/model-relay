@@ -55,18 +55,16 @@ def _interaction_facts(data, payload, context, result):
             result["billing_tier"] = "official_direct"
     if result.get("native_constraint_enforced") is False or result.get("protocol_downgraded") is True or result.get("json_repaired") is True:
         return result
-    schema = payload.get("response_format")
-    if data.get("status") != "completed" or not isinstance(schema, dict):
+    response_format = payload.get("response_format")
+    if (data.get("status") != "completed" or not isinstance(response_format, dict)
+            or response_format.get("type") != "text"
+            or response_format.get("mime_type") != "application/json"):
         return result
-    # Support the tested direct schema and the documented text/schema envelope.
-    if schema.get("type") == "text" and schema.get("mime_type") == "application/json":
-        schema = schema.get("schema")
+    schema = response_format.get("schema")
     if not isinstance(schema, dict) or not schema.get("type"):
         return result
-    from app.protocol_adapters.profiles.gemini_interactions import _content_texts
-    steps = data.get("steps") or []
-    text = "".join(t for step in steps if isinstance(step, dict) and step.get("type") == "model_output"
-                   for t in _content_texts(step.get("content", step.get("text"))))
+    from app.protocol_adapters.profiles.gemini_interactions import extract_interactions_text
+    text = extract_interactions_text(data)
     try:
         parsed = json.loads(text)
         validate(parsed, schema)

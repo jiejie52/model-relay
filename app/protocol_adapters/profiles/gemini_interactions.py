@@ -137,28 +137,7 @@ class GeminiInteractionsAdapter:
         # store=false responses can legitimately omit the interaction ID.
         response_id = str(data.get("id") or data.get("interaction_id") or "") or None
         steps = data.get("steps") if isinstance(data.get("steps"), list) else []
-        model_texts: list[str] = []
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            if step.get("type") == "model_output":
-                content = step.get("content")
-                if isinstance(content, (list, dict, str)):
-                    model_texts.extend(_content_texts(content))
-                elif isinstance(step.get("text"), str):
-                    model_texts.append(step["text"])
-            elif step.get("type") == "text" and isinstance(step.get("text"), str):
-                model_texts.append(step["text"])
-        # Retain legacy response compatibility without exposing thought/signature,
-        # tool arguments, or multimodal payloads as assistant text.
-        if not model_texts:
-            model_texts.extend(_content_texts(data.get("outputs")))
-        text = "".join(model_texts)
-        if not model_texts:
-            for key in ("output", "text"):
-                if isinstance(data.get(key), str):
-                    text = data[key]
-                    break
+        text = extract_interactions_text(data)
 
         usage_meta = next((data[k] for k in ("usage", "usageMetadata", "usage_metadata")
                            if isinstance(data.get(k), dict)), {})
@@ -241,3 +220,30 @@ def _content_texts(content) -> list[str]:
 
 def _token_count(usage, *names):
     return next((usage[name] for name in names if type(usage.get(name)) is int and usage[name] >= 0), None)
+
+
+def extract_interactions_text(data: dict[str, Any]) -> str:
+    steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+    model_texts: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("type") == "model_output":
+            content = step.get("content")
+            if isinstance(content, (list, dict, str)):
+                model_texts.extend(_content_texts(content))
+            elif isinstance(step.get("text"), str):
+                model_texts.append(step["text"])
+        elif step.get("type") == "text" and isinstance(step.get("text"), str):
+            model_texts.append(step["text"])
+    # Retain legacy response compatibility without exposing thought/signature,
+    # tool arguments, or multimodal payloads as assistant text.
+    if not model_texts:
+        model_texts.extend(_content_texts(data.get("outputs")))
+    text = "".join(model_texts)
+    if not model_texts:
+        for key in ("output", "text"):
+            if isinstance(data.get(key), str):
+                text = data[key]
+                break
+    return text

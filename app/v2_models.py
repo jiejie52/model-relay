@@ -152,6 +152,11 @@ class RawErrorMeta(BaseModel):
     content_type: str | None = None
     content_encoding: str | None = None
     body_encoding: str | None = None
+    body_source: str | None = None
+    body_complete: bool | None = None
+    response_diagnostics: dict[str, Any] | None = None
+    reason_code: str | None = None
+    interaction_status: str | None = None
     body_size: int | None = None
     body_sha256: str | None = None
     body_object_id: str | None = None

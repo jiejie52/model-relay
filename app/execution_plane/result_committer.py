@@ -94,9 +94,13 @@ class ResultCommitter:
             setattr(exc, "provider_success_object_id", raw_object_id)
             setattr(exc, "provider_output_object_id", output_object_id)
             raise exc
-        if spec is not None and spec.mode == "json_schema":
+        if spec is not None and (spec.mode == "json_schema" or (
+                spec.mode == "json_object" and snapshot.get("protocol") == "gemini_interactions")):
             try:
                 parsed = json.loads(result.text)
+                if spec.mode == "json_object" and not isinstance(parsed, dict):
+                    raise StructuredOutputError("STRUCTURED_OUTPUT_INVALID_JSON_OBJECT",
+                                                "Provider output must be a JSON object")
                 validate_against_schema(parsed, spec)
             except Exception as exc:
                 if isinstance(exc, StructuredOutputError):

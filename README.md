@@ -1,3 +1,9 @@
+# Model Relay 10.1.1
+
+修复 Gemini Interactions 的 JSON 响应格式：Relay 的 `json_object` / `json_schema` 统一投影为官方 `response_format.type=text`、`mime_type=application/json`，Schema 放入 `schema` 字段。实际调用与部署探针使用同一投影；同步保留完整响应归档与解析修复。升级步骤及验证范围见 [UPGRADE_10.1.1.md](UPGRADE_10.1.1.md)。
+
+以下保留原源码包的历史说明。
+
 # Model Relay 9.0.0
 
 以 8.9.1 完整源码为基线，新增 **Request 级 `context_policy` 可选覆盖**：`conversation` / `explicit` / `session_materials_only`。累计 Session 可以让单次 Request 只看到 Session 固定材料而不回放历史，历史持久化与恢复机制保持原策略。`adaptive` 尚未实现。使用方式、部署和限制见 [UPGRADE_9.0.0.md](UPGRADE_9.0.0.md)。

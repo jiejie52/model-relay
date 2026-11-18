@@ -5,14 +5,27 @@ the workbook. Probe resources are never published as Session cache bindings.
 """
 import asyncio
 import json
+import logging
 import re
 import httpx
 from jsonschema import validate
 from app.control_plane.connections import ConnectionRuntime
 from app.runtime.transport_guard import provider_transport
 from app.protocol_adapters.wire_projection.schema_projector import project_schema_for_provider
+from app.canonical_schema import StructuredOutputSpec
+from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_response_format
+from app.protocol_adapters.profiles.gemini_interactions import extract_interactions_text
+from app.protocol_adapters.base import ProviderHTTPError
+from app.protocol_adapters.error_observation import provider_http_error_observation
+from app.observability import warning as log_warning
 
 VALIDATOR_VERSION='deployment-probes/1'
+GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/2'
+logger = logging.getLogger("model-relay-deployment-validation")
+
+
+def validation_version(protocol):
+    return GEMINI_INTERACTIONS_VALIDATOR_VERSION if protocol == 'gemini_interactions' else VALIDATOR_VERSION
 
 class ProbeFailure(RuntimeError): pass
 
@@ -60,7 +73,15 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                 url=runtime.rest_base,always=True,connection=runtime),trust_env=False) as client:
             async def request(method,url,**kwargs):
                 response=await client.request(method,url,headers={**runtime.headers(),**kwargs.pop('headers',{})},**kwargs)
-                if not 200<=response.status_code<300: raise ProbeFailure('upstream_http_'+str(response.status_code))
+                if not 200<=response.status_code<300:
+                    if spec.protocol == 'gemini_interactions':
+                        error = ProviderHTTPError(response.status_code, response.content,
+                            content_type=response.headers.get('content-type'), response_headers=dict(response.headers),
+                            phase='deployment_probe', request_method=method, request_url=url,
+                            raw_body_source='response.content')
+                        log_warning(logger, 'deployment_probe_http_error', connection_id=spec.connection_id,
+                            protocol=spec.protocol, provider_http_error=provider_http_error_observation(error))
+                    raise ProbeFailure('upstream_http_'+str(response.status_code))
                 return response
             model=supply.metadata.get('upstream_model',supply.model_pattern)
             protocol=spec.protocol
@@ -105,39 +126,28 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                         'store': False,
                         'generation_config': dict(gen_cfg)
                     }
-                    if native:
-                        payload['response_format'] = {
-                            'type': 'json_schema',
-                            'response_schema': project_schema_for_provider(schema, provider='gemini', model=model).schema
-                        }
+                    output_spec = StructuredOutputSpec(
+                        mode='json_schema' if native else 'json_object',
+                        schema=schema if native else None, name='validation', strict=bool(native),
+                        source='deployment_validation')
+                    payload['response_format'] = project_gemini_interactions_response_format(output_spec)
                     _project_probe_thinking(payload, cap, protocol)
-                    try:
-                        last = (await request('POST', runtime.api_url('interactions'), json=payload)).json()
-                    except ProbeFailure as exc:
-                        if any(code in str(exc) for code in ('upstream_http_404', 'upstream_http_400', 'upstream_http_405')):
-                            fb_part = {'fileData': {'fileUri': file['uri'], 'mimeType': 'text/plain'}} if file_name and file.get('uri') else None
-                            fb_payload = {
-                                'contents': [{'role': 'user', 'parts': ([fb_part] if fb_part else []) + [{'text': 'Return exactly {"ok":true} as JSON.'}]}],
-                                'generationConfig': {'maxOutputTokens': min(1024, cap.supported_options.get('max_output_tokens', {}).get('max', 1024))}
-                            }
-                            last = (await request('POST', runtime.api_url('models/' + model + ':generateContent'), json=fb_payload)).json()
-                        else:
-                            raise
-                    text = ''
-                    for s in last.get('steps', []):
-                        if isinstance(s, dict) and s.get('type') in ('model_output', 'text'):
-                            text = s.get('text') or (s.get('content') or {}).get('text') or ''
-                            if text: break
-                    if not text and isinstance(last.get('output'), str):
-                        text = last['output']
-                    elif not text and isinstance(last.get('text'), str):
-                        text = last['text']
-                    if not text:
-                        text = ''.join(p.get('text', '') for c in last.get('candidates', []) for p in c.get('content', {}).get('parts', []) if not p.get('thought'))
+                    # Qualify the exact protocol. generateContent success is not
+                    # evidence that an Interactions supply is ready.
+                    last = (await request('POST', runtime.api_url('interactions'), json=payload)).json()
+                    if not isinstance(last, dict) or last.get('error') or last.get('status') != 'completed':
+                        raise ProbeFailure('incomplete_interactions_probe')
+                    text = extract_interactions_text(last)
                     if not text: raise ProbeFailure('empty_probe_output')
-                    if native:
-                        try: validate(json.loads(text), schema)
-                        except Exception: raise ProbeFailure('native_schema_probe_failed') from None
+                    try:
+                        parsed = json.loads(text)
+                        if native:
+                            validate(parsed, schema)
+                        elif not isinstance(parsed, dict):
+                            raise ValueError('JSON object expected')
+                    except Exception:
+                        raise ProbeFailure('native_schema_probe_failed' if native else 'json_object_probe_failed') from None
+                    facets.append('json_object')
                     facets.extend(['inference', 'representative_thinking'] + (['native_json_schema'] if native else []))
                     if 'implicit_prefix' in mechanisms:
                         facets.append('implicit_prefix')
@@ -213,7 +223,7 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                     try: validate(json.loads(text),schema)
                     except Exception: raise ProbeFailure('native_schema_probe_failed') from None
                 facets.append('inference')
-            return {'status':'ready','facets':facets,'validator_version':VALIDATOR_VERSION}
+            return {'status':'ready','facets':facets,'validator_version':validation_version(protocol)}
     except asyncio.CancelledError: raise
     except ProbeFailure as exc: return {'status':'pending','reason':str(exc)}
     except Exception as exc: return {'status':'pending','reason':'validation_'+type(exc).__name__}

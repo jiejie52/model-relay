@@ -14,7 +14,7 @@ import copy
 import json
 from typing import Any
 
-from app.canonical_schema import resolve_structured_output
+from app.canonical_schema import StructuredOutputSpec, resolve_structured_output
 from app.core.context_codec import canonical_structure
 from app.observability.http_wire_logger import normalization_active
 from app.protocol_adapters.base import ProviderRequestError
@@ -24,7 +24,6 @@ from app.protocol_adapters.wire_projection.gemini_wire import (
     project_material_part,
     project_system_instruction,
 )
-from app.protocol_adapters.wire_projection.schema_projector import project_schema_for_provider
 from app.runtime.contracts import SealedDispatchBundle
 
 
@@ -222,21 +221,31 @@ def project_gemini_interactions_payload(
         snapshot,
         fallback_name="structured_output" if normalization_active() else str(snapshot.get("metadata", {}).get("stage") or "structured_output"),
     )
-    if spec is not None:
-        if spec.mode == "json_object":
-            payload["response_format"] = {"type": "object"}
-        elif spec.mode == "json_schema" and spec.schema is not None:
-            projection = project_schema_for_provider(
-                spec.schema,
-                provider="gemini",
-                model=snapshot.get("model"),
-            )
-            schema_dict = copy.deepcopy(projection.schema)
-            if "type" in schema_dict and isinstance(schema_dict["type"], str):
-                schema_dict["type"] = schema_dict["type"].lower()
-            payload["response_format"] = schema_dict
+    response_format = project_gemini_interactions_response_format(spec)
+    if response_format is not None:
+        payload["response_format"] = response_format
 
     return payload, user_content
+
+
+
+def project_gemini_interactions_response_format(spec: StructuredOutputSpec | None) -> dict[str, Any] | None:
+    """Map Relay output intent to Interactions TextResponseFormat.
+
+    Interactions takes JSON Schema under text/schema, not generateContent's
+    responseSchema and not an OpenAI json_object/json_schema discriminator.
+    The canonical schema is copied intact, including refs and nullable unions;
+    Relay still validates the original constraints after receiving the result.
+    """
+    if spec is None:
+        return None
+    if spec.mode == "json_object":
+        schema = {"type": "object"}
+    elif spec.mode == "json_schema" and isinstance(spec.schema, dict):
+        schema = copy.deepcopy(spec.schema)
+    else:
+        raise ProviderRequestError("STRUCTURED_OUTPUT_MODE_UNSUPPORTED", "Unsupported Interactions output intent")
+    return {"type": "text", "mime_type": "application/json", "schema": schema}
 
 
 def _format_current_turn_input(user_content: dict[str, Any]) -> list[dict[str, Any]] | str:

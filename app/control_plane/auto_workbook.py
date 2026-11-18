@@ -10,7 +10,7 @@ import hmac,json,time
 from pathlib import Path
 from app.control_plane.definitions import ModelControlPlane
 from app.control_plane.governance.workbook import compile_workbook,COMPILER_VERSION
-from app.control_plane.governance.deployment_validation import verify_supply,VALIDATOR_VERSION,ProbeFailure
+from app.control_plane.governance.deployment_validation import verify_supply,validation_version,ProbeFailure
 from app.core.idempotency import stable_hash
 
 def encode(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
@@ -69,7 +69,7 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
         target={'connection':plane.connection(supply.connection_id).canonical(),'contract':plane.contract(supply.capability_contract_id).canonical(),
             'profile':plane.protocol_profile(supply.protocol_profile_id).canonical(),
             'provider':supply.provider,'model':supply.model_pattern,'upstream_model':supply.metadata.get('upstream_model',supply.model_pattern),
-            'execution_authorization':supply.metadata.get('execution_authorization',{}),'validator':VALIDATOR_VERSION}
+            'execution_authorization':supply.metadata.get('execution_authorization',{}),'validator':validation_version(plane.connection(supply.connection_id).protocol)}
         fingerprint=hmac.new(secret.encode(),encode(target),'sha256').hexdigest()
         path=prefix+'validation/'+fingerprint+'.json'
         result=None
