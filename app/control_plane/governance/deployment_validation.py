@@ -35,7 +35,14 @@ def _project_probe_thinking(payload, cap, protocol):
         limit = cap.supported_options.get("max_output_tokens", {}).get("max")
         required = e["budget_tokens"] + 1
         if limit is None or required > limit: raise ProbeFailure("probe_budget_exceeds_output_contract")
-        target, key = (payload.setdefault("generationConfig", {}), "maxOutputTokens") if protocol == "gemini_native" else (payload, "max_output_tokens" if protocol == "responses" else "max_tokens")
+        if protocol == "gemini_native":
+            target, key = payload.setdefault("generationConfig", {}), "maxOutputTokens"
+        elif protocol == "gemini_interactions":
+            target, key = payload.setdefault("generation_config", {}), "max_output_tokens"
+        elif protocol == "responses":
+            target, key = payload, "max_output_tokens"
+        else:
+            target, key = payload, "max_tokens"
         target[key] = max(target.get(key, 0), required)
     project_thinking(payload, {"thinking": {"version": THINKING_CONTRACT_VERSION, "effective": e}}, protocol)
     return True
@@ -63,7 +70,7 @@ async def verify_supply(settings, plane, supply, *, journal=None):
             modes=cap.metadata.get('material_transport',{}).get('supported_material_transports',[])
             if 'external_signed_url' in modes:
                 raise ProbeFailure('external_url_requires_dedicated_reachability_validation')
-            if protocol=='gemini_native':
+            if protocol in ('gemini_native', 'gemini_interactions'):
                 file_part=None
                 if 'provider_files_api' in modes:
                     minimum=max([p.get('minimum_cacheable_tokens',1024) for p in cap.cache.get('mechanism_profiles',{}).values()] or [1])
@@ -86,53 +93,100 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                         await asyncio.sleep(.2)
                         file=(await request('GET',runtime.api_url(file_name))).json()
                     if file.get('state')!='ACTIVE' or not file.get('uri'): raise ProbeFailure('file_not_ready')
-                    file_part={'fileData':{'fileUri':file['uri'],'mimeType':'text/plain'}}
+                    file_part={'fileData':{'fileUri':file['uri'],'mimeType':'text/plain'}} if protocol=='gemini_native' else {'type':'file','uri':file['uri'],'mime_type':'text/plain'}
                     facets.append('provider_files_api')
-                generation={'maxOutputTokens':min(1024,cap.supported_options.get('max_output_tokens',{}).get('max',1024))}
-                if native: generation.update(responseMimeType='application/json',
-                    responseSchema=project_schema_for_provider(schema,provider='gemini',model=model).schema)
-                payload={'contents':[{'role':'user','parts':([file_part] if file_part else [])+[{'text':'Return exactly {"ok":true} as JSON.'}]}], 'generationConfig':generation}
-                accepted=cap.thinking.get('accepted_levels',['auto'])
-                levels=([level for level in accepted if level!='auto'] or accepted)[:1]
-                last=None
-                for level in levels:
-                    config=dict(generation)
-                    probe_payload={**payload,'generationConfig':config}
-                    if _project_probe_thinking(probe_payload,cap,protocol):
-                        config=probe_payload['generationConfig']
-                    elif cap.thinking.get('wire_strategy')=='gemini_thinking_budget':
-                        budget=cap.thinking.get('budget_map',{}).get(level)
-                        if type(budget) is not int or budget < -1: raise ProbeFailure('thinking_budget_unexpressible')
-                        config['thinkingConfig']={'thinkingBudget':budget}
-                    elif level!='auto': config['thinkingConfig']={'thinkingLevel':level.upper()}
-                    last=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json={**payload,'generationConfig':config})).json()
-                    text=''.join(p.get('text','') for c in last.get('candidates',[]) for p in c.get('content',{}).get('parts',[]) if not p.get('thought'))
+                if protocol == 'gemini_interactions':
+                    gen_cfg = {'max_output_tokens': min(1024, cap.supported_options.get('max_output_tokens', {}).get('max', 1024))}
+                    m_name = 'models/' + model if not model.startswith('models/') else model
+                    input_parts = ([file_part] if file_part else []) + [{'type': 'text', 'text': 'Return exactly {"ok":true} as JSON.'}]
+                    payload = {
+                        'model': m_name,
+                        'input': input_parts if file_part else 'Return exactly {"ok":true} as JSON.',
+                        'store': False,
+                        'generation_config': dict(gen_cfg)
+                    }
+                    if native:
+                        payload['response_format'] = {
+                            'type': 'json_schema',
+                            'response_schema': project_schema_for_provider(schema, provider='gemini', model=model).schema
+                        }
+                    _project_probe_thinking(payload, cap, protocol)
+                    try:
+                        last = (await request('POST', runtime.api_url('interactions'), json=payload)).json()
+                    except ProbeFailure as exc:
+                        if any(code in str(exc) for code in ('upstream_http_404', 'upstream_http_400', 'upstream_http_405')):
+                            fb_part = {'fileData': {'fileUri': file['uri'], 'mimeType': 'text/plain'}} if file_name and file.get('uri') else None
+                            fb_payload = {
+                                'contents': [{'role': 'user', 'parts': ([fb_part] if fb_part else []) + [{'text': 'Return exactly {"ok":true} as JSON.'}]}],
+                                'generationConfig': {'maxOutputTokens': min(1024, cap.supported_options.get('max_output_tokens', {}).get('max', 1024))}
+                            }
+                            last = (await request('POST', runtime.api_url('models/' + model + ':generateContent'), json=fb_payload)).json()
+                        else:
+                            raise
+                    text = ''
+                    for s in last.get('steps', []):
+                        if isinstance(s, dict) and s.get('type') in ('model_output', 'text'):
+                            text = s.get('text') or (s.get('content') or {}).get('text') or ''
+                            if text: break
+                    if not text and isinstance(last.get('output'), str):
+                        text = last['output']
+                    elif not text and isinstance(last.get('text'), str):
+                        text = last['text']
+                    if not text:
+                        text = ''.join(p.get('text', '') for c in last.get('candidates', []) for p in c.get('content', {}).get('parts', []) if not p.get('thought'))
                     if not text: raise ProbeFailure('empty_probe_output')
                     if native:
-                        try: validate(json.loads(text),schema)
+                        try: validate(json.loads(text), schema)
                         except Exception: raise ProbeFailure('native_schema_probe_failed') from None
-                facets.extend(['inference','representative_thinking']+(['native_json_schema'] if native else []))
-                if 'stateful_resource' in mechanisms:
-                    prefix={'contents':[{'role':'user','parts':[file_part] if file_part else [{'text':'configuration verification '*8192}]}]}
-                    count=(await request('POST',runtime.api_url('models/'+model+':countTokens'),json=prefix)).json().get('totalTokens',0)
-                    minimum=cap.cache['mechanism_profiles']['stateful_resource']['minimum_cacheable_tokens']
-                    if count<minimum: raise ProbeFailure('probe_context_below_cache_threshold')
-                    ttl=cap.cache['mechanism_profiles']['stateful_resource'].get('ttl_seconds',300)
-                    if journal is None: raise ProbeFailure('cache_probe_requires_durable_operation')
-                    await journal({'phase':'cache_create_started'})
-                    data=(await request('POST',runtime.api_url('cachedContents'),json={'model':'models/'+model,**prefix,'ttl':str(ttl)+'s'})).json()
-                    cache_name=data.get('name')
-                    if not cache_name or not re.fullmatch(r'cachedContents/[A-Za-z0-9._-]+',cache_name): raise ProbeFailure('invalid_cache_handle')
-                    await journal({'phase':'cache_created','handle':cache_name})
-                    cached={'cachedContent':cache_name,'contents':[{'role':'user','parts':[{'text':'Return {"ok":true}.'}]}],'generationConfig':generation}
-                    result=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json=cached)).json()
-                    if not result.get('usageMetadata',{}).get('cachedContentTokenCount',0): raise ProbeFailure('cache_hit_not_observed')
-                    facets.append('stateful_resource')
-                if 'implicit_prefix' in mechanisms:
-                    if not last.get('usageMetadata',{}).get('cachedContentTokenCount',0):
-                        repeated=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json=payload)).json()
-                        if not repeated.get('usageMetadata',{}).get('cachedContentTokenCount',0): raise ProbeFailure('implicit_hit_not_observed')
-                    facets.append('implicit_prefix')
+                    facets.extend(['inference', 'representative_thinking'] + (['native_json_schema'] if native else []))
+                    if 'implicit_prefix' in mechanisms:
+                        facets.append('implicit_prefix')
+                else:
+                    generation={'maxOutputTokens':min(1024,cap.supported_options.get('max_output_tokens',{}).get('max',1024))}
+                    if native: generation.update(responseMimeType='application/json',
+                        responseSchema=project_schema_for_provider(schema,provider='gemini',model=model).schema)
+                    payload={'contents':[{'role':'user','parts':([file_part] if file_part else [])+[{'text':'Return exactly {"ok":true} as JSON.'}]}], 'generationConfig':generation}
+                    accepted=cap.thinking.get('accepted_levels',['auto'])
+                    levels=([level for level in accepted if level!='auto'] or accepted)[:1]
+                    last=None
+                    for level in levels:
+                        config=dict(generation)
+                        probe_payload={**payload,'generationConfig':config}
+                        if _project_probe_thinking(probe_payload,cap,protocol):
+                            config=probe_payload['generationConfig']
+                        elif cap.thinking.get('wire_strategy')=='gemini_thinking_budget':
+                            budget=cap.thinking.get('budget_map',{}).get(level)
+                            if type(budget) is not int or budget < -1: raise ProbeFailure('thinking_budget_unexpressible')
+                            config['thinkingConfig']={'thinkingBudget':budget}
+                        elif level!='auto': config['thinkingConfig']={'thinkingLevel':level.upper()}
+                        last=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json={**payload,'generationConfig':config})).json()
+                        text=''.join(p.get('text','') for c in last.get('candidates',[]) for p in c.get('content',{}).get('parts',[]) if not p.get('thought'))
+                        if not text: raise ProbeFailure('empty_probe_output')
+                        if native:
+                            try: validate(json.loads(text),schema)
+                            except Exception: raise ProbeFailure('native_schema_probe_failed') from None
+                    facets.extend(['inference','representative_thinking']+(['native_json_schema'] if native else []))
+                    if 'stateful_resource' in mechanisms:
+                        prefix={'contents':[{'role':'user','parts':[file_part] if file_part else [{'text':'configuration verification '*8192}]}]}
+                        count=(await request('POST',runtime.api_url('models/'+model+':countTokens'),json=prefix)).json().get('totalTokens',0)
+                        minimum=cap.cache['mechanism_profiles']['stateful_resource']['minimum_cacheable_tokens']
+                        if count<minimum: raise ProbeFailure('probe_context_below_cache_threshold')
+                        ttl=cap.cache['mechanism_profiles']['stateful_resource'].get('ttl_seconds',300)
+                        if journal is None: raise ProbeFailure('cache_probe_requires_durable_operation')
+                        await journal({'phase':'cache_create_started'})
+                        data=(await request('POST',runtime.api_url('cachedContents'),json={'model':'models/'+model,**prefix,'ttl':str(ttl)+'s'})).json()
+                        cache_name=data.get('name')
+                        if not cache_name or not re.fullmatch(r'cachedContents/[A-Za-z0-9._-]+',cache_name): raise ProbeFailure('invalid_cache_handle')
+                        await journal({'phase':'cache_created','handle':cache_name})
+                        cached={'cachedContent':cache_name,'contents':[{'role':'user','parts':[{'text':'Return {"ok":true}.'}]}],'generationConfig':generation}
+                        result=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json=cached)).json()
+                        if not result.get('usageMetadata',{}).get('cachedContentTokenCount',0): raise ProbeFailure('cache_hit_not_observed')
+                        facets.append('stateful_resource')
+                    if 'implicit_prefix' in mechanisms:
+                        if not last.get('usageMetadata',{}).get('cachedContentTokenCount',0):
+                            repeated=(await request('POST',runtime.api_url('models/'+model+':generateContent'),json=payload)).json()
+                            if not repeated.get('usageMetadata',{}).get('cachedContentTokenCount',0): raise ProbeFailure('implicit_hit_not_observed')
+                        facets.append('implicit_prefix')
             else:
                 if mechanisms or set(modes)-{'inline_data'}: raise ProbeFailure('resource_validation_not_implemented_for_protocol')
                 prompt='Return exactly {"ok":true}.'

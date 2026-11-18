@@ -383,5 +383,114 @@ class TestControlPlaneInteractions(unittest.TestCase):
         self.assertTrue(cap.continuation.get("requires_upstream_store"))
 
 
+class TestGeminiInteractionsDeploymentValidation(unittest.IsolatedAsyncioTestCase):
+    async def test_verify_supply_gemini_interactions_qualifies_ready(self):
+        """verify_supply qualifies gemini_interactions offering to ready state without ProbeFailure."""
+        from pathlib import Path
+        from unittest.mock import patch
+        import httpx
+        from app.control_plane.governance.deployment_validation import verify_supply
+        from app.control_plane.governance.workbook import compile_workbook
+
+        import os
+        settings = Settings(
+            relay_api_token="test",
+            supabase_url="https://test.supabase.co",
+            supabase_secret_key="test",
+            deployment_id="railway",
+        )
+        content = Path(r"config\model_management_v2.xlsx").read_bytes()
+        plane, targets = compile_workbook(content, settings)
+
+        target_supply = None
+        for s in plane.offerings.values():
+            if s.model_pattern == "gemini-3.1-flash-lite" and s.connection_id == "google_gemini":
+                target_supply = s
+                break
+        self.assertIsNotNone(target_supply)
+
+        def mock_send(request: httpx.Request):
+            url_str = str(request.url)
+            if "upload" in url_str:
+                if request.headers.get("X-Goog-Upload-Command") == "start":
+                    return httpx.Response(
+                        200,
+                        headers={"x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=mock123"},
+                    )
+                return httpx.Response(
+                    200,
+                    json={"file": {"name": "files/mock-test-file", "state": "ACTIVE", "uri": "https://generativelanguage.googleapis.com/v1beta/files/mock-test-file"}},
+                )
+            elif "files/mock-test-file" in url_str:
+                if request.method == "DELETE":
+                    return httpx.Response(200, json={"ok": True})
+                return httpx.Response(
+                    200,
+                    json={"name": "files/mock-test-file", "state": "ACTIVE", "uri": "https://generativelanguage.googleapis.com/v1beta/files/mock-test-file"},
+                )
+            elif "interactions" in url_str:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "interactions/probe_id",
+                        "steps": [{"type": "model_output", "text": "{\"ok\":true}"}],
+                    },
+                )
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{\"ok\":true}"}]}}]})
+
+        transport = httpx.MockTransport(mock_send)
+        with patch.dict(os.environ, {"GOOGLE_GEMINI_API_KEY": "mock-api-key"}):
+            with patch("app.control_plane.governance.deployment_validation.provider_transport", return_value=transport):
+                result = await verify_supply(settings, plane, target_supply)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertIn("inference", result["facets"])
+        self.assertIn("provider_files_api", result["facets"])
+
+    async def test_verify_supply_gemini_interactions_fallback_on_404(self):
+        """verify_supply falls back to generateContent probe if /interactions returns 404."""
+        from pathlib import Path
+        from unittest.mock import patch
+        import httpx
+        from app.control_plane.governance.deployment_validation import verify_supply
+        from app.control_plane.governance.workbook import compile_workbook
+        import os
+
+        settings = Settings(
+            relay_api_token="test",
+            supabase_url="https://test.supabase.co",
+            supabase_secret_key="test",
+            deployment_id="railway",
+        )
+        content = Path(r"config\model_management_v2.xlsx").read_bytes()
+        plane, targets = compile_workbook(content, settings)
+        target_supply = next(s for s in plane.offerings.values() if s.model_pattern == "gemini-3.1-flash-lite" and s.connection_id == "google_gemini")
+
+        def mock_send(request: httpx.Request):
+            url_str = str(request.url)
+            if "upload" in url_str:
+                if request.headers.get("X-Goog-Upload-Command") == "start":
+                    return httpx.Response(200, headers={"x-goog-upload-url": "https://generativelanguage.googleapis.com/upload/v1beta/files?upload_id=mock123"})
+                return httpx.Response(200, json={"file": {"name": "files/mock-test-file", "state": "ACTIVE", "uri": "https://generativelanguage.googleapis.com/v1beta/files/mock-test-file"}})
+            elif "files/mock-test-file" in url_str:
+                if request.method == "DELETE":
+                    return httpx.Response(200, json={"ok": True})
+                return httpx.Response(200, json={"name": "files/mock-test-file", "state": "ACTIVE", "uri": "https://generativelanguage.googleapis.com/v1beta/files/mock-test-file"})
+            elif "interactions" in url_str:
+                return httpx.Response(404, json={"error": {"message": "Not Found"}})
+            elif "generateContent" in url_str:
+                return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{\"ok\":true}"}]}}]})
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(mock_send)
+        with patch.dict(os.environ, {"GOOGLE_GEMINI_API_KEY": "mock-api-key"}):
+            with patch("app.control_plane.governance.deployment_validation.provider_transport", return_value=transport):
+                result = await verify_supply(settings, plane, target_supply)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertIn("inference", result["facets"])
+        self.assertIn("provider_files_api", result["facets"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,15 @@ def project_thinking(payload, snapshot, protocol):
     if not registered or protocol not in registered[0] or action not in registered[1]:
         raise ProviderRequestError("THINKING_PROJECTION_UNSUPPORTED", "Frozen thinking has no registered projection")
     if action == "omit": return True
-    if protocol in {"gemini_native", "gemini_interactions"}:
+    if protocol == "gemini_interactions":
+        cfg = payload.setdefault("generation_config", {})
+        if action == "send_level":
+            cfg["thinking_level"] = str(level).upper()
+        elif action == "send_budget":
+            cfg["thinking_budget"] = int(budget)
+        elif action == "send_toggle" and level == "disabled":
+            cfg["thinking_budget"] = 0
+    elif protocol == "gemini_native":
         native = {"thinkingLevel": level.upper()} if action == "send_level" else {"thinkingBudget": 0 if action == "send_toggle" else budget}
         payload.setdefault("generationConfig", {})["thinkingConfig"] = native
     elif protocol in {"responses", "chat_completions", "moonshot_chat"}:

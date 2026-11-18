@@ -91,7 +91,7 @@ def validate_supply(plane, supply, evidence):
         raise ValueError("This protocol implementation requires bearer_header")
     if connection.protocol == "claude_messages" and connection.auth_type != "x_api_key_header":
         raise ValueError("Claude implementation requires x_api_key_header")
-    if connection.protocol == "gemini_native" and connection.auth_type != "x_goog_api_key_header":
+    if connection.protocol in {"gemini_native", "gemini_interactions"} and connection.auth_type != "x_goog_api_key_header":
         raise ValueError("Gemini SDK implementation requires x_goog_api_key_header")
     if not connection.credential_ref or not connection.account_id or not connection.region:
         raise ValueError("Managed connection requires credential_ref, account_id and region")
@@ -114,7 +114,7 @@ def validate_supply(plane, supply, evidence):
         from string import Formatter
         fields = [field for _, field, _, _ in Formatter().parse(affinity.get("value_template", "{token}")) if field]
         if any(field not in {"token", "epoch", "session_id"} for field in fields): raise ValueError("Invalid affinity format template")
-    if profile.protocol == "gemini_native":
+    if profile.protocol in {"gemini_native", "gemini_interactions"}:
         thinking = contract.thinking
         if thinking.get("wire_strategy") not in {"gemini_thinking_level", "gemini_thinking_budget", None}:
             raise ValueError("Gemini thinking strategy has no implementation")
