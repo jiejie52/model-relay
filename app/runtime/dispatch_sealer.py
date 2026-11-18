@@ -95,11 +95,20 @@ class AtomicDispatchSealer:
             from app.observability import info as log_info
             log_info(logger, "material_placement_pre_seal", request_id=state.request_id, session_id=state.session_id,
                 **material_metrics(state.snapshot, state.provider_physical_plan, state.historical_pinned_bindings, cache_binding=state.cache_binding))
+        continuation_binding_data = None
+        if getattr(state, "continuation_binding", None) is not None:
+            continuation_binding_data = (
+                state.continuation_binding.to_dict()
+                if hasattr(state.continuation_binding, "to_dict")
+                else state.continuation_binding
+            )
         inputs = dict(snapshot=state.snapshot, session=state.session, history=state.history,
             material_ids=state.material_ids, material_bindings=state.material_bindings,
             tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"],
             request_id=state.request_id, session_id=state.session_id, context_plan=state.context_plan,
-            cache_execution_binding=state.cache_binding, execution_fence=state.fence.canonical() if state.fence else None,
+            cache_execution_binding=state.cache_binding,
+            continuation_execution_binding=continuation_binding_data,
+            execution_fence=state.fence.canonical() if state.fence else None,
             provider_physical_plan=state.provider_physical_plan,
             affinity_headers={key: state.wire["affinity_token"] for key in (
                 state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
@@ -116,7 +125,47 @@ class AtomicDispatchSealer:
             inputs.update(material_occurrences=state.projected_material_occurrences,
                 historical_bindings=state.historical_pinned_bindings)
         prepared_payload_hash = dispatch_input_digest(**inputs)
-        if state.is_v3:
+
+        active_anchor_id = None
+        fallback_occurred = False
+        if state.continuation_binding is not None:
+            active_anchor_id = (
+                getattr(state.continuation_binding, "active_anchor_id", None)
+                if hasattr(state.continuation_binding, "active_anchor_id")
+                else (state.continuation_binding.get("active_anchor_id") if isinstance(state.continuation_binding, dict) else None)
+            )
+            fallback_occurred = (
+                getattr(state.continuation_binding, "fallback_occurred", False)
+                if hasattr(state.continuation_binding, "fallback_occurred")
+                else (state.continuation_binding.get("fallback_occurred", False) if isinstance(state.continuation_binding, dict) else False)
+            )
+
+        has_active_continuation = bool(active_anchor_id and not fallback_occurred)
+
+        if has_active_continuation:
+            hold_seconds = 300
+            if isinstance(state.snapshot, dict) and "continuation_hold_seconds" in state.snapshot:
+                hold_seconds = int(state.snapshot["continuation_hold_seconds"])
+            sealed = await self.repo.seal_continuation_and_dispatch_v90(
+                request_id=state.request_id,
+                anchor_id=active_anchor_id,
+                fence_owner=state.fence.owner if state.fence else None,
+                fence_epoch=state.fence.epoch if state.fence else None,
+                hold_seconds=hold_seconds,
+            )
+            if not sealed:
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                if state.fence is not None:
+                    raise ExecutionLeaseLost("Continuation dispatch seal was rejected by execution fence")
+                raise ProviderRequestError(
+                    "CONTINUATION_SEAL_REJECTED",
+                    "Continuation dispatch seal was rejected; Provider dispatch is forbidden",
+                )
+            state.execution_snapshot = dict(state.snapshot)
+            state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+            if isinstance(state.snapshot, dict):
+                state.snapshot["_relay_continuation_execution"] = continuation_binding_data
+        elif state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
                 request_id=state.request_id,
@@ -161,6 +210,10 @@ class AtomicDispatchSealer:
                 )
             state.execution_snapshot = dict(state.snapshot)
             state.execution_snapshot["_relay_cache_execution"] = state.cache_binding
+            if continuation_binding_data is not None:
+                state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+                if isinstance(state.snapshot, dict):
+                    state.snapshot["_relay_continuation_execution"] = continuation_binding_data
         else:
             if state.fence is not None:
                 from app.runtime.execution_guard import ExecutionLeaseLost
@@ -173,6 +226,12 @@ class AtomicDispatchSealer:
                 await self.repo.update_request(state.request_row["id"], {
                     "provider_dispatch_state": "dispatch_started",
                     "started_at": state.request_row.get("started_at") or utcnow().isoformat()})
+            if not state.execution_snapshot:
+                state.execution_snapshot = dict(state.snapshot)
+            if continuation_binding_data is not None:
+                state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+                if isinstance(state.snapshot, dict):
+                    state.snapshot["_relay_continuation_execution"] = continuation_binding_data
 
 
         state.sealed_bundle = SealedDispatchBundle(**{**inputs, "snapshot": state.execution_snapshot or state.snapshot},

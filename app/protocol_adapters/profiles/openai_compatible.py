@@ -28,6 +28,7 @@ class OpenAICompatibleResponsesProvider:
         "include",
         "instructions",
         "prompt_cache_key",
+        "previous_interaction_id",
     }
 
     def __init__(
@@ -98,6 +99,7 @@ class OpenAICompatibleResponsesProvider:
             provider=provider,
             model=model,
         )
+        self._apply_continuation(payload, request_snapshot)
 
         self._apply_model_options(payload, request_snapshot)
 
@@ -282,6 +284,39 @@ class OpenAICompatibleResponsesProvider:
         key = prefix.get("prompt_cache_key")
         if key:
             payload["prompt_cache_key"] = str(key)
+
+    @classmethod
+    def _apply_continuation(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        """Inject continuation handle (e.g. previous_interaction_id) safely into payload."""
+        prev_id = snapshot.get("previous_interaction_id")
+        upstream_handle = snapshot.get("upstream_handle")
+        if not prev_id and isinstance(upstream_handle, str):
+            prev_id = upstream_handle
+        elif not prev_id and isinstance(upstream_handle, dict):
+            prev_id = (
+                upstream_handle.get("previous_interaction_id")
+                or upstream_handle.get("interaction_id")
+                or upstream_handle.get("response_id")
+                or upstream_handle.get("session_id")
+                or upstream_handle.get("id")
+            )
+        if not prev_id:
+            binding = snapshot.get("_relay_continuation_execution") or snapshot.get("continuation_execution_binding")
+            if isinstance(binding, dict) and not binding.get("fallback_occurred") and binding.get("mechanism") != "none":
+                b_handle = binding.get("upstream_handle")
+                if isinstance(b_handle, str):
+                    prev_id = b_handle
+                elif isinstance(b_handle, dict):
+                    prev_id = (
+                        b_handle.get("previous_interaction_id")
+                        or b_handle.get("interaction_id")
+                        or b_handle.get("response_id")
+                        or b_handle.get("session_id")
+                        or b_handle.get("id")
+                    )
+
+        if prev_id:
+            payload["previous_interaction_id"] = str(prev_id)
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:

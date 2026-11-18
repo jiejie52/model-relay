@@ -15,6 +15,7 @@ class FrozenExecutionPlan:
     execution_fence: ExecutionFence | None
     snapshot: dict[str, Any]
     history: list[dict[str, Any]] = field(default_factory=list)
+    continuation_intent_plan: dict[str, Any] | None = None
     connection_spec_hash: str = field(default='',kw_only=True)
     account_scope_id: str = field(default='',kw_only=True)
 
@@ -31,5 +32,7 @@ class FrozenExecutionPlan:
             raise ValueError('Frozen execution connection identity mismatch')
         object.__setattr__(self,'connection_spec_hash',spec)
         object.__setattr__(self,'account_scope_id',scope)
-        for name in ("request_record", "session_record", "effective_semantics", "context_plan", "cache_intent_plan", "snapshot", "history"):
-            object.__setattr__(self, name, freeze_json(getattr(self, name)))
+        for name in ("request_record", "session_record", "effective_semantics", "context_plan", "cache_intent_plan", "snapshot", "history", "continuation_intent_plan"):
+            val = getattr(self, name)
+            if val is not None:
+                object.__setattr__(self, name, freeze_json(val))

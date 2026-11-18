@@ -32,7 +32,12 @@ class ExecutionFencedAsyncTransport(httpx.AsyncBaseTransport):
             from urllib.parse import urlsplit
             if request.url.scheme != "https" or request.url.host not in self.connection.allowed_hosts():
                 raise ValueError("CONNECTION_HOST_FORBIDDEN")
-        states = ("dispatch_started",) if wire_phase() == "inference" else ("not_sent",)
+        path = request.url.path
+        is_inference_or_continuation = (
+            wire_phase() in ("inference", "continuation", "interaction")
+            or any(seg in path for seg in ("/interactions", "/v1beta/interactions", "/v1/interactions", "continuation"))
+        )
+        states = ("dispatch_started",) if is_inference_or_continuation else ("not_sent",)
         await ensure_execution_allowed(states=states)
         guard=current_execution_guard()
         if guard is None:return await self.wrapped.handle_async_request(request)

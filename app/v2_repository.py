@@ -879,6 +879,7 @@ class RelayV2Repository(RelayRepository):
         fence_owner: str,
         fence_epoch: int,
         material_occurrences: list | None = None,
+        continuation_anchor: dict[str, Any] | None = None,
     ) -> bool:
         result = await self._placement_rpc(
             "complete_relay_request_v66",
@@ -894,6 +895,7 @@ class RelayV2Repository(RelayRepository):
                 "p_fence_owner": fence_owner,
                 "p_fence_epoch": fence_epoch,
                 **({"_material_occurrences": material_occurrences} if material_occurrences is not None else {}),
+                **({"_continuation_anchor": continuation_anchor} if continuation_anchor is not None else {}),
             },
         )
         return bool(result)
@@ -1186,11 +1188,183 @@ class RelayV2Repository(RelayRepository):
         args = dict(arguments)
         if name in {"accept_relay_request_v3", "accept_relay_request_v66"} and (args.get("p_metadata") or {}).get("_relay_material_placement"):
             return await self.backend.rpc("accept_relay_request_v89", {"p_args": args})
+        if "_continuation_anchor" in args:
+            anchor = args.pop("_continuation_anchor")
+            occurrences = args.pop("_material_occurrences", None)
+            return await self.complete_continuation_request_v90(
+                p_args=args,
+                p_material_occurrences=occurrences,
+                p_continuation_anchor=anchor,
+            )
         if "_material_occurrences" in args:
             occurrences = args.pop("_material_occurrences")
             return await self.backend.rpc("complete_material_request_v89", {
                 "p_args": args, "p_material_occurrences": occurrences})
         return await self.backend.rpc(name, args)
+
+    async def find_active_continuation_anchor(
+        self,
+        session_id: str | UUID,
+        history_version: int,
+        tenant_id: str | None = None,
+        conversation_hash: str | None = None,
+    ) -> dict[str, Any] | None:
+        filters: dict[str, str] = {
+            "session_id": f"eq.{session_id}",
+            "history_version": f"eq.{history_version}",
+            "state": "eq.active",
+        }
+        if tenant_id:
+            filters["tenant_id"] = f"eq.{tenant_id}"
+        if conversation_hash:
+            filters["conversation_hash"] = f"eq.{conversation_hash}"
+        rows = await self.backend.select(
+            "relay_continuation_anchors",
+            filters=filters,
+            order="created_at.desc",
+            limit=5,
+        )
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            expires_at = row.get("expires_at")
+            if not expires_at:
+                return row
+            try:
+                parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                if parsed > now:
+                    return row
+            except Exception:
+                continue
+        return None
+
+    async def get_continuation_anchor(self, anchor_id: str | UUID) -> dict[str, Any] | None:
+        rows = await self.backend.select(
+            "relay_continuation_anchors",
+            filters={"id": f"eq.{anchor_id}"},
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    async def seal_continuation_and_dispatch_v90(
+        self,
+        request_id: str | UUID | None = None,
+        anchor_id: str | UUID | None = None,
+        fence_owner: str | None = None,
+        fence_epoch: int | None = None,
+        hold_seconds: int = 300,
+        *,
+        p_request_id: str | UUID | None = None,
+        p_anchor_id: str | UUID | None = None,
+        p_fence_owner: str | None = None,
+        p_fence_epoch: int | None = None,
+        p_hold_seconds: int | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        req_id = p_request_id or request_id or kwargs.get("request_id")
+        anc_id = p_anchor_id or anchor_id or kwargs.get("anchor_id")
+        f_owner = p_fence_owner or fence_owner or kwargs.get("fence_owner")
+        f_epoch = (
+            p_fence_epoch
+            if p_fence_epoch is not None
+            else (fence_epoch if fence_epoch is not None else kwargs.get("fence_epoch"))
+        )
+        h_seconds = (
+            p_hold_seconds
+            if p_hold_seconds is not None
+            else (hold_seconds if hold_seconds is not None else kwargs.get("hold_seconds", 300))
+        )
+        result = await self.backend.rpc(
+            "seal_continuation_and_dispatch_v90",
+            {
+                "p_request_id": str(req_id) if req_id is not None else None,
+                "p_anchor_id": str(anc_id) if anc_id is not None else None,
+                "p_fence_owner": f_owner,
+                "p_fence_epoch": f_epoch,
+                "p_hold_seconds": h_seconds,
+            },
+        )
+        return bool(result)
+
+    async def release_continuation_pins_v90(
+        self,
+        request_id: str | UUID | None = None,
+        *,
+        p_request_id: str | UUID | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        req_id = p_request_id or request_id or kwargs.get("request_id")
+        return await self.backend.rpc(
+            "release_continuation_pins_v90",
+            {"p_request_id": str(req_id) if req_id is not None else None},
+        )
+
+    async def complete_continuation_request_v90(
+        self,
+        p_args: dict[str, Any] | None = None,
+        p_material_occurrences: list[Any] | None = None,
+        p_continuation_anchor: dict[str, Any] | None = None,
+        *,
+        request_id: str | UUID | None = None,
+        session_id: str | UUID | None = None,
+        expected_history_version: int | None = None,
+        history_object_id: str | None = None,
+        result_object_id: str | None = None,
+        output_object_id: str | None = None,
+        compact_result: dict[str, Any] | None = None,
+        provider_response_id: str | None = None,
+        fence_owner: str | None = None,
+        fence_epoch: int | None = None,
+        material_occurrences: list[Any] | None = None,
+        continuation_anchor: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> bool:
+        args = dict(p_args) if p_args is not None else {}
+        if request_id is not None:
+            args["p_request_id"] = str(request_id)
+        if session_id is not None:
+            args["p_session_id"] = str(session_id)
+        if expected_history_version is not None:
+            args["p_expected_history_version"] = expected_history_version
+        if history_object_id is not None:
+            args["p_history_object_id"] = history_object_id
+        if result_object_id is not None:
+            args["p_result_object_id"] = result_object_id
+        if output_object_id is not None:
+            args["p_output_object_id"] = output_object_id
+        if compact_result is not None:
+            args["p_compact_result"] = compact_result
+        if provider_response_id is not None:
+            args["p_provider_response_id"] = provider_response_id
+        if fence_owner is not None:
+            args["p_fence_owner"] = fence_owner
+        if fence_epoch is not None:
+            args["p_fence_epoch"] = fence_epoch
+        for k, v in kwargs.items():
+            if k.startswith("p_"):
+                args[k] = v
+
+        occurrences = (
+            p_material_occurrences
+            if p_material_occurrences is not None
+            else material_occurrences
+        )
+        anchor = (
+            p_continuation_anchor
+            if p_continuation_anchor is not None
+            else continuation_anchor
+        )
+
+        result = await self.backend.rpc(
+            "complete_continuation_request_v90",
+            {
+                "p_args": args,
+                "p_material_occurrences": occurrences,
+                "p_continuation_anchor": anchor,
+            },
+        )
+        return bool(result)
 
     async def seal_materials_and_dispatch_v89(self, *, material_occurrences, historical_bindings, safety_seconds, **kwargs):
         return bool(await self.backend.rpc("seal_materials_and_dispatch_v89", {

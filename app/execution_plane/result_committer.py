@@ -11,6 +11,10 @@ from app.protocol_adapters.base import ProviderRequestError
 from app.observability import elapsed_ms, error as log_error, info as log_info, now_ms
 from app.execution_plane.structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
 from app.utils import json_bytes, truncate_utf8, utcnow
+from uuid import uuid4
+
+from app.core.continuation_fingerprint import build_parent_head_fingerprint
+from app.runtime.continuation_contracts import ContinuationAnchorRecord
 
 
 logger = logging.getLogger("model-relay-runtime")
@@ -48,7 +52,7 @@ class ResultCommitter:
         request_id, session_id = str(request_row["id"]), str(request_row["session_id"])
         result = fact.standardized_result
         contract_observation = None
-        if snapshot.get("schema_version") == "relay-request/2.4" or snapshot.get("thinking") is not None:
+        if snapshot.get("schema_version") in {"relay-request/2.4", "relay-request/2.5"} or snapshot.get("thinking") is not None:
             try:
                 contract_observation = validate_execution_observations(snapshot, result.observed or {})
             except ProviderRequestError as exc:
@@ -70,7 +74,7 @@ class ResultCommitter:
         cumulative_history = snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn"
         fence = plan.execution_fence
         lease_owner, lease_epoch = (fence.owner, fence.epoch) if fence else (None, None)
-        is_v3 = snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}
+        is_v3 = snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}
         raw_object_id, output_object_id = fact.provisional_raw_object_id, fact.provisional_output_object_id
         execution_started_ms = now_ms()
         self._check_observed_contract(
@@ -183,6 +187,92 @@ class ResultCommitter:
                 int(request_row["expected_history_version"]) + 1,
             )
 
+        continuation_anchor = None
+        continuation_intent = snapshot.get("continuation_intent_plan") or getattr(plan, "continuation_intent_plan", None)
+        c_mode = None
+        if isinstance(continuation_intent, dict):
+            c_mode = continuation_intent.get("continuation_mode")
+        elif continuation_intent is not None:
+            c_mode = getattr(continuation_intent, "continuation_mode", None)
+        if c_mode is None:
+            c_mode = session.get("continuation_mode") or "auto"
+
+        if str(c_mode).lower() != "off" and cumulative_history and session.get("context_policy") == "conversation":
+            parent_aid = None
+            if isinstance(continuation_intent, dict):
+                parent_aid = continuation_intent.get("parent_anchor_id")
+            elif continuation_intent is not None:
+                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
+
+            anchor_id = str(uuid4())
+            new_history_version = int(request_row["expected_history_version"]) + 1
+            instructions = (
+                snapshot.get("instructions")
+                or session.get("instructions")
+                or session.get("system_instructions")
+            )
+            head_fp = build_parent_head_fingerprint(new_history, system_instructions=instructions)
+
+            upstream_h = (
+                (result.observed or {}).get("upstream_handle")
+                or (result.observed or {}).get("continuation_handle")
+                or observation.get("upstream_handle")
+                or (observation.get("continuation_summary") or {}).get("upstream_handle")
+            )
+            mechanism = (
+                (observation.get("continuation_summary") or {}).get("mechanism")
+                or (observation.get("_relay_continuation") or {}).get("mechanism")
+                or c_mode
+                or "auto"
+            )
+            anchor_meta = {
+                **({"parent_anchor_id": parent_aid} if parent_aid else {}),
+                "created_by_request_id": request_id,
+            }
+            anchor_rec = ContinuationAnchorRecord(
+                anchor_id=anchor_id,
+                session_id=session_id,
+                history_version=new_history_version,
+                fingerprint=head_fp,
+                mechanism=str(mechanism),
+                upstream_handle=upstream_h,
+                tenant_id=str(request_row.get("tenant_id") or session.get("tenant_id") or ""),
+                conversation_hash=str(request_row.get("conversation_hash") or session.get("conversation_hash") or ""),
+                turn_index=len(new_history) - 1,
+                metadata=anchor_meta,
+            )
+            continuation_anchor = anchor_rec.to_dict()
+            if parent_aid:
+                continuation_anchor["parent_anchor_id"] = parent_aid
+            continuation_anchor["head_fingerprint"] = head_fp
+            continuation_anchor["provider"] = snapshot.get("provider")
+            continuation_anchor["connection_id"] = snapshot.get("connection_id")
+            continuation_anchor["account_scope_hash"] = snapshot.get("account_scope_hash")
+            continuation_anchor["state"] = "active"
+
+        continuation_summary = None
+        if observation.get("continuation_summary") is not None:
+            continuation_summary = dict(observation["continuation_summary"])
+        elif observation.get("_relay_continuation") is not None:
+            continuation_summary = dict(observation["_relay_continuation"])
+        elif continuation_anchor is not None or str(c_mode).lower() != "off":
+            parent_aid = None
+            if isinstance(continuation_intent, dict):
+                parent_aid = continuation_intent.get("parent_anchor_id")
+            elif continuation_intent is not None:
+                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
+            continuation_summary = {
+                "continuation_mode": c_mode,
+                "mechanism": str(mechanism) if continuation_anchor else "none",
+                "active_anchor_id": (continuation_anchor.get("anchor_id") if continuation_anchor else None),
+                "parent_anchor_id": parent_aid if continuation_anchor else None,
+                "bound_turns_count": len(new_history) if (continuation_anchor and 'new_history' in locals()) else None,
+                "fallback_occurred": False,
+                "plan_hash": (continuation_intent.get("plan_hash") if isinstance(continuation_intent, dict) else getattr(continuation_intent, "plan_hash", None)),
+            }
+        if continuation_summary is not None:
+            compact_result["_relay_continuation"] = continuation_summary
+
         if is_v3:
             ok = await self.repo.complete_request_v3(
                 request_id=request_id,
@@ -196,6 +286,7 @@ class ResultCommitter:
                 fence_owner=fence.owner,
                 fence_epoch=fence.epoch,
                 **({"material_occurrences": committed_occurrences} if snapshot.get("placement_contract_version") is not None else {}),
+                **({"continuation_anchor": continuation_anchor} if continuation_anchor is not None else {}),
             )
         else:
             ok = await self.repo.complete_request(
@@ -338,7 +429,7 @@ class ResultCommitter:
             history_object_id=row.get("provisional_history_object_id"), result_object_id=row["provisional_result_object_id"],
             output_object_id=row.get("provisional_output_object_id"), compact_result=thaw_json(marker),
             provider_response_id=row.get("provider_response_id"), expected_history_version=int(row["expected_history_version"]))
-        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
+        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}:
             ok = await self.repo.complete_request_v3(**kwargs, fence_owner=active_fence.owner, fence_epoch=active_fence.epoch)
         else:
             ok = await self.repo.complete_request(**kwargs, lease_owner=active_fence.owner if active_fence else None,
@@ -356,7 +447,7 @@ class ResultCommitter:
             return None
         kwargs = dict(request_id=str(row["id"]), session_id=str(row["session_id"]), error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
+        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}:
             return await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         return await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None,
                                           lease_epoch=fence.epoch if fence else None)

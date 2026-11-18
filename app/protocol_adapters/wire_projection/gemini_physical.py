@@ -37,6 +37,7 @@ GEMINI_PHYSICAL_PROJECTOR_VERSION_V6 = "gemini-physical-projector/6"
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V7 = "gemini-physical-projector/7"
 GEMINI_PHYSICAL_PROJECTOR_VERSION = "gemini-physical-projector/8"
 GEMINI_PHYSICAL_PROJECTOR_VERSION_V9 = "gemini-physical-projector/9"
+GEMINI_PHYSICAL_PROJECTOR_VERSION_V10 = "gemini-physical-projector/10"
 PHYSICAL_PLAN_SCHEMA_VERSION_V3 = "relay-gemini-physical-cache-plan/2"
 PHYSICAL_PLAN_SCHEMA_VERSION_V4 = "relay-gemini-physical-cache-plan/3"
 PHYSICAL_PLAN_SCHEMA_VERSION_V5 = "relay-gemini-physical-cache-plan/4"
@@ -44,6 +45,7 @@ PHYSICAL_PLAN_SCHEMA_VERSION_V6 = "relay-gemini-physical-cache-plan/5"
 PHYSICAL_PLAN_SCHEMA_VERSION_V7 = "relay-gemini-physical-cache-plan/6"
 PHYSICAL_PLAN_SCHEMA_VERSION = "relay-gemini-physical-cache-plan/7"
 PHYSICAL_PLAN_SCHEMA_VERSION_V9 = "relay-gemini-physical-cache-plan/8"
+PHYSICAL_PLAN_SCHEMA_VERSION_V10 = "relay-gemini-physical-cache-plan/10"
 CACHE_SPEC_SCHEMA_VERSION_V3 = "relay-gemini-cache-spec/3"
 CACHE_SPEC_SCHEMA_VERSION_V4 = "relay-gemini-cache-spec/4"
 CACHE_SPEC_SCHEMA_VERSION_V5 = "relay-gemini-cache-spec/5"
@@ -51,6 +53,7 @@ CACHE_SPEC_SCHEMA_VERSION_V6 = "relay-gemini-cache-spec/6"
 CACHE_SPEC_SCHEMA_VERSION_V7 = "relay-gemini-cache-spec/7"
 CACHE_SPEC_SCHEMA_VERSION = "relay-gemini-cache-spec/8"
 CACHE_SPEC_SCHEMA_VERSION_V9 = "relay-gemini-cache-spec/9"
+CACHE_SPEC_SCHEMA_VERSION_V10 = "relay-gemini-cache-spec/10"
 GEMINI_CACHE_CREATE_MAX_REQUEST_BYTES = 100_000_000
 
 
@@ -67,6 +70,14 @@ def frozen_session_projection_metadata_v9() -> dict[str, str]:
     return {
         "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
         "projector_version": GEMINI_PHYSICAL_PROJECTOR_VERSION_V9,
+    }
+
+
+def frozen_session_projection_metadata_v10() -> dict[str, str]:
+    """Freeze layout/10 for newly created Gemini Sessions."""
+    return {
+        "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+        "projector_version": GEMINI_PHYSICAL_PROJECTOR_VERSION_V10,
     }
 
 
@@ -111,8 +122,12 @@ def uses_physical_layout_v9(session: dict[str, Any]) -> bool:
     return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION_V9
 
 
+def uses_physical_layout_v10(session: dict[str, Any]) -> bool:
+    return session_projection_version(session) == GEMINI_PHYSICAL_LAYOUT_VERSION_V10
+
+
 def uses_request_material_cache_candidates_layout(session: dict[str, Any]) -> bool:
-    return uses_physical_layout_v9(session)
+    return uses_physical_layout_v9(session) or uses_physical_layout_v10(session)
 
 
 def uses_inline_cache_transport_layout(session: dict[str, Any]) -> bool:
@@ -129,6 +144,7 @@ def uses_inline_cache_transport_layout(session: dict[str, Any]) -> bool:
         GEMINI_PHYSICAL_LAYOUT_VERSION_V6,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
     }
 
 
@@ -137,6 +153,7 @@ def uses_cached_instruction_layout(session: dict[str, Any]) -> bool:
         GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
     }
 
 
@@ -149,11 +166,372 @@ def uses_cache_material_projection_layout(session: dict[str, Any]) -> bool:
         GEMINI_PHYSICAL_LAYOUT_VERSION_V7,
         GEMINI_PHYSICAL_LAYOUT_VERSION,
         GEMINI_PHYSICAL_LAYOUT_VERSION_V9,
+        GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
     }
 
 
 def uses_supported_physical_layout(session: dict[str, Any]) -> bool:
     return session_projection_version(session) in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
+
+
+def _extract_continuation_state(
+    snapshot: dict[str, Any],
+    context_plan: dict[str, Any],
+) -> dict[str, Any] | None:
+    # 1. Look for continuation binding
+    binding = (
+        snapshot.get("_relay_continuation_execution")
+        or snapshot.get("continuation_execution_binding")
+        or snapshot.get("continuation_binding")
+        or (context_plan.get("continuation_execution_binding") if isinstance(context_plan, dict) else None)
+        or (context_plan.get("continuation_binding") if isinstance(context_plan, dict) else None)
+    )
+    if hasattr(binding, "to_dict"):
+        binding_dict = binding.to_dict()
+    elif isinstance(binding, dict):
+        binding_dict = binding
+    else:
+        binding_dict = None
+
+    if binding_dict and binding_dict.get("fallback_occurred"):
+        return None
+
+    # 2. Look for active anchor
+    active_anchor = (
+        snapshot.get("active_anchor")
+        or snapshot.get("continuation_anchor")
+        or (context_plan.get("active_anchor") if isinstance(context_plan, dict) else None)
+        or (context_plan.get("continuation_anchor") if isinstance(context_plan, dict) else None)
+        or (binding_dict.get("active_anchor") if binding_dict else None)
+    )
+    if hasattr(active_anchor, "to_dict"):
+        anchor_dict = active_anchor.to_dict()
+    elif isinstance(active_anchor, dict):
+        anchor_dict = active_anchor
+    else:
+        anchor_dict = None
+
+    active_anchor_id = None
+    if anchor_dict:
+        active_anchor_id = anchor_dict.get("anchor_id")
+    if not active_anchor_id and binding_dict:
+        active_anchor_id = binding_dict.get("active_anchor_id")
+    if not active_anchor_id and isinstance(context_plan, dict):
+        active_anchor_id = context_plan.get("active_anchor_id")
+    if not active_anchor_id:
+        active_anchor_id = snapshot.get("active_anchor_id")
+
+    if not active_anchor_id and not anchor_dict:
+        return None
+
+    # 3. Resolve covered_history_version
+    covered_history_version = None
+    if anchor_dict and "history_version" in anchor_dict:
+        covered_history_version = anchor_dict.get("history_version")
+    if covered_history_version is None and binding_dict:
+        covered_history_version = binding_dict.get("covered_history_version")
+        if covered_history_version is None:
+            covered_history_version = binding_dict.get("parent_history_version")
+    if covered_history_version is None and isinstance(context_plan, dict):
+        covered_history_version = context_plan.get("covered_history_version")
+        if covered_history_version is None:
+            covered_history_version = context_plan.get("parent_history_version")
+    if covered_history_version is None:
+        intent = snapshot.get("continuation_intent_plan") or (context_plan.get("continuation_intent_plan") if isinstance(context_plan, dict) else None)
+        if hasattr(intent, "parent_history_version"):
+            covered_history_version = intent.parent_history_version
+        elif isinstance(intent, dict):
+            covered_history_version = intent.get("parent_history_version")
+    if covered_history_version is None:
+        covered_history_version = snapshot.get("covered_history_version")
+
+    if covered_history_version is not None and isinstance(covered_history_version, int) and not isinstance(covered_history_version, bool):
+        cov_ver = int(covered_history_version)
+    else:
+        cov_ver = 0
+
+    # 4. Resolve upstream_handle
+    upstream_handle = None
+    if anchor_dict and anchor_dict.get("upstream_handle") is not None:
+        upstream_handle = anchor_dict.get("upstream_handle")
+    if upstream_handle is None and binding_dict and binding_dict.get("upstream_handle") is not None:
+        upstream_handle = binding_dict.get("upstream_handle")
+    if upstream_handle is None and isinstance(context_plan, dict):
+        upstream_handle = context_plan.get("upstream_handle")
+    if upstream_handle is None:
+        upstream_handle = snapshot.get("upstream_handle")
+
+    mechanism = (
+        (binding_dict.get("mechanism") if binding_dict else None)
+        or (anchor_dict.get("mechanism") if anchor_dict else None)
+        or "delta_turn"
+    )
+
+    return {
+        "active_anchor_id": str(active_anchor_id) if active_anchor_id else None,
+        "covered_history_version": cov_ver,
+        "upstream_handle": upstream_handle,
+        "mechanism": mechanism,
+        "binding": binding_dict,
+        "anchor": anchor_dict,
+    }
+
+
+def _apply_continuation_to_plan(
+    *,
+    plan: dict[str, Any],
+    snapshot: dict[str, Any],
+    context_plan: dict[str, Any],
+    history: list[dict[str, Any]],
+    current_user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    continuation_state = _extract_continuation_state(snapshot, context_plan)
+    if not continuation_state:
+        return plan
+
+    from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
+
+    covered_version = continuation_state["covered_history_version"]
+    upstream_handle = continuation_state["upstream_handle"]
+    active_anchor_id = continuation_state["active_anchor_id"]
+
+    # 1. Delta slicing of history
+    delta_history = slice_continuation_history(history, covered_version, allow_fallback=True)
+
+    # 2. Rebuild full_uncached_payload
+    full_uncached_payload = copy.deepcopy(plan.get("full_uncached_payload") or {})
+    delta_contents = project_history_contents(delta_history)
+    user_content = current_user or plan.get("history_entry_user_content")
+    if user_content:
+        full_uncached_payload["contents"] = [*delta_contents, copy.deepcopy(user_content)]
+    else:
+        existing_contents = list(full_uncached_payload.get("contents") or [])
+        user_tail = existing_contents[-1] if existing_contents else {}
+        full_uncached_payload["contents"] = [*delta_contents, copy.deepcopy(user_tail)]
+
+    # Mount continuation handle
+    if upstream_handle is not None:
+        full_uncached_payload["continuation_handle"] = upstream_handle
+        handle_str = (
+            upstream_handle.get("cachedContent") or upstream_handle.get("handle")
+            if isinstance(upstream_handle, dict)
+            else str(upstream_handle or "")
+        )
+        if isinstance(handle_str, str) and handle_str.startswith("cachedContents/"):
+            full_uncached_payload["cachedContent"] = handle_str
+            full_uncached_payload.pop("systemInstruction", None)
+
+    plan["full_uncached_payload"] = full_uncached_payload
+    plan["full_uncached_wire_hash"] = stable_hash(full_uncached_payload)
+
+    # If uncached_suffix is also provided, keep it aligned
+    suffix_map = plan.get("uncached_suffix_by_prefix_version")
+    if isinstance(suffix_map, dict) and str(covered_version) in suffix_map:
+        plan["uncached_suffix"] = copy.deepcopy(suffix_map[str(covered_version)])
+        plan["uncached_suffix_wire_hash"] = stable_hash(plan["uncached_suffix"])
+    elif "uncached_suffix" in plan and isinstance(plan["uncached_suffix"], dict):
+        uncached_suffix = copy.deepcopy(plan["uncached_suffix"])
+        user_suffix_tail = user_content or (
+            uncached_suffix.get("contents")[-1] if uncached_suffix.get("contents") else {}
+        )
+        uncached_suffix["contents"] = [*delta_contents, copy.deepcopy(user_suffix_tail)]
+        plan["uncached_suffix"] = uncached_suffix
+        plan["uncached_suffix_wire_hash"] = stable_hash(uncached_suffix)
+
+    plan["continuation_execution"] = {
+        "active_anchor_id": active_anchor_id,
+        "covered_history_version": covered_version,
+        "upstream_handle": upstream_handle,
+        "bound_delta_turns_count": len(delta_history),
+        "bound_delta_turns": delta_history,
+        "mechanism": continuation_state["mechanism"],
+    }
+
+    if "dependencies" in plan and isinstance(plan["dependencies"], dict):
+        plan["dependencies"]["continuation_active_anchor_id"] = active_anchor_id
+        plan["dependencies"]["continuation_covered_history_version"] = covered_version
+        plan["dependencies"]["continuation_bound_delta_turns_count"] = len(delta_history)
+
+    # Recalculate physical_plan_hash
+    plan.pop("physical_plan_hash", None)
+    plan["physical_plan_hash"] = stable_hash(plan)
+
+    return plan
+
+
+def _build_gemini_physical_cache_plan_v10(
+    *,
+    snapshot: dict[str, Any],
+    session: dict[str, Any],
+    history: list[dict[str, Any]],
+    material_ids: list[str],
+    material_bindings: list[dict[str, Any]],
+    context_plan: dict[str, Any],
+    cache_material_projection: dict[str, Any] | None = None,
+    placement_session: dict[str, Any] | None = None,
+    placement_history: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if snapshot.get("material_placement_plan"):
+        from app.protocol_adapters.wire_projection.gemini_native_prefix import build_native_prefix_plan
+        return build_native_prefix_plan(
+            snapshot=snapshot,
+            session=session,
+            history=history,
+            material_ids=material_ids,
+            material_bindings=material_bindings,
+            context_plan=context_plan,
+            placement_session=placement_session,
+            placement_history=placement_history,
+        )
+
+    model = str(snapshot.get("upstream_model") or snapshot.get("model") or "").strip()
+    native = project_history_contents(history)
+    current = project_current_user_content(snapshot, material_ids=material_ids, material_bindings=material_bindings)
+    system = project_system_instruction(snapshot)
+    if system is None and session.get("frozen_instructions"):
+        system = {"parts": [{"text": str(session["frozen_instructions"])}]}
+    full = {"contents": native + [current]}
+    if system is not None:
+        full["systemInstruction"] = system
+    native_options = snapshot.get("provider_payload") or {}
+    tools = native_options.get("tools") or snapshot.get("tools")
+    tool_config = native_options.get("toolConfig") or snapshot.get("tool_config")
+    if tools:
+        full["tools"] = tools
+    if tool_config:
+        full["toolConfig"] = tool_config
+
+    off = snapshot.get("requested_cache_mode") == "off"
+    count = len(history)
+    prefixes, suffixes, fingerprints, implicit_fingerprints = {}, {}, {}, {}
+    route = (session.get("metadata") or {}).get("_relay_route") or {}
+    scope = {
+        "session_id": str(session.get("id") or ""),
+        "connection_id": str(snapshot.get("connection_id") or ""),
+        "account_scope_id": str(route.get("account_scope_hash") or route.get("account_scope_id") or ""),
+        "connection_spec_hash": str(snapshot.get("connection_spec_hash") or ""),
+    }
+
+    def fingerprint(payload: dict[str, Any]) -> str:
+        return stable_hash({
+            "layout": GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+            "model": model,
+            "scope": scope,
+            "prefix": payload,
+        })
+
+    file_mode = (snapshot.get("cache_contract") or {}).get("explicit_cache_material_mode")
+    cacheable = False
+    reason = "cache_off" if off else "no_cacheable_contents"
+    max_version = 0
+    if not off:
+        for version in range(count + 1):
+            prefix = {"contents": native[: 2 * version]}
+            if system is not None:
+                prefix["systemInstruction"] = system
+            implicit_fingerprints[str(version)] = fingerprint(prefix)
+            has_file = any(
+                "fileData" in p
+                for c in prefix["contents"]
+                for p in (c.get("parts") or [])
+                if isinstance(p, dict)
+            )
+            allowed = (
+                version > 0
+                and (not has_file or file_mode == "file_uri_allowed")
+                and not tools
+                and not tool_config
+            )
+            body_bytes = len(json.dumps(prefix, ensure_ascii=False, separators=(",", ":")).encode())
+            if not allowed or body_bytes > 99_000_000:
+                if has_file and file_mode != "file_uri_allowed":
+                    reason = "native_prefix_file_reference_not_authorized"
+                continue
+            prefixes[str(version)] = prefix
+            suffixes[str(version)] = {"contents": native[2 * version :] + [current]}
+            fingerprints[str(version)] = fingerprint(prefix)
+            max_version = version
+        cacheable = bool(prefixes)
+        if cacheable:
+            reason = "native_prefix_slice"
+    prefix = prefixes.get(str(max_version), {})
+    suffix = suffixes.get(str(max_version), copy.deepcopy(full))
+    occurrences = [
+        {
+            "source": "history_entry",
+            "history_entry_index": i,
+            "placement": "cached_prefix" if i < max_version else "uncached_suffix",
+        }
+        for i in range(count)
+    ]
+    plan = {
+        "schema_version": PHYSICAL_PLAN_SCHEMA_VERSION_V10,
+        "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+        "projector_version": GEMINI_PHYSICAL_PROJECTOR_VERSION_V10,
+        "model": model,
+        "cached_prefix": prefix,
+        "uncached_suffix": suffix,
+        "uncached_suffix_by_prefix_version": suffixes,
+        "uncached_suffix_wire_hashes": {k: stable_hash(v) for k, v in suffixes.items()},
+        "full_uncached_payload": full,
+        "history_entry_user_content": current,
+        "implicit_prefix_payload": copy.deepcopy(full),
+        "implicit_prefix_measurement_payload": {
+            **({"contents": native} if native else {}),
+            **({"systemInstruction": system} if system is not None else {}),
+        },
+        "implicit_prefix_eligible": not off and bool(native or system),
+        "implicit_prefix_fingerprint": implicit_fingerprints.get(str(count), ""),
+        "implicit_prefix_compatible_fingerprints": implicit_fingerprints,
+        "compatible_prefix_fingerprints": fingerprints,
+        "occurrence_mapping": occurrences,
+        "current_material_occurrences": [],
+        "cache_spec": {
+            "schema_version": CACHE_SPEC_SCHEMA_VERSION_V10,
+            "layout_version": GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+        },
+        "cacheable": cacheable,
+        "cacheability_reason": reason,
+        "content_fingerprint": fingerprints.get(str(max_version), ""),
+        "reuse_key": stable_hash({
+            "scope": scope,
+            "layout": GEMINI_PHYSICAL_LAYOUT_VERSION_V10,
+            "model": model,
+            "system": system,
+        }),
+        "prefix_version": max_version,
+        "measurement_order": "provider_create",
+        "cache_create_transport": "google_genai_sdk",
+        "cache_action": "bypass_off" if off else "native_prefix_slice",
+        "dependencies": {
+            "history_version": count,
+            "history_entries": count,
+            "safe_history_prefix_version": count,
+            "history_cached_prefix_version": max_version,
+            "context_plan_hash": context_plan.get("context_plan_hash") if isinstance(context_plan, dict) else None,
+            "projection_safe": True,
+            "cache_material_ids": [],
+            "inference_only_material_ids": list(material_ids),
+            "cache_create_request_bytes": len(json.dumps(prefix, ensure_ascii=False).encode()),
+            "cache_create_max_request_bytes": 100_000_000,
+        },
+    }
+    for field, value in (
+        ("cached_prefix_wire_hash", prefix),
+        ("uncached_suffix_wire_hash", suffix),
+        ("full_uncached_wire_hash", full),
+        ("implicit_prefix_payload_hash", full),
+        ("occurrence_mapping_hash", occurrences),
+    ):
+        plan[field] = stable_hash(value)
+    plan["physical_plan_hash"] = stable_hash(plan)
+    return _apply_continuation_to_plan(
+        plan=plan,
+        snapshot=snapshot,
+        context_plan=context_plan,
+        history=history,
+        current_user=plan.get("history_entry_user_content"),
+    )
 
 
 def build_gemini_physical_cache_plan(
@@ -200,13 +578,20 @@ def build_gemini_physical_cache_plan(
     if not model:
         raise ProviderRequestError("MODEL_REQUIRED", "Gemini physical projection requires a frozen model")
 
-    if snapshot.get("placement_contract_version") is not None and snapshot["material_placement_plan"].get("deduplicate_auto", True):
+    if snapshot.get("placement_contract_version") is not None and (snapshot.get("material_placement_plan") or {}).get("deduplicate_auto", True):
         from app.protocol_adapters.wire_projection.gemini_native_prefix import build_native_prefix_plan
-        return build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
+        plan = build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
             material_ids=material_ids, material_bindings=material_bindings, context_plan=context_plan,
             placement_session=placement_session, placement_history=placement_history)
-    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
-        return _build_gemini_physical_cache_plan_v9(
+        return _apply_continuation_to_plan(
+            plan=plan,
+            snapshot=snapshot,
+            context_plan=context_plan,
+            history=history,
+            current_user=plan.get("history_entry_user_content"),
+        )
+    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V10:
+        plan = _build_gemini_physical_cache_plan_v10(
             snapshot=snapshot,
             session=session,
             history=history,
@@ -214,6 +599,32 @@ def build_gemini_physical_cache_plan(
             material_bindings=material_bindings,
             context_plan=context_plan,
             cache_material_projection=cache_material_projection,
+            placement_session=placement_session,
+            placement_history=placement_history,
+        )
+        return _apply_continuation_to_plan(
+            plan=plan,
+            snapshot=snapshot,
+            context_plan=context_plan,
+            history=history,
+            current_user=plan.get("history_entry_user_content"),
+        )
+    if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
+        plan = _build_gemini_physical_cache_plan_v9(
+            snapshot=snapshot,
+            session=session,
+            history=history,
+            material_ids=material_ids,
+            material_bindings=material_bindings,
+            context_plan=context_plan,
+            cache_material_projection=cache_material_projection,
+        )
+        return _apply_continuation_to_plan(
+            plan=plan,
+            snapshot=snapshot,
+            context_plan=context_plan,
+            history=history,
+            current_user=plan.get("history_entry_user_content"),
         )
 
     manifest = (
@@ -507,7 +918,13 @@ def build_gemini_physical_cache_plan(
     plan["full_uncached_wire_hash"] = stable_hash(full_uncached_payload)
     plan["occurrence_mapping_hash"] = stable_hash(occurrence_mapping)
     plan["physical_plan_hash"] = stable_hash(plan)
-    return plan
+    return _apply_continuation_to_plan(
+        plan=plan,
+        snapshot=snapshot,
+        context_plan=context_plan,
+        history=history,
+        current_user=plan.get("history_entry_user_content"),
+    )
 
 
 
@@ -1010,7 +1427,13 @@ def _build_gemini_physical_cache_plan_v9(
     plan["occurrence_mapping_hash"] = stable_hash(occurrence_mapping)
     plan["implicit_prefix_payload_hash"] = stable_hash(implicit_prefix_payload)
     plan["physical_plan_hash"] = stable_hash(plan)
-    return plan
+    return _apply_continuation_to_plan(
+        plan=plan,
+        snapshot=snapshot,
+        context_plan=context_plan,
+        history=history,
+        current_user=plan.get("history_entry_user_content"),
+    )
 
 
 def _project_dynamic_history_entries_v9(

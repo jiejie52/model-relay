@@ -9,7 +9,8 @@ from app.shared_connection_contract import frozen_connection_fields
 def dispatch_input_digest(*, snapshot, session, history, material_ids, material_bindings,
                           tenant_id, conversation_hash, request_id, session_id, context_plan,
                           cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers,
-                          connection_spec_hash=None,account_scope_id=None, material_occurrences=None, historical_bindings=None):
+                          connection_spec_hash=None,account_scope_id=None, material_occurrences=None, historical_bindings=None,
+                          continuation_execution_binding=None):
     from app.core.idempotency import stable_hash
     spec,scope=frozen_connection_fields(snapshot,(session.get('metadata') or {}).get('_relay_route'))
     if connection_spec_hash is not None and connection_spec_hash!=spec or account_scope_id is not None and account_scope_id!=scope:
@@ -17,11 +18,12 @@ def dispatch_input_digest(*, snapshot, session, history, material_ids, material_
     return stable_hash({**({'connection_spec_hash':spec,'account_scope_id':scope} if spec else {}),"schema_version": "relay-prepared-execution/2",
         **({"material_occurrences": material_occurrences, "historical_bindings": historical_bindings}
            if snapshot.get("placement_contract_version") is not None else {}),
-        "snapshot": {k: v for k, v in snapshot.items() if k != "_relay_cache_execution"},
+        "snapshot": {k: v for k, v in snapshot.items() if k not in ("_relay_cache_execution", "_relay_continuation_execution")},
         "session": session, "history": history, "material_ids": material_ids,
         "material_bindings": material_bindings, "tenant_id": tenant_id,
         "conversation_hash": conversation_hash, "request_id": request_id, "session_id": session_id,
         "context_plan": context_plan, "cache_binding": cache_execution_binding,
+        "continuation_execution_binding": continuation_execution_binding,
         "execution_fence": execution_fence, "provider_physical_plan": provider_physical_plan,
         "affinity_headers": affinity_headers})
 
@@ -38,6 +40,7 @@ class SealedDispatchBundle:
     session_id: str | None = None
     context_plan: dict[str, Any] | None = None
     cache_execution_binding: dict[str, Any] | None = None
+    continuation_execution_binding: dict[str, Any] | None = None
     execution_fence: dict[str, Any] | None = None
     provider_physical_plan: dict[str, Any] | None = None
     seal_id: str = ""
@@ -55,7 +58,7 @@ class SealedDispatchBundle:
             raise ValueError('Sealed bundle connection identity mismatch')
         object.__setattr__(self,'connection_spec_hash',spec)
         object.__setattr__(self,'account_scope_id',scope)
-        for name in ("snapshot", "session", "history", "material_ids", "material_bindings", "context_plan", "cache_execution_binding", "execution_fence", "provider_physical_plan", "affinity_headers", "material_occurrences", "historical_bindings"):
+        for name in ("snapshot", "session", "history", "material_ids", "material_bindings", "context_plan", "cache_execution_binding", "continuation_execution_binding", "execution_fence", "provider_physical_plan", "affinity_headers", "material_occurrences", "historical_bindings"):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
 
     @property
@@ -67,6 +70,8 @@ class SealedDispatchBundle:
     def material_binding(self): return self.material_bindings
     @property
     def cache_binding(self): return self.cache_execution_binding
+    @property
+    def continuation_binding(self): return self.continuation_execution_binding
 
     def verify_integrity(self):
         from app.core.idempotency import stable_hash
@@ -76,6 +81,9 @@ class SealedDispatchBundle:
         if ("_relay_cache_execution" in self.snapshot
                 and self.snapshot["_relay_cache_execution"] != self.cache_execution_binding):
             raise ExecutionConflictError("Snapshot cache projection differs from the sealed cache binding")
+        if ("_relay_continuation_execution" in self.snapshot
+                and self.snapshot["_relay_continuation_execution"] != self.continuation_execution_binding):
+            raise ExecutionConflictError("Snapshot continuation projection differs from the sealed continuation binding")
         physical = self.provider_physical_plan
         if physical is not None and physical.get("physical_plan_hash") != stable_hash(
                 {k: v for k, v in physical.items() if k != "physical_plan_hash"}):
@@ -83,6 +91,7 @@ class SealedDispatchBundle:
         actual = dispatch_input_digest(**{name: getattr(self, name) for name in (
             "snapshot", "session", "history", "material_ids", "material_bindings", "tenant_id",
             "conversation_hash", "request_id", "session_id", "context_plan", "cache_execution_binding",
+            "continuation_execution_binding",
             "execution_fence", "provider_physical_plan", "affinity_headers","connection_spec_hash","account_scope_id", "material_occurrences", "historical_bindings")})
         if actual != self.seal_hash:
             raise ExecutionConflictError("Sealed adapter inputs do not match the atomic dispatch digest")
@@ -137,6 +146,10 @@ class RuntimeState:
     failure_stage: str = "pre_dispatch_check"
     historical_pinned_bindings: list = field(default_factory=list)
     projected_material_occurrences: list = field(default_factory=list)
+    continuation_intent_plan: Any = None
+    continuation_binding: Any = None
+    continuation_anchor: Any = None
+    pinned_anchor_id: Any = None
 
     @classmethod
     def from_plan(cls, plan, started):
@@ -157,6 +170,9 @@ class RuntimeState:
         context_mode = snapshot.get("context_policy", session.get("context_policy"))
         model_session = {**session, "context_policy": (
             "explicit" if context_mode == "explicit" else "conversation")}
-        return cls(plan, row, model_session, snapshot, model_history, str(row["id"]), str(row["session_id"]),
+        state = cls(plan, row, model_session, snapshot, model_history, str(row["id"]), str(row["session_id"]),
                    list(dict.fromkeys(ids)), snapshot.get("provider")=="gemini" and snapshot.get("protocol", "gemini_native")=="gemini_native",
                    snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)
+        if getattr(plan, "continuation_intent_plan", None) is not None:
+            state.continuation_intent_plan = plan.continuation_intent_plan
+        return state

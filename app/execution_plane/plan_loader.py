@@ -25,6 +25,11 @@ class ExecutionPlanLoader:
             value = snapshot.get(key)
             if isinstance(value, dict) and value.get(digest) and stable_hash({k: v for k, v in value.items() if k != digest}) != value[digest]:
                 raise ExecutionConflictError("Stored logical plan checksum mismatch")
+        continuation_intent_plan = snapshot.get("continuation_intent_plan")
+        if isinstance(continuation_intent_plan, dict) and continuation_intent_plan.get("plan_hash"):
+            check_raw = {k: v for k, v in continuation_intent_plan.items() if k != "plan_hash"}
+            if stable_hash(check_raw) != continuation_intent_plan["plan_hash"]:
+                raise ExecutionConflictError("Stored continuation plan checksum mismatch")
         if int(session.get("history_version") or 0) != int(row.get("expected_history_version") or 0):
             raise ExecutionConflictError("Session history no longer matches the accepted Request")
         history = []
@@ -39,4 +44,5 @@ class ExecutionPlanLoader:
                 raise ExecutionConflictError("Persisted material placement differs from the frozen Request")
         return FrozenExecutionPlan(row, session,
             {key: snapshot.get(key) for key in ("think_level", "thinking", "effective_options", "structured_output", "requested_cache_mode")},
-            snapshot.get("context_plan") or {}, snapshot.get("cache_plan") or {}, fence, snapshot, history)
+            snapshot.get("context_plan") or {}, snapshot.get("cache_plan") or {}, fence, snapshot, history,
+            continuation_intent_plan=continuation_intent_plan)

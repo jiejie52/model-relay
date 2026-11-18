@@ -21,7 +21,7 @@ from app.execution_plane.route_resolver import RouteBinding, RouteResolutionErro
 from app.security import require_owner_headers, require_relay_auth
 from app.storage_paths import request_object_path_v2
 from app.utils import json_bytes, utcnow
-from app.v2_models import MaterialCreateJSON, MaterialResponse, RequestEnvelope, SessionCreateRequest, SessionRequestCreate, SessionResponse
+from app.v2_models import ContinuationSummary, MaterialCreateJSON, MaterialResponse, RequestEnvelope, SessionCreateRequest, SessionRequestCreate, SessionResponse
 
 
 from app.execution_plane.services import ExecutionServices, ExecutionRequestError
@@ -138,6 +138,32 @@ def _request_envelope(row: dict[str, Any]) -> RequestEnvelope:
             cache_summary = dict(metadata.get("_relay_cache") or {})
         if isinstance(row.get("cache_usage"), dict):
             cache_summary = {**(cache_summary or {}), **row["cache_usage"]}
+
+    continuation_summary: ContinuationSummary | None = None
+    continuation_data = None
+    if compact and isinstance(compact.get("_relay_continuation"), dict):
+        continuation_data = compact.get("_relay_continuation")
+    else:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if isinstance(metadata.get("_relay_continuation"), dict):
+            continuation_data = metadata.get("_relay_continuation")
+        elif isinstance(row.get("_relay_continuation"), dict):
+            continuation_data = row.get("_relay_continuation")
+
+    if continuation_data is not None:
+        if isinstance(continuation_data, ContinuationSummary):
+            continuation_summary = continuation_data
+        elif isinstance(continuation_data, dict):
+            known_fields = set(ContinuationSummary.model_fields.keys())
+            c_dict = dict(continuation_data)
+            if "active_anchor_id" not in c_dict and "anchor_id" in c_dict:
+                c_dict["active_anchor_id"] = c_dict["anchor_id"]
+            extra = {k: v for k, v in c_dict.items() if k not in known_fields}
+            kwargs = {k: v for k, v in c_dict.items() if k in known_fields}
+            if extra and "details" not in kwargs:
+                kwargs["details"] = extra
+            continuation_summary = ContinuationSummary(**kwargs)
+
     return RequestEnvelope(
         session_id=UUID(str(row["session_id"])),
         request_id=UUID(str(row["id"])),
@@ -148,6 +174,7 @@ def _request_envelope(row: dict[str, Any]) -> RequestEnvelope:
         result=row.get("compact_result") if isinstance(row.get("compact_result"), dict) else None,
         error=error,
         cache=cache_summary,
+        continuation=continuation_summary,
         poll_after_seconds=5 if row.get("status") in {"queued", "leased", "running"} else None,
     )
 

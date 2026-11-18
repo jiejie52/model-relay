@@ -9,6 +9,7 @@ CANONICAL_REQUEST_VERSIONS = {
     "relay-request/2.2",
     "relay-request/2.3",
     "relay-request/2.4",
+    "relay-request/2.5",
 }
 SUPPORTED_REQUEST_VERSIONS = {
     "relay-request/2.1",
@@ -60,6 +61,10 @@ def caller_intent_hash(value: dict[str, Any]) -> str:
         identity["requested_cache_mechanism"] = value.get("requested_cache_mechanism")
     if value.get("thinking_identity") is not None:
         identity["thinking_identity"] = value["thinking_identity"]
+    if value.get("continuation_mode") is not None:
+        identity["continuation_mode"] = value["continuation_mode"]
+    elif value.get("requested_continuation_mode") is not None:
+        identity["continuation_mode"] = value["requested_continuation_mode"]
     return stable_hash(identity)
 
 
@@ -108,7 +113,7 @@ def request_identity(snapshot: dict[str, Any]) -> str:
 
     identity.update(
         {
-            "options": (snapshot.get("effective_options") if version == "relay-request/2.4" else snapshot.get("options")) or {},
+            "options": (snapshot.get("effective_options") if version in {"relay-request/2.4", "relay-request/2.5"} else snapshot.get("options")) or {},
             "effective_options": snapshot.get("effective_options") or {},
             "capability_revision": snapshot.get("capability_revision"),
         }
@@ -148,9 +153,19 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     )
     if snapshot.get("requested_cache_mechanism_explicit"):
         identity["requested_cache_mechanism"] = snapshot.get("requested_cache_mechanism")
-    if version == "relay-request/2.4":
+    if version in {"relay-request/2.4", "relay-request/2.5"}:
         identity["execution_authorization"] = snapshot.get("execution_authorization") or {}
     if snapshot.get("placement_contract_version") is not None:
         from app.core.material_placement import material_identity
         identity["material_placement_identity"] = material_identity(snapshot)
+    if version == "relay-request/2.5" or snapshot.get("continuation_intent_plan") is not None:
+        plan = snapshot.get("continuation_intent_plan")
+        plan_hash = None
+        if hasattr(plan, "plan_hash"):
+            plan_hash = plan.plan_hash
+        elif isinstance(plan, dict):
+            plan_hash = plan.get("plan_hash")
+        elif snapshot.get("continuation_plan_hash") is not None:
+            plan_hash = snapshot.get("continuation_plan_hash")
+        identity["continuation_plan_hash"] = plan_hash
     return stable_hash(identity)

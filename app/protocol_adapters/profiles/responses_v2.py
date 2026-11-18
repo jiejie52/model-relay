@@ -52,6 +52,86 @@ class ResponsesV2Adapter:
                     }
                 )
 
+        # Continuation binding inspection & delta turn slicing
+        continuation_binding = context.continuation_binding
+        if hasattr(continuation_binding, "to_dict"):
+            binding_dict = continuation_binding.to_dict()
+        elif isinstance(continuation_binding, dict):
+            binding_dict = dict(continuation_binding)
+        else:
+            binding_dict = None
+
+        if not binding_dict and isinstance(snapshot.get("_relay_continuation_execution"), dict):
+            binding_dict = dict(snapshot["_relay_continuation_execution"])
+
+        active_continuation = False
+        active_anchor_id = None
+        upstream_handle = None
+
+        if binding_dict:
+            mechanism = binding_dict.get("mechanism") or "none"
+            fallback_occurred = bool(binding_dict.get("fallback_occurred", False))
+            if mechanism != "none" and not fallback_occurred:
+                active_continuation = True
+                active_anchor_id = binding_dict.get("active_anchor_id")
+                if not active_anchor_id and isinstance(binding_dict.get("active_anchor"), dict):
+                    active_anchor_id = binding_dict["active_anchor"].get("anchor_id")
+
+                upstream_handle = binding_dict.get("upstream_handle")
+                if upstream_handle is None and isinstance(binding_dict.get("active_anchor"), dict):
+                    upstream_handle = binding_dict["active_anchor"].get("upstream_handle")
+
+                if upstream_handle is not None:
+                    snapshot["upstream_handle"] = upstream_handle
+                    if isinstance(upstream_handle, str):
+                        snapshot["previous_interaction_id"] = upstream_handle
+                    elif isinstance(upstream_handle, dict):
+                        for k, v in upstream_handle.items():
+                            snapshot[k] = v
+                        if "previous_interaction_id" not in snapshot:
+                            if "previous_interaction_id" in upstream_handle:
+                                snapshot["previous_interaction_id"] = upstream_handle["previous_interaction_id"]
+                            elif "interaction_id" in upstream_handle:
+                                snapshot["previous_interaction_id"] = upstream_handle["interaction_id"]
+                            elif "response_id" in upstream_handle:
+                                snapshot["previous_interaction_id"] = upstream_handle["response_id"]
+
+                if active_anchor_id:
+                    snapshot["active_anchor_id"] = active_anchor_id
+                snapshot["continuation_active"] = True
+
+                from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
+
+                covered_version = binding_dict.get("covered_history_version")
+                if covered_version is None:
+                    covered_version = binding_dict.get("parent_history_version")
+                if covered_version is None and isinstance(binding_dict.get("active_anchor"), dict):
+                    covered_version = binding_dict["active_anchor"].get("history_version")
+                if covered_version is None and isinstance(snapshot.get("active_anchor"), dict):
+                    covered_version = snapshot["active_anchor"].get("history_version")
+                if covered_version is None and isinstance(context.context_plan, dict):
+                    covered_version = context.context_plan.get("covered_history_version") or context.context_plan.get("parent_history_version")
+                if covered_version is None:
+                    intent = snapshot.get("continuation_intent_plan") or (context.context_plan.get("continuation_intent_plan") if isinstance(context.context_plan, dict) else None)
+                    if hasattr(intent, "parent_history_version"):
+                        covered_version = intent.parent_history_version
+                    elif isinstance(intent, dict):
+                        covered_version = intent.get("parent_history_version")
+                if covered_version is None:
+                    covered_version = snapshot.get("covered_history_version")
+
+                if covered_version is None:
+                    if "bound_delta_turns" in binding_dict and isinstance(binding_dict["bound_delta_turns"], list):
+                        covered_version = max(0, len(legacy_history) - len(binding_dict["bound_delta_turns"]))
+                    elif upstream_handle is not None:
+                        covered_version = len(legacy_history)
+
+                legacy_history = slice_continuation_history(
+                    legacy_history,
+                    covered_version,
+                    allow_fallback=True,
+                )
+
         if snapshot.get("upstream_model"): snapshot["model"] = snapshot["upstream_model"]
         result = await self.legacy.execute(
             snapshot,
@@ -60,6 +140,48 @@ class ResponsesV2Adapter:
             history=legacy_history,
         )
         user_item = self.legacy.make_user_item(snapshot["current_query"])
+
+        observed = observed_response_facts(
+            result.response_headers,
+            body_model=(str(result.raw_json.get("model")) if result.raw_json.get("model") else None),
+            protocol="responses",
+            channel_id=(str(snapshot.get("channel_id")) if snapshot.get("channel_id") else None),
+            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
+        )
+
+        new_handle = None
+        if isinstance(result.raw_json, dict):
+            new_handle = (
+                result.raw_json.get("interaction_id")
+                or result.raw_json.get("id")
+                or result.raw_json.get("response_id")
+            )
+        if not new_handle and result.response_id:
+            new_handle = result.response_id
+        if not new_handle and result.response_headers:
+            new_handle = (
+                result.response_headers.get("x-interaction-id")
+                or result.response_headers.get("interaction-id")
+            )
+
+        if new_handle:
+            observed["upstream_handle"] = new_handle
+            observed["interaction_id"] = new_handle
+            observed["response_id"] = result.response_id or new_handle
+
+        if active_continuation:
+            observed["continuation_active"] = True
+            if active_anchor_id:
+                observed["active_anchor_id"] = active_anchor_id
+
+        history_transport: dict[str, Any] = {
+            "kind": "responses",
+            "user_item": user_item,
+            "response_output": result.response_output,
+        }
+        if new_handle:
+            history_transport["upstream_handle"] = new_handle
+
         return StandardizedProviderResult(
             raw_bytes=result.raw_bytes,
             raw_json=result.raw_json,
@@ -68,22 +190,10 @@ class ResponsesV2Adapter:
             usage=result.usage,
             cached_tokens=result.cached_tokens,
             response_output=result.response_output,
-            history_entry={
-                "transport_history": {
-                    "kind": "responses",
-                    "user_item": user_item,
-                    "response_output": result.response_output,
-                }
-            },
+            history_entry={"transport_history": history_transport},
             http_status=result.http_status,
             provider_request_id=result.provider_request_id,
-            observed=observed_response_facts(
-                result.response_headers,
-                body_model=(str(result.raw_json.get("model")) if result.raw_json.get("model") else None),
-                protocol="responses",
-                channel_id=(str(snapshot.get("channel_id")) if snapshot.get("channel_id") else None),
-            evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),
-            ),
+            observed=observed,
         )
 
     async def _material_prefix(self, context: SealedDispatchBundle) -> list[Any]:

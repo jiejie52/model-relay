@@ -433,6 +433,175 @@ class GeminiGenAIClient:
                 return str(lowered[key])
         return None
 
+    @classmethod
+    def mount_continuation_handle(
+        cls,
+        config: Any,
+        continuation_binding: dict[str, Any] | Any | None,
+        *,
+        types_module: Any | None = None,
+    ) -> Any:
+        """Mount continuation handle (e.g. cached_content or session handle) into SDK config/payload.
+
+        When a valid continuation binding is present (mechanism != 'none' and not fallback_occurred),
+        extracts upstream_handle and sets cached_content on GenerateContentConfig or dict.
+        """
+        if not continuation_binding:
+            return config
+
+        binding_dict = (
+            continuation_binding.to_dict()
+            if hasattr(continuation_binding, "to_dict")
+            else dict(continuation_binding)
+            if isinstance(continuation_binding, dict)
+            else None
+        )
+        if not binding_dict:
+            return config
+
+        if binding_dict.get("fallback_occurred") or binding_dict.get("mechanism") == "none":
+            return config
+
+        upstream_handle = binding_dict.get("upstream_handle")
+        if upstream_handle is None and isinstance(binding_dict.get("active_anchor"), dict):
+            upstream_handle = binding_dict["active_anchor"].get("upstream_handle")
+
+        if not upstream_handle:
+            return config
+
+        handle_str = str(upstream_handle)
+        if config is None:
+            if types_module and hasattr(types_module, "GenerateContentConfig"):
+                return types_module.GenerateContentConfig(cached_content=handle_str)
+            return {"cached_content": handle_str}
+
+        if hasattr(config, "cached_content"):
+            try:
+                setattr(config, "cached_content", handle_str)
+            except Exception:
+                pass
+        elif isinstance(config, dict):
+            config["cached_content"] = handle_str
+            config["cachedContent"] = handle_str
+        return config
+
+    @classmethod
+    def extract_cache_facts(cls, response: Any) -> dict[str, Any]:
+        """Extract cache facts (cached tokens, usage breakdown, cache hit) from response."""
+        data = cls.dump_model(response) if not isinstance(response, dict) else response
+        usage_meta = (
+            data.get("usageMetadata")
+            or data.get("usage_metadata")
+            or getattr(response, "usage_metadata", None)
+        )
+        usage_dict = cls.dump_model(usage_meta) if not isinstance(usage_meta, dict) else (usage_meta or {})
+
+        cached_tokens = (
+            usage_dict.get("cachedContentTokenCount")
+            or usage_dict.get("cached_content_token_count")
+            or getattr(usage_meta, "cached_content_token_count", None)
+        )
+        prompt_tokens = (
+            usage_dict.get("promptTokenCount")
+            or usage_dict.get("prompt_token_count")
+            or getattr(usage_meta, "prompt_token_count", None)
+        )
+        candidates_tokens = (
+            usage_dict.get("candidatesTokenCount")
+            or usage_dict.get("candidates_token_count")
+            or getattr(usage_meta, "candidates_token_count", None)
+        )
+        total_tokens = (
+            usage_dict.get("totalTokenCount")
+            or usage_dict.get("total_token_count")
+            or getattr(usage_meta, "total_token_count", None)
+        )
+
+        facts: dict[str, Any] = {
+            "cached_tokens": cached_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": candidates_tokens,
+            "total_tokens": total_tokens,
+            "has_cache": bool(cached_tokens and cached_tokens > 0),
+        }
+        resp_id = (
+            data.get("responseId")
+            or data.get("response_id")
+            or data.get("id")
+            or getattr(response, "response_id", None)
+            or getattr(response, "id", None)
+        )
+        if resp_id:
+            facts["response_id"] = str(resp_id)
+            facts["upstream_handle"] = str(resp_id)
+
+        model_ver = (
+            data.get("modelVersion")
+            or data.get("model_version")
+            or getattr(response, "model_version", None)
+        )
+        if model_ver:
+            facts["model_version"] = str(model_ver)
+
+        return facts
+
+    @classmethod
+    def extract_session_facts(
+        cls,
+        response: Any,
+        *,
+        continuation_binding: Any = None,
+    ) -> dict[str, Any]:
+        """Extract both cache and continuation session facts from response."""
+        facts = cls.extract_cache_facts(response)
+        binding_dict = (
+            continuation_binding.to_dict()
+            if hasattr(continuation_binding, "to_dict")
+            else dict(continuation_binding)
+            if isinstance(continuation_binding, dict)
+            else None
+        )
+        if binding_dict:
+            is_active = (
+                binding_dict.get("mechanism") != "none"
+                and not binding_dict.get("fallback_occurred", False)
+            )
+            facts["continuation_active"] = is_active
+            if is_active:
+                if binding_dict.get("active_anchor_id"):
+                    facts["active_anchor_id"] = binding_dict["active_anchor_id"]
+                if binding_dict.get("upstream_handle"):
+                    facts["bound_upstream_handle"] = binding_dict["upstream_handle"]
+        return facts
+
+    async def generate_content(
+        self,
+        *,
+        model: str,
+        contents: Any,
+        config: Any | None = None,
+        continuation_binding: dict[str, Any] | None = None,
+    ) -> Any:
+        """Generate content via google-genai SDK with continuation handle support."""
+        types = self._types()
+        if continuation_binding:
+            config = self.mount_continuation_handle(
+                config,
+                continuation_binding,
+                types_module=types,
+            )
+        try:
+            await ensure_execution_allowed(states=("not_sent",))
+            kwargs: dict[str, Any] = {"model": model, "contents": contents}
+            if config is not None:
+                kwargs["config"] = config
+            response = await self.client.aio.models.generate_content(**kwargs)
+            return response
+        except ExecutionLeaseLost:
+            raise
+        except Exception as exc:
+            raise self._provider_error(exc, phase="gemini_generate_content") from exc
+
     @staticmethod
     def _provider_error(exc: Exception, *, phase: str) -> Exception:
         status = getattr(exc, "status_code", None)
@@ -540,3 +709,7 @@ class GeminiGenAIClient:
 
 # Historical import name, one implementation.
 GeminiAIHubMixGenAIClient = GeminiGenAIClient
+
+mount_continuation_handle = GeminiGenAIClient.mount_continuation_handle
+extract_cache_facts = GeminiGenAIClient.extract_cache_facts
+extract_session_facts = GeminiGenAIClient.extract_session_facts

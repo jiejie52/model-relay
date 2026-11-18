@@ -1,6 +1,7 @@
 from __future__ import annotations
 from app.runtime.contracts import RuntimeState, ActualExecutionFact
 from app.runtime.condition_verifier import ConditionVerifier
+from app.runtime.continuation_binder import ContinuationBinder
 from app.runtime.physical_context import PhysicalContextProjector
 from app.runtime.dispatch_sealer import AtomicDispatchSealer
 from app.runtime.controlled_invoker import ControlledInvoker
@@ -12,13 +13,14 @@ from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, ensu
 
 class RelayRuntimeEngine:
     """Physical execution only; schedules and Session commits belong to the execution plane."""
-    def __init__(self, repo, storage, providers, materials, bindings, settings, cache_orchestrator=None):
+    def __init__(self, repo, storage, providers, materials, bindings, settings, cache_orchestrator=None, continuation_binder=None):
         self.repo, self.storage, self.settings = repo, storage, settings
         self.providers = providers
         self.artifacts = ExecutionArtifacts(repo, storage, settings)
         self.errors = RawErrorRecorder(repo, storage, settings)
         self.verifier = ConditionVerifier(repo, providers)
         self.bindings = bindings
+        self.continuation_binder = continuation_binder or ContinuationBinder(repo, settings)
         self.projector = PhysicalContextProjector(repo, bindings, settings)
         self.cache = cache_orchestrator or CacheMaterializer(repo)
         self.cache.settings = settings
@@ -48,6 +50,9 @@ class RelayRuntimeEngine:
             await self.verifier.verify(plan)
             await ensure_execution_allowed(states=("not_sent",))
             await self.projector.prepare_scope(state)
+            state.failure_stage = "continuation_bind"
+            await self.continuation_binder.bind_for_context(state)
+            await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "material_bind"
             await self.bindings.bind_for_plan(state)
             await ensure_execution_allowed(states=("not_sent",))

@@ -164,6 +164,20 @@ class RawErrorMeta(BaseModel):
     archive_error: dict[str, Any] | None = None
 
 
+class ContinuationSummary(BaseModel):
+    schema_version: str = "relay-continuation-summary/1"
+    continuation_mode: str | None = None
+    mechanism: str | None = None
+    active_anchor_id: str | None = None
+    parent_anchor_id: str | None = None
+    bound_turns_count: int | None = None
+    fallback_occurred: bool = False
+    fallback_reason: str | None = None
+    plan_hash: str | None = None
+    binding_hash: str | None = None
+    details: dict[str, Any] | None = None
+
+
 class RequestEnvelope(BaseModel):
     schema_version: str = "relay-session/2.1"
     session_id: UUID
@@ -175,6 +189,7 @@ class RequestEnvelope(BaseModel):
     result: dict[str, Any] | None = None
     error: RawErrorMeta | None = None
     cache: CacheSummary | None = None
+    continuation: ContinuationSummary | None = None
     poll_after_seconds: int | None = None
 
 
