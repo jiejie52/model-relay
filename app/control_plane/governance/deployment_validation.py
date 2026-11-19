@@ -20,7 +20,7 @@ from app.protocol_adapters.error_observation import provider_http_error_observat
 from app.observability import warning as log_warning
 
 VALIDATOR_VERSION='deployment-probes/1'
-GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/4'
+GEMINI_INTERACTIONS_VALIDATOR_VERSION='deployment-probes/gemini-interactions/5'
 logger = logging.getLogger("model-relay-deployment-validation")
 
 
@@ -145,10 +145,11 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                 if protocol == 'gemini_interactions':
                     gen_cfg = {'max_output_tokens': min(1024, cap.supported_options.get('max_output_tokens', {}).get('max', 1024))}
                     m_name = 'models/' + model if not model.startswith('models/') else model
-                    input_parts = ([file_part] if file_part else []) + [{'type': 'text', 'text': 'Return exactly {"ok":true} as JSON.'}]
+                    probe_prompt = 'Return exactly {"ok":true} as JSON.' if native else 'Reply briefly with OK.'
+                    input_parts = ([file_part] if file_part else []) + [{'type': 'text', 'text': probe_prompt}]
                     payload = {
                         'model': m_name,
-                        'input': input_parts if file_part else 'Return exactly {"ok":true} as JSON.',
+                        'input': input_parts if file_part else probe_prompt,
                         'store': False,
                         'generation_config': dict(gen_cfg)
                     }
@@ -156,7 +157,9 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                         mode='json_schema' if native else 'json_object',
                         schema=schema if native else None, name='validation', strict=bool(native),
                         source='deployment_validation')
-                    payload['response_format'] = project_gemini_interactions_response_format(output_spec)
+                    response_format = project_gemini_interactions_response_format(output_spec)
+                    if response_format is not None:
+                        payload['response_format'] = response_format
                     _project_probe_thinking(payload, cap, protocol)
                     # Qualify the exact protocol. generateContent success is not
                     # evidence that an Interactions supply is ready.
@@ -164,18 +167,16 @@ async def verify_supply(settings, plane, supply, *, journal=None):
                     if not isinstance(last, dict) or last.get('error') or last.get('status') != 'completed':
                         raise ProbeFailure('incomplete_interactions_probe')
                     text = extract_interactions_text(last)
-                    if not text: raise ProbeFailure('empty_probe_output')
-                    try:
-                        parsed = json.loads(text)
-                        if native:
+                    if not text.strip(): raise ProbeFailure('empty_probe_output')
+                    if native:
+                        try:
+                            parsed = json.loads(text)
                             validate(parsed, schema)
-                        elif not isinstance(parsed, dict):
-                            raise ValueError('JSON object expected')
-                        if not isinstance(parsed, dict) or parsed.get('ok') is not True:
-                            raise ValueError('Probe must answer the requested ok=true object')
-                    except Exception:
-                        raise ProbeFailure('native_schema_probe_failed' if native else 'json_object_probe_failed') from None
-                    facets.append('json_object')
+                            if parsed.get('ok') is not True:
+                                raise ValueError('Probe must answer ok=true')
+                        except Exception:
+                            raise ProbeFailure('native_schema_probe_failed') from None
+                    if not native: facets.append('relay_result_object')
                     facets.extend(['inference', 'representative_thinking'] + (['native_json_schema'] if native else []))
                     if 'implicit_prefix' in mechanisms:
                         facets.append('implicit_prefix')

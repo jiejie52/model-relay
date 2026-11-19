@@ -569,8 +569,8 @@ class RequestAcceptor:
             raise ExecutionRequestError(status_code=422, detail={"code": exc.code, "message": exc.message}) from exc
         if (base_snapshot.get("protocol") == "gemini_interactions"
                 and output_spec is not None and output_spec.mode == "json_object"):
-            # The caller requested a Relay JSON object, not a native business schema.
-            base_snapshot["structured_output_guarantee"] = "json_object_post_validate"
+            # Relay wraps the result; model text has no JSON constraint.
+            base_snapshot["structured_output_guarantee"] = "relay_result_object"
         context_plan: dict[str, Any] | None = None
         cache_plan: dict[str, Any] | None = None
         history_identity: dict[str, Any] | None = None

@@ -1,3 +1,7 @@
+# Model Relay 10.1.4
+
+落实 json_object 的 Relay 结果包装语义：模型正文不需要是 JSON，Relay 原样保存 result.text 并自行构造 JSON result 对象。Interactions 的该模式不发送 response_format，不请求上游 JSON 输出、不补 Schema、不做模型正文 JSON 解析或对象根类型校验。显式业务 json_schema 保留独立校验。见 [UPGRADE_10.1.4.md](UPGRADE_10.1.4.md)。
+
 # Model Relay 10.1.3
 
 Interactions 的 `json_object` 请求不再补入空壳 `schema:{"type":"object"}`。上游只接收 JSON 格式声明；Relay 对返回对象执行后置校验与规范化序列化，保留 `result.text` 的现有接口。真实 `json_schema` 继续完整下发并校验。部署步骤见 [UPGRADE_10.1.3.md](UPGRADE_10.1.3.md)。

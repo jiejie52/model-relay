@@ -430,8 +430,7 @@ class TestGeminiInteractionsDeploymentValidation(unittest.IsolatedAsyncioTestCas
                 )
             elif "interactions" in url_str:
                 payload = json.loads(request.content)
-                self.assertEqual(payload["response_format"], {
-                    "type": "text", "mime_type": "application/json"})
+                self.assertNotIn("response_format", payload)
                 self.assertEqual(payload["input"][0]["type"], "document")
                 self.assertEqual(payload["input"][0]["mime_type"], "application/pdf")
                 level = payload.get("generation_config", {}).get("thinking_level")
@@ -441,10 +440,10 @@ class TestGeminiInteractionsDeploymentValidation(unittest.IsolatedAsyncioTestCas
                     200,
                     json={
                         "id": "interactions/probe_id", "status": "completed",
-                        "steps": [{"type": "model_output", "content": [{"type": "text", "text": "{\"ok\":true}"}]}],
+                        "steps": [{"type": "model_output", "content": [{"type": "text", "text": "你好，这是普通文本。"}]}],
                     },
                 )
-            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "{\"ok\":true}"}]}}]})
+            return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"text": "你好，这是普通文本。"}]}}]})
 
         transport = httpx.MockTransport(mock_send)
         with patch.dict(os.environ, {"GOOGLE_GEMINI_API_KEY": "mock-api-key"}):
