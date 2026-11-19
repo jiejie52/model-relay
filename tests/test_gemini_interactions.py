@@ -6,6 +6,7 @@ sys.path.insert(0, ".")
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,11 +21,15 @@ from app.control_plane.definitions import (
 )
 from app.control_plane.governance.workbook import compile_workbook
 from app.control_plane.snapshot import SUPPORTED_PROTOCOLS
+from app.core.continuation_fingerprint import continuation_head, native_prefix_chain
+from app.execution_plane.continuation_intent_planner import ContinuationIntentPlanner
+from app.execution_plane.result_committer import ResultCommitter
 from app.protocol_adapters.factory import IMPLEMENTED_PROTOCOLS, RESOURCE_MECHANISMS
 from app.protocol_adapters.profiles.gemini_interactions import GeminiInteractionsAdapter
 from app.protocol_adapters.wire_projection.gemini_interactions_wire import (
     project_gemini_interactions_payload,
 )
+from app.runtime.continuation_binder import ContinuationBinder
 from app.runtime.contracts import SealedDispatchBundle, dispatch_input_digest
 
 
@@ -219,6 +224,148 @@ class TestGeminiInteractionsWire(unittest.TestCase):
         self.assertFalse(payload_fb["store"])
 
 
+class TestGeminiInteractionsHistoryPrefix(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.session = {"id": "session-a", "context_policy": "conversation"}
+        self.snapshot = {
+            "protocol": "gemini_interactions",
+            "session_id": self.session["id"],
+            "tenant_id": "tenant-a",
+            "conversation_hash": "conversation-a",
+            "connection_id": "google_gemini",
+            "account_scope_id": "account-a",
+            "connection_spec_hash": "spec-a",
+            "model": "gemini-3.1-flash-lite",
+            "instructions": "Answer briefly.",
+            "capability_contract": {"continuation": {
+                "anchor_class": "immutable_tree_anchor",
+                "verification_status": "verified",
+                "requires_upstream_store": True,
+                "retention_ttl_seconds": 3600,
+                "max_delta_turns": 4,
+                "supports_multiturn_delta": True,
+            }},
+        }
+        self.repository = SimpleNamespace(
+            list_continuation_prefixes=AsyncMock(side_effect=self.find_anchors),
+        )
+        self.anchors = []
+
+    def find_anchors(self, *, head, session_id, tenant_id, conversation_hash, max_turns):
+        return [
+            anchor for anchor in self.anchors
+            if (anchor["head_fingerprint"] == head and anchor["session_id"] == session_id
+                and anchor["tenant_id"] == tenant_id and anchor["conversation_hash"] == conversation_hash
+                and anchor["covered_turn_count"] <= max_turns)
+        ]
+
+    def plan(self, snapshot, history, policy="conversation"):
+        return ContinuationIntentPlanner.plan_frozen_context(
+            snapshot=snapshot, session=self.session, request_policy=policy, history=history,
+            model_history_visible=policy == "conversation", body_mode=None, cache_mechanism=None,
+        ).to_dict()
+
+    async def bind(self, plan, snapshot, history):
+        state = SimpleNamespace(
+            continuation_intent_plan=plan,
+            snapshot=snapshot,
+            session=self.session,
+            request_row={"tenant_id": snapshot["tenant_id"],
+                         "conversation_hash": snapshot["conversation_hash"]},
+            session_id=self.session["id"],
+            history=history,
+            material_bindings=[],
+            historical_pinned_bindings=[],
+        )
+        return await ContinuationBinder(self.repository).bind_for_context(state)
+
+    def wire(self, binding, input_text, snapshot, history=()):
+        bundle = make_test_bundle(
+            input_text=input_text, instructions=snapshot.get("instructions"), tools=snapshot.get("tools"),
+            history=list(history), continuation_binding=binding.to_dict(),
+        )
+        return project_gemini_interactions_payload(bundle)
+
+    def publish(self, snapshot, plan, binding, user_content):
+        history = [{"transport_history": {
+            "kind": "gemini_interactions",
+            "interaction_user_input": user_content,
+            "interaction_model_steps": [{"type": "model_output", "content": [{"type": "text", "text": "OK"}]}],
+        }}]
+        anchor = ResultCommitter._interactions_anchor(
+            snapshot, plan["topology"], binding.to_dict(), history, {},
+            {"id": "request-1"}, "interaction-1",
+        )
+        self.anchors.append({
+            **anchor, "id": anchor["anchor_id"], "session_id": snapshot["session_id"],
+            "tenant_id": snapshot["tenant_id"], "conversation_hash": snapshot["conversation_hash"],
+        })
+        return history
+
+    async def test_long_reference_is_sent_once_with_current_round_options(self):
+        first_text = "Reference material. " * 5000 + "\nQuestion 1"
+        initial_plan = self.plan(self.snapshot, [])
+        first = await self.bind(initial_plan, self.snapshot, [])
+        first_wire, user_content = self.wire(first, first_text, self.snapshot)
+        self.assertEqual(first_wire["input"], first_text)
+        self.assertEqual(first_wire["system_instruction"], "Answer briefly.")
+        self.assertTrue(first_wire["store"])
+        self.assertNotIn("previous_interaction_id", first_wire)
+        history = self.publish(self.snapshot, initial_plan, first, user_content)
+
+        current = {**self.snapshot, "instructions": "Respond in Chinese.", "tools": [{"type": "google_search"}]}
+        second_plan = self.plan(current, history)
+        second = await self.bind(second_plan, current, history)
+        body, _ = self.wire(second, "Question 2", current, history)
+
+        self.assertEqual(second.effective_mode, "stateful_anchor_delta")
+        self.assertEqual(body["previous_interaction_id"], "interaction-1")
+        self.assertEqual(body["input"], "Question 2")
+        self.assertEqual(body["system_instruction"], current["instructions"])
+        self.assertEqual(body["tools"], current["tools"])
+
+        no_settings = {**current, "instructions": None, "tools": None}
+        third = await self.bind(self.plan(no_settings, history), no_settings, history)
+        third_wire, _ = self.wire(third, "Another question", no_settings, history)
+        self.assertEqual(third_wire["previous_interaction_id"], "interaction-1")
+        self.assertNotIn("system_instruction", third_wire)
+        self.assertNotIn("tools", third_wire)
+
+        for policy in ("explicit", "session_materials_only"):
+            with self.subTest(policy=policy):
+                self.repository.list_continuation_prefixes.reset_mock()
+                isolated = await self.bind(self.plan(current, [], policy), current, [])
+                isolated_wire, _ = self.wire(isolated, "Isolated question", current)
+                self.repository.list_continuation_prefixes.assert_not_awaited()
+                self.assertEqual(isolated_wire["input"], "Isolated question")
+                self.assertFalse(isolated_wire["store"])
+                self.assertNotIn("previous_interaction_id", isolated_wire)
+
+    async def test_legacy_frozen_plan_keeps_its_anchor_and_new_plan_replays_once(self):
+        legacy_plan = self.plan(self.snapshot, [])
+        legacy_topology = legacy_plan["topology"]
+        legacy_topology.pop("head_format")
+        legacy_topology["parent_head_fingerprint"] = continuation_head(self.snapshot)
+        first = await self.bind(legacy_plan, self.snapshot, [])
+        _, user_content = self.wire(first, "Reference material for the old chain.", self.snapshot)
+        history = self.publish(self.snapshot, legacy_plan, first, user_content)
+
+        legacy_topology["visible_turn_count"] = 1
+        legacy_topology["turn_prefix_chain"] = native_prefix_chain(
+            legacy_topology["parent_head_fingerprint"], history,
+        )
+        prior = await self.bind(legacy_plan, self.snapshot, history)
+        self.assertEqual(prior.upstream_handle, "interaction-1")
+
+        upgraded = await self.bind(self.plan(self.snapshot, history), self.snapshot, history)
+        body, _ = self.wire(upgraded, "Continue", self.snapshot, history)
+        self.assertEqual(upgraded.fallback_reason, "NO_VALID_PARENT_ANCHOR")
+        self.assertNotIn("previous_interaction_id", body)
+        self.assertTrue(body["store"])
+        self.assertEqual(body["input"][0]["content"][0]["text"], "Reference material for the old chain.")
+        self.assertEqual(body["input"][-1]["content"][0]["text"], "Continue")
+
+
 class TestGeminiInteractionsAdapter(unittest.IsolatedAsyncioTestCase):
     async def test_execute_success_and_response_parsing(self):
         """Adapter correctly parses /v1beta/interactions response and returns new anchor handle."""
@@ -353,7 +500,7 @@ class TestControlPlaneInteractions(unittest.TestCase):
     def test_workbook_compilation_assigns_interactions_and_immutable_tree_anchor(self):
         """Compiling workbook assigns gemini_interactions protocol and immutable_tree_anchor."""
         from pathlib import Path
-        content = Path(r"config\model_management_v2.xlsx").read_bytes()
+        content = (Path(__file__).resolve().parents[1] / "config" / "model_management_v2.xlsx").read_bytes()
         settings = Settings(
             relay_api_token="test",
             supabase_url="https://test.supabase.co",
@@ -399,7 +546,7 @@ class TestGeminiInteractionsDeploymentValidation(unittest.IsolatedAsyncioTestCas
             supabase_secret_key="test",
             deployment_id="railway",
         )
-        content = Path(r"config\model_management_v2.xlsx").read_bytes()
+        content = (Path(__file__).resolve().parents[1] / "config" / "model_management_v2.xlsx").read_bytes()
         plane, targets = compile_workbook(content, settings)
 
         target_supply = None
@@ -469,7 +616,7 @@ class TestGeminiInteractionsDeploymentValidation(unittest.IsolatedAsyncioTestCas
             supabase_secret_key="test",
             deployment_id="railway",
         )
-        content = Path(r"config\model_management_v2.xlsx").read_bytes()
+        content = (Path(__file__).resolve().parents[1] / "config" / "model_management_v2.xlsx").read_bytes()
         plane, targets = compile_workbook(content, settings)
         target_supply = next(s for s in plane.offerings.values() if s.model_pattern == "gemini-3.1-flash-lite" and s.connection_id == "google_gemini")
 

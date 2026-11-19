@@ -6,6 +6,8 @@ from typing import Any
 from app.core.idempotency import canonical_json_bytes, stable_hash
 
 CONTINUATION_CHAIN_FORMAT = "relay-continuation-chain/1"
+LEGACY_CONTINUATION_HEAD = "relay-continuation-head/2"
+INTERACTIONS_HISTORY_HEAD = "relay-continuation-head/3"
 
 
 def extract_turn_semantics(turn: dict[str, Any]) -> dict[str, Any]:
@@ -131,16 +133,23 @@ def verify_anchor_fingerprint(anchor_record: dict[str, Any] | Any, current_finge
     return anchor_fp == current_fingerprint
 
 
-def continuation_head(snapshot: dict[str, Any]) -> str:
-    """Bind durable scope and replayable instructions/tools, independently of turn options."""
-    return stable_hash({
-        "format": "relay-continuation-head/2",
-        **{key: snapshot.get(key) for key in (
-            "session_id", "tenant_id", "conversation_hash", "connection_id",
-            "account_scope_id", "connection_spec_hash", "protocol_profile_hash",
-            "model", "upstream_model", "protocol", "instructions", "tools",
-        )},
-    })
+def continuation_head(
+    snapshot: dict[str, Any], *, head_format: str = LEGACY_CONTINUATION_HEAD,
+) -> str:
+    """Identify the history namespace used by a frozen continuation plan."""
+    scope_keys = (
+        "session_id", "tenant_id", "conversation_hash", "connection_id",
+        "account_scope_id", "connection_spec_hash", "protocol_profile_hash",
+        "model", "upstream_model", "protocol",
+    )
+    if head_format == LEGACY_CONTINUATION_HEAD:
+        scope_keys += ("instructions", "tools")
+    elif head_format != INTERACTIONS_HISTORY_HEAD or snapshot.get("protocol") != "gemini_interactions":
+        raise ValueError("Unsupported continuation head format for this protocol")
+
+    # Interactions inherits user/model steps. System instructions and tool
+    # declarations are sealed and sent on each request that uses them.
+    return stable_hash({"format": head_format, **{key: snapshot.get(key) for key in scope_keys}})
 
 
 def extend_native_prefix(previous: str, turn: dict[str, Any]) -> str:

@@ -25,7 +25,9 @@ class ContinuationIntentPlanner:
         history: list[dict[str, Any]], model_history_visible: bool, body_mode: str | None,
         cache_mechanism: str | None,
     ) -> ContinuationIntentPlan:
-        from app.core.continuation_fingerprint import continuation_head, native_prefix_chain
+        from app.core.continuation_fingerprint import (
+            INTERACTIONS_HISTORY_HEAD, LEGACY_CONTINUATION_HEAD, continuation_head, native_prefix_chain,
+        )
 
         contract = (snapshot.get("capability_contract") or {}).get("continuation") or {}
         scope_is_bound = bool(snapshot.get("account_scope_id") and snapshot.get("connection_spec_hash"))
@@ -46,8 +48,11 @@ class ContinuationIntentPlanner:
         reusable = (enabled and model_history_visible and request_policy == "conversation"
                     and session.get("context_policy") == "conversation"
                     and session.get("history_mode", "cumulative") == "cumulative")
-        head = continuation_head(snapshot)
+        head_format = (INTERACTIONS_HISTORY_HEAD if snapshot.get("protocol") == "gemini_interactions"
+                       else LEGACY_CONTINUATION_HEAD)
+        head = continuation_head(snapshot, head_format=head_format)
         topology = {
+            **({"head_format": head_format} if head_format == INTERACTIONS_HISTORY_HEAD else {}),
             "context_policy": request_policy,
             "model_history_visible": model_history_visible,
             "visible_turn_count": len(history),

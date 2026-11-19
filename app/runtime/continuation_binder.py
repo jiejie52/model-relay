@@ -5,7 +5,9 @@ import inspect
 import logging
 from typing import Any
 
-from app.core.continuation_fingerprint import continuation_head, continuation_material_references, native_prefix_chain
+from app.core.continuation_fingerprint import (
+    LEGACY_CONTINUATION_HEAD, continuation_head, continuation_material_references, native_prefix_chain,
+)
 from app.protocol_adapters.base import ProviderRequestError
 from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
 from app.runtime.continuation_contracts import ContinuationExecutionBinding
@@ -177,7 +179,10 @@ class ContinuationBinder:
     async def _bind_frozen(self, state, intent, *, reopen):
         topology = intent.get("topology") or {}
         history = state.history
-        head = continuation_head(state.snapshot)
+        try:
+            head = continuation_head(state.snapshot, head_format=topology.get("head_format", LEGACY_CONTINUATION_HEAD))
+        except ValueError as exc:
+            raise ProviderRequestError("CONTINUATION_CONTEXT_MISMATCH", str(exc)) from exc
         chain = native_prefix_chain(head, history)
         if (topology.get("parent_head_fingerprint") != head
                 or topology.get("visible_turn_count") != len(history)

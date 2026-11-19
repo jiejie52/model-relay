@@ -1,6 +1,6 @@
-# Model Relay 10.2.0
+# Model Relay 10.2.1
 
-Gemini Interactions 派发封存、单轮上下文隔离及续接历史恢复。数据库迁移与验收见 [UPGRADE_10.2.0.md](UPGRADE_10.2.0.md)。
+Gemini Interactions 按已提交的会话历史续接，支持首轮提交长资料、后续发送新问题。升级和两轮请求示例见 [UPGRADE_10.2.1.md](UPGRADE_10.2.1.md)。
 
 # Model Relay 10.1.4
 
