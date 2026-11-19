@@ -15,14 +15,14 @@ def placement_enabled(session, profile, mode):
             or bool(session.get("committed_material_ledger"))))
 
 
-def plan_effective_materials(*, session, explicit_material_ids, history, profile, material_rows, context_policy="conversation", deduplicate_auto=True, safety_seconds=120):
+def plan_effective_materials(*, session, explicit_material_ids, history, profile, material_rows, context_policy="conversation", deduplicate_auto=True, safety_seconds=120, model_history_visible=True):
     kinds = list(profile.get("history_material_part_kinds") or [])
     if not kinds or not route_identity(session)["connection_spec_hash"] or not route_identity(session)["account_scope_id"]:
         raise MaterialPlacementError("MATERIAL_PLACEMENT_CONTRACT_INVALID")
     verified = verify_occurrences(session=session, history=history,
         ledger=session.get("committed_material_ledger") or [], kinds=kinds)
     by_id = {str(row["id"]): row for row in material_rows}
-    for occ in verified:
+    for occ in verified if model_history_visible else []:
         row = by_id.get(occ["material_id"])
         if not row or row.get("sha256") != occ["content_sha256"] or row.get("status") in {"deleted", "failed", "reupload_required"}:
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")

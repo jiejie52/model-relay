@@ -142,7 +142,7 @@ class AtomicDispatchSealer:
 
         has_active_continuation = bool(active_anchor_id and not fallback_occurred)
 
-        if has_active_continuation:
+        if has_active_continuation and continuation_binding_data.get("schema_version") != "relay-continuation-binding/2":
             hold_seconds = 300
             if isinstance(state.snapshot, dict) and "continuation_hold_seconds" in state.snapshot:
                 hold_seconds = int(state.snapshot["continuation_hold_seconds"])
@@ -163,8 +163,7 @@ class AtomicDispatchSealer:
                 )
             state.execution_snapshot = dict(state.snapshot)
             state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
-            if isinstance(state.snapshot, dict):
-                state.snapshot["_relay_continuation_execution"] = continuation_binding_data
+            state.snapshot["_relay_continuation_execution"] = continuation_binding_data
         elif state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
@@ -185,7 +184,14 @@ class AtomicDispatchSealer:
                     "Cache execution binding was rejected by the Request execution fence",
                 )
 
-            seal_method = self.repo.seal_materials_and_dispatch_v89 if state.snapshot.get("placement_contract_version") is not None else self.repo.seal_cache_and_dispatch_v3
+            has_placement = state.snapshot.get("placement_contract_version") is not None
+            sealed_continuation = state.snapshot.get("protocol") == "gemini_interactions" and (
+                state.snapshot.get("continuation_intent_plan") or {}
+            ).get("schema_version") == "relay-continuation-plan/2"
+            if sealed_continuation:
+                seal_method = self.repo.seal_continuation_context_v91
+            else:
+                seal_method = self.repo.seal_materials_and_dispatch_v89 if has_placement else self.repo.seal_cache_and_dispatch_v3
             try:
                 sealed = await seal_method(
                     request_id=state.request_id,
@@ -196,11 +202,16 @@ class AtomicDispatchSealer:
                         "historical_bindings": state.historical_pinned_bindings,
                         "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
                        if state.snapshot.get("placement_contract_version") is not None else {}),
+                    **({"continuation_binding": continuation_binding_data,
+                        "anchor_safety_seconds": state.snapshot["continuation_intent_plan"]["topology"]["anchor_safety_margin_seconds"]}
+                       if sealed_continuation else {}),
                     fence_owner=state.fence.owner,
                     fence_epoch=state.fence.epoch,
                 )
             except SupabaseError as exc:
-                if state.snapshot.get("placement_contract_version") is not None:
+                if sealed_continuation and _provider_binding_sql_diagnostic(exc)[1] == "CONTINUATION_PARENT_NO_LONGER_USABLE":
+                    raise ProviderRequestError("CONTINUATION_PARENT_NO_LONGER_USABLE", "Parent anchor became unusable before dispatch") from exc
+                if has_placement:
                     _log_provider_binding_sql_failure(exc, state)
                 raise
             if not sealed:
@@ -212,8 +223,6 @@ class AtomicDispatchSealer:
             state.execution_snapshot["_relay_cache_execution"] = state.cache_binding
             if continuation_binding_data is not None:
                 state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
-                if isinstance(state.snapshot, dict):
-                    state.snapshot["_relay_continuation_execution"] = continuation_binding_data
         else:
             if state.fence is not None:
                 from app.runtime.execution_guard import ExecutionLeaseLost
@@ -230,8 +239,6 @@ class AtomicDispatchSealer:
                 state.execution_snapshot = dict(state.snapshot)
             if continuation_binding_data is not None:
                 state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
-                if isinstance(state.snapshot, dict):
-                    state.snapshot["_relay_continuation_execution"] = continuation_binding_data
 
 
         state.sealed_bundle = SealedDispatchBundle(**{**inputs, "snapshot": state.execution_snapshot or state.snapshot},

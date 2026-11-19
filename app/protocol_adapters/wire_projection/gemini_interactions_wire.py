@@ -76,6 +76,8 @@ def project_gemini_interactions_payload(
         and effective_mode not in ("disabled", "stateless_full_replay")
     )
 
+    versioned_proof = binding.get("schema_version") == "relay-continuation-binding/2"
+
     # 4. Assemble input turns based on continuation state
     payload_input: list[dict[str, Any]] | str
     previous_interaction_id: str | None = None
@@ -98,7 +100,9 @@ def project_gemini_interactions_payload(
 
         # Determine delta turns
         bound_delta = binding.get("bound_delta_turns")
-        if bound_delta is not None and isinstance(bound_delta, list):
+        if versioned_proof:
+            delta_turns = slice_continuation_history(history, binding["covered_turn_count"], allow_fallback=False)
+        elif bound_delta is not None and isinstance(bound_delta, list):
             delta_turns = bound_delta
         else:
             cov_count = binding.get("covered_turn_count") or binding.get("delta_start_turn_index")
@@ -115,7 +119,7 @@ def project_gemini_interactions_payload(
         else:
             # 0 <= k < N: Multi-turn delta compensation.
             # Replay history[k:N] turns preserving thought steps and signatures, followed by current input.
-            payload_input = _format_delta_multi_turn_input(delta_turns, user_content)
+            payload_input = _format_delta_multi_turn_input(delta_turns, user_content, ordered_steps=versioned_proof)
 
     elif not is_non_cumulative and (
         effective_mode == "stateful_root_init"
@@ -130,7 +134,7 @@ def project_gemini_interactions_payload(
         previous_interaction_id = None
         store = True
         if history:
-            payload_input = _format_delta_multi_turn_input(history, user_content)
+            payload_input = _format_delta_multi_turn_input(history, user_content, ordered_steps=versioned_proof)
         else:
             payload_input = _format_current_turn_input(user_content)
 
@@ -139,7 +143,7 @@ def project_gemini_interactions_payload(
         previous_interaction_id = None
         store = False
         if history and not is_non_cumulative:
-            payload_input = _format_delta_multi_turn_input(history, user_content)
+            payload_input = _format_delta_multi_turn_input(history, user_content, ordered_steps=versioned_proof)
         else:
             payload_input = _format_current_turn_input(user_content)
 
@@ -155,11 +159,9 @@ def project_gemini_interactions_payload(
     payload["store"] = store
 
     # 6. Interaction-scoped system instruction
-    instructions = (
-        snapshot.get("instructions")
-        or session.get("instructions")
-        or session.get("system_instructions")
-    )
+    instructions = snapshot.get("instructions")
+    if not versioned_proof and not instructions:
+        instructions = session.get("instructions") or session.get("system_instructions")
     if instructions:
         if isinstance(instructions, str):
             inst_text = instructions.strip()
@@ -274,6 +276,7 @@ def project_interactions_content_part(part: dict[str, Any]) -> dict[str, Any]:
 def _format_delta_multi_turn_input(
     delta_turns: list[dict[str, Any]],
     current_user_content: dict[str, Any],
+    *, ordered_steps: bool = False,
 ) -> list[dict[str, Any]]:
     """Expand delta turns into an ordered multi-turn input sequence preserving thought signatures."""
     steps: list[dict[str, Any]] = []
@@ -288,14 +291,18 @@ def _format_delta_multi_turn_input(
         # 1. User turn steps
         if kind == "gemini_interactions" and "interaction_user_input" in transport:
             u_input = transport["interaction_user_input"]
-            steps.extend(_extract_user_steps(u_input))
+            steps.extend(_extract_user_steps(u_input, ordered_steps=ordered_steps))
         elif "user_content" in transport:
-            steps.extend(_extract_user_steps(transport["user_content"]))
+            steps.extend(_extract_user_steps(transport["user_content"], ordered_steps=ordered_steps))
 
         # 2. Model turn steps (thought + signature + model_output)
         if kind == "gemini_interactions" and "interaction_model_steps" in transport:
             for s in transport["interaction_model_steps"]:
-                steps.append(copy.deepcopy(s))
+                if ordered_steps and (not isinstance(s, dict) or not s.get("type")
+                                      or (s["type"] == "thought" and not s.get("signature"))):
+                    raise ProviderRequestError("CONTINUATION_NATIVE_STEP_INVALID", "Historical Interactions step is missing its native evidence")
+                if not ordered_steps or s["type"] != "user_input":
+                    steps.append(copy.deepcopy(s))
         elif "model_content" in transport:
             # Native gemini fallback: extract parts including thought and thoughtSignature
             mc = transport["model_content"]
@@ -317,17 +324,15 @@ def _format_delta_multi_turn_input(
                     steps.append({"type": "step", **p})
 
     # Finally append current turn user input
-    current_steps = _extract_user_steps(current_user_content)
+    current_steps = _extract_user_steps(current_user_content, ordered_steps=ordered_steps)
     steps.extend(current_steps)
     return steps
 
 
-def _extract_user_steps(user_content: Any) -> list[dict[str, Any]]:
+def _extract_user_steps(user_content: Any, *, ordered_steps: bool = False) -> list[dict[str, Any]]:
     """Extract standard user input steps from user_content dictionary or string."""
-    if isinstance(user_content, str):
-        return [{"type": "text", "text": user_content}]
-    if not isinstance(user_content, dict):
-        return [{"type": "text", "text": str(user_content)}]
-
-    parts = user_content.get("parts") or []
-    return [project_interactions_content_part(part) for part in parts]
+    if isinstance(user_content, dict):
+        blocks = [project_interactions_content_part(part) for part in user_content.get("parts") or []]
+    else:
+        blocks = [{"type": "text", "text": str(user_content)}]
+    return [{"type": "user_input", "content": blocks}] if ordered_steps else blocks

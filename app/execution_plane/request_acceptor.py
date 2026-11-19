@@ -321,6 +321,7 @@ class RequestAcceptor:
                     history=placement_history, profile=placement_profile, material_rows=canonical_rows,
                     context_policy=request_policy,
                     deduplicate_auto=model_history_visible and mode not in {"legacy_v1", "shadow"},
+                    model_history_visible=model_history_visible,
                     safety_seconds=settings.historical_material_safety_seconds).canonical()
             except MaterialPlacementError as exc:
                 raise ExecutionRequestError(409, {"code": exc.code}) from exc
@@ -329,7 +330,8 @@ class RequestAcceptor:
             if mode == "shadow":
                 shadow = plan_effective_materials(session=session, explicit_material_ids=body.material_ids,
                     history=placement_history, profile=placement_profile, material_rows=canonical_rows,
-                    context_policy=request_policy, deduplicate_auto=model_history_visible).canonical()
+                    context_policy=request_policy, deduplicate_auto=model_history_visible,
+                    model_history_visible=model_history_visible).canonical()
                 log_info(logger, "material_placement_shadow", session_id=str(session_id),
                     shadow_auto_materials_skipped=len(shadow["historical_only_material_ids"]),
                     actual_auto_materials_skipped=0, actual_projection="legacy_v1")
@@ -603,43 +605,66 @@ class RequestAcceptor:
                         except (ValueError, TypeError, AttributeError) as exc:
                             raise ExecutionRequestError(status_code=409, detail={"code": "HISTORY_INTEGRITY_MISMATCH"}) from exc
 
-        candidate_anchor = None
-        history_version = int(session.get("history_version") or 0)
-        if hasattr(repo, "find_active_continuation_anchor"):
-            try:
-                candidate_anchor = await repo.find_active_continuation_anchor(
-                    session_id=session_id,
-                    history_version=history_version,
-                    tenant_id=tenant_id,
-                    conversation_hash=conversation_hash,
+        if base_snapshot["protocol"] == "gemini_interactions" or not model_history_visible:
+            base_snapshot.update(context_policy=request_policy, model_history_visible=model_history_visible)
+            if request_policy == "conversation" and not base_snapshot.get("instructions"):
+                base_snapshot["instructions"] = session.get("instructions") or session.get("system_instructions")
+            base_snapshot["protocol_profile_hash"] = frozen_route.get("protocol_profile_hash")
+            base_snapshot["tools"] = (body.provider_payload or {}).get("tools")
+            visible_history = planning_history if planning_history is not None else (
+                placement_history if placement_plan is not None else None
+            )
+            if model_history_visible and visible_history is None and session.get("history_object_id"):
+                visible_history = await ExecutionArtifacts(repo, services.storage, settings).load_json(
+                    session["history_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash,
                 )
-            except Exception as exc:
-                log_warning(logger, "find_active_continuation_anchor_failed", session_id=str(session_id), error=str(exc))
-                candidate_anchor = None
+            visible_history = (visible_history or []) if model_history_visible else []
+            if model_history_visible and len(visible_history) != int(session.get("history_version") or 0):
+                raise ExecutionRequestError(409, {"code": "HISTORY_INTEGRITY_MISMATCH"})
+            continuation_plan = ContinuationIntentPlanner.plan_frozen_context(
+                snapshot=base_snapshot, session=session, request_policy=request_policy,
+                history=visible_history, model_history_visible=model_history_visible,
+                body_mode=body_continuation_mode,
+                cache_mechanism=body.requested_cache_mechanism if cache_mechanism_explicit else None,
+            )
+        else:
+            candidate_anchor = None
+            history_version = int(session.get("history_version") or 0)
+            if hasattr(repo, "find_active_continuation_anchor"):
+                try:
+                    candidate_anchor = await repo.find_active_continuation_anchor(
+                        session_id=session_id,
+                        history_version=history_version,
+                        tenant_id=tenant_id,
+                        conversation_hash=conversation_hash,
+                    )
+                except Exception as exc:
+                    log_warning(logger, "find_active_continuation_anchor_failed", session_id=str(session_id), error=str(exc))
+                    candidate_anchor = None
 
-        continuation_history = planning_history if planning_history is not None else (
-            placement_history if 'placement_history' in locals() and placement_history is not None else None
-        )
-        if continuation_history is None and session.get("history_object_id"):
-            try:
-                artifacts = ExecutionArtifacts(repo, services.storage, settings)
-                loaded_h = await artifacts.load_json(
-                    session["history_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash
-                )
-                if isinstance(loaded_h, list):
-                    continuation_history = loaded_h
-            except Exception:
+            continuation_history = planning_history if planning_history is not None else (
+                placement_history if 'placement_history' in locals() and placement_history is not None else None
+            )
+            if continuation_history is None and session.get("history_object_id"):
+                try:
+                    artifacts = ExecutionArtifacts(repo, services.storage, settings)
+                    loaded_h = await artifacts.load_json(
+                        session["history_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash
+                    )
+                    if isinstance(loaded_h, list):
+                        continuation_history = loaded_h
+                except Exception:
+                    continuation_history = []
+            if continuation_history is None:
                 continuation_history = []
-        if continuation_history is None:
-            continuation_history = []
 
-        continuation_plan = ContinuationIntentPlanner.plan_continuation_intent(
-            session=session,
-            body_mode=body_continuation_mode,
-            candidate_anchor=candidate_anchor,
-            history=continuation_history,
-            route_profile=frozen_route or session.get("route_profile") or {},
-        )
+            continuation_plan = ContinuationIntentPlanner.plan_continuation_intent(
+                session=session,
+                body_mode=body_continuation_mode,
+                candidate_anchor=candidate_anchor,
+                history=continuation_history,
+                route_profile=frozen_route or session.get("route_profile") or {},
+            )
         base_snapshot["continuation_intent_plan"] = continuation_plan.to_dict()
 
         if cache_contract_session:
@@ -691,6 +716,11 @@ class RequestAcceptor:
                 history=(planning_history if planning_history is not None else ([] if is_v66 else None))
                     if model_history_visible else [],
             )
+            if continuation_plan.topology is not None:
+                context_plan["continuation_topology"] = continuation_plan.topology
+                context_plan["context_plan_hash"] = stable_hash({
+                    key: value for key, value in context_plan.items() if key != "context_plan_hash"
+                })
             evidence_key = reuse_evidence_key(plan_seed, context_plan)
             observed_reuse: dict[str, Any] = {"observed_compatible_uses": 0}
             frozen_cache_policy = frozen_route.get("cache_policy") if isinstance(frozen_route.get("cache_policy"), dict) else {}
@@ -832,6 +862,7 @@ class RequestAcceptor:
                 "parent_fingerprint": continuation_plan.parent_fingerprint,
                 "allow_fallback_to_full": continuation_plan.allow_fallback_to_full,
                 "plan_hash": continuation_plan.plan_hash,
+                **({"topology": continuation_plan.topology} if continuation_plan.topology is not None else {}),
             }
         if placement_plan is not None:
             accept_metadata["_relay_material_placement"] = placement_plan

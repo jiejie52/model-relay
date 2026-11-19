@@ -111,9 +111,10 @@ class ActualExecutionFact:
     failure_stage: str | None = None
     execution_observation: dict[str, Any] = field(default_factory=dict)
     projected_material_occurrences: list = field(default_factory=list, kw_only=True)
+    continuation_binding: dict[str, Any] | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
-        for name in ("material_binding", "cache_binding", "seal_record", "raw_error_envelope", "execution_observation", "projected_material_occurrences"):
+        for name in ("material_binding", "cache_binding", "seal_record", "raw_error_envelope", "execution_observation", "projected_material_occurrences", "continuation_binding"):
             object.__setattr__(self, name, freeze_json(getattr(self, name)))
 
 @dataclass

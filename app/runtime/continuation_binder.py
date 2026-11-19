@@ -5,6 +5,8 @@ import inspect
 import logging
 from typing import Any
 
+from app.core.continuation_fingerprint import continuation_head, continuation_material_references, native_prefix_chain
+from app.protocol_adapters.base import ProviderRequestError
 from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
 from app.runtime.continuation_contracts import ContinuationExecutionBinding
 from app.runtime.contracts import RuntimeState
@@ -19,7 +21,7 @@ class ContinuationBinder:
         self.repo = repo
         self.settings = settings
 
-    async def bind_for_context(self, state: RuntimeState) -> ContinuationExecutionBinding:
+    async def bind_for_context(self, state: RuntimeState, *, reopen=False) -> ContinuationExecutionBinding:
         """Resolve continuation intent, validate anchor validity and expiry, and bind delta history."""
         # 1. Read continuation intent plan
         intent_plan = getattr(state, "continuation_intent_plan", None)
@@ -29,6 +31,19 @@ class ContinuationBinder:
             intent_plan = state.snapshot.get("continuation_intent_plan")
         if intent_plan is None and isinstance(getattr(state, "context_plan", None), dict):
             intent_plan = state.context_plan.get("continuation_intent_plan")
+
+        policy = state.snapshot.get("context_policy") or state.session.get("context_policy")
+        non_cumulative = (policy in ("explicit", "session_materials_only")
+                          or state.snapshot.get("model_history_visible") is False
+                          or state.session.get("history_mode") == "ephemeral_turn")
+        if isinstance(intent_plan, dict) and intent_plan.get("schema_version") == "relay-continuation-plan/2":
+            return await self._bind_frozen(state, intent_plan, reopen=reopen)
+        if non_cumulative or state.snapshot.get("protocol") == "gemini_interactions":
+            state.continuation_binding = ContinuationExecutionBinding(
+                schema_version="relay-continuation-binding/2", effective_mode="stateless_full_replay",
+            )
+            state.continuation_anchor = None
+            return state.continuation_binding
 
         continuation_mode = "auto"
         parent_anchor_id = None
@@ -157,6 +172,69 @@ class ContinuationBinder:
         if isinstance(getattr(state, "snapshot", None), dict):
             state.snapshot["continuation_binding"] = binding.to_dict()
             state.snapshot.pop("continuation_anchor", None)
+        return binding
+
+    async def _bind_frozen(self, state, intent, *, reopen):
+        topology = intent.get("topology") or {}
+        history = state.history
+        head = continuation_head(state.snapshot)
+        chain = native_prefix_chain(head, history)
+        if (topology.get("parent_head_fingerprint") != head
+                or topology.get("visible_turn_count") != len(history)
+                or topology.get("turn_prefix_chain") != chain):
+            raise ProviderRequestError("CONTINUATION_CONTEXT_MISMATCH", "Frozen continuation topology differs from visible context")
+
+        placement = state.snapshot.get("material_placement_plan")
+        if state.snapshot.get("protocol") == "gemini_interactions" and not placement and any(
+            "fileData" in part
+            for turn in history
+            for part in (turn.get("transport_history", {}).get("user_content") or {}).get("parts", [])
+        ):
+            raise ProviderRequestError("HISTORICAL_MATERIAL_UNPINNED", "Interactions replay requires a verified ledger for historical file references")
+
+        can_store = (topology.get("reusable_on_commit") is True and
+                     (placement is not None or not state.material_bindings))
+        binding = ContinuationExecutionBinding(
+            schema_version="relay-continuation-binding/2",
+            effective_mode="stateful_root_init" if can_store else "stateless_full_replay",
+            store_upstream_state=can_store, parent_head_fingerprint=head,
+            fallback_occurred=bool(can_store and history),
+            fallback_reason="NO_VALID_PARENT_ANCHOR" if can_store and history else None,
+        )
+        if can_store and history and not reopen:
+            refs = continuation_material_references((placement or {}).get("verified_history_occurrences") or [])
+            live = {(b["material_id"], b["binding_generation"], b.get("provider_binding_id"), b.get("external_uri"))
+                    for b in state.historical_pinned_bindings}
+            candidates = await self.repo.list_continuation_prefixes(
+                session_id=state.session_id, tenant_id=state.request_row["tenant_id"],
+                conversation_hash=state.request_row["conversation_hash"], head=head, max_turns=len(history),
+            )
+            for candidate in candidates:
+                covered = candidate.get("covered_turn_count")
+                handle = candidate.get("upstream_handle")
+                if (type(covered) is not int or not 1 <= covered <= len(history)
+                        or not isinstance(handle, str) or not handle.strip()
+                        or candidate.get("turn_chain_digest") != chain[covered - 1]
+                        or len(history) - covered > topology["max_delta_turns"]
+                        or (covered < len(history) and not topology["supports_multiturn_delta"])
+                        or not self._is_anchor_valid(candidate, state, topology["anchor_safety_margin_seconds"])):
+                    continue
+                covered_refs = [ref for ref in refs if ref["history_entry_index"] < covered]
+                if candidate.get("covered_material_bindings") != covered_refs or any(
+                    (ref["material_id"], ref["binding_generation"], ref["provider_binding_id"], ref["external_uri"]) not in live
+                    for ref in covered_refs
+                ):
+                    continue
+                binding = ContinuationExecutionBinding(
+                    schema_version="relay-continuation-binding/2", effective_mode="stateful_anchor_delta",
+                    mechanism="immutable_tree_anchor", active_anchor_id=candidate["id"], upstream_handle=handle,
+                    covered_turn_count=covered, store_upstream_state=True, parent_head_fingerprint=head,
+                    covered_turn_chain_hash=chain[covered - 1],
+                )
+                break
+
+        state.continuation_binding = binding
+        state.continuation_anchor = None
         return binding
 
     def _is_anchor_valid(self, anchor: Any, state: RuntimeState, safety_seconds: int) -> bool:

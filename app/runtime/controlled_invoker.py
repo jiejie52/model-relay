@@ -9,6 +9,7 @@ import logging
 import math
 from typing import Any
 
+from app.immutable import thaw_json
 from app.observability.http_wire_logger import wire_context, wire_logging_enabled_for_context
 from app.observability.response_capture import (
     current_response_capture, response_capture_scope, response_diagnostics, attach_response_evidence,
@@ -455,6 +456,24 @@ class ControlledInvoker:
         observation = {"response_capture": response_diagnostics(diagnostics), "observed_thinking": (result.observed or {}).get("observed_thinking"),
                        "cache_summary": cache_summary, "cache_usage": cache_usage,
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
+        continuation_binding = thaw_json(state.sealed_bundle.continuation_execution_binding)
+        if state.snapshot.get("protocol") == "gemini_interactions":
+            from app.core.cache_fingerprint import estimated_tokens
+
+            covered = (continuation_binding or {}).get("covered_turn_count", 0)
+            omitted_tokens = 0
+            for turn in state.history[:covered]:
+                transport = turn.get("transport_history") or {}
+                omitted_tokens += estimated_tokens([
+                    transport.get("interaction_user_input") or transport.get("user_content"),
+                    transport.get("interaction_model_steps") or transport.get("model_content"),
+                ])
+            observation["continuation_usage"] = {
+                "covered_turn_count": covered,
+                "relay_omitted_history_estimated_tokens": omitted_tokens,
+                "upstream_total_input_tokens": result.usage.get("prompt_tokens"),
+                "upstream_implicit_cached_tokens": result.cached_tokens,
+            }
         if state.snapshot.get("placement_contract_version") is not None:
             from app.observability.material_metrics import material_metrics
             metrics = material_metrics(state.snapshot, state.provider_physical_plan, state.historical_pinned_bindings, result, cache_binding=state.cache_binding)
@@ -466,8 +485,10 @@ class ControlledInvoker:
             "raw_json", "text", "response_id", "usage", "cached_tokens", "response_output", "history_entry",
             "http_status", "provider_request_id", "observed", "normalized_usage")}
         fact_object_id = await self.artifacts.store_object(state.request_row, "execution-fact.json", json_bytes({
-            "schema_version": "relay-execution-fact/1", "request_id": state.request_id,
-            "snapshot_hash": stable_hash(state.snapshot), "raw_sha256": __import__("hashlib").sha256(result.raw_bytes).hexdigest(),
+            "schema_version": "relay-execution-fact/2", "request_id": state.request_id,
+            "snapshot_hash": stable_hash(state.plan.snapshot),
+            "continuation_execution_binding": continuation_binding,
+            "seal_hash": state.sealed_bundle.seal_hash, "raw_sha256": __import__("hashlib").sha256(result.raw_bytes).hexdigest(),
             "result": archived_result, "observation": observation, "audit_context": state.snapshot.get("audit_context") or {},
             **({"projected_material_occurrences": state.projected_material_occurrences,
                 "placement_plan_digest": state.snapshot["material_placement_plan"]["plan_digest"]}
@@ -489,4 +510,5 @@ class ControlledInvoker:
         return ActualExecutionFact(state.request_id, "result_stored", state.material_bindings, state.cache_binding,
             {"seal_id": state.request_id, "seal_hash": state.sealed_bundle.seal_hash}, result,
             raw_object_id, output_object_id, execution_observation=observation,
-            projected_material_occurrences=state.projected_material_occurrences)
+            projected_material_occurrences=state.projected_material_occurrences,
+            continuation_binding=continuation_binding)

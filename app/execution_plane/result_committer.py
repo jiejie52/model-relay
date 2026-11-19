@@ -199,7 +199,21 @@ class ResultCommitter:
         if c_mode is None:
             c_mode = session.get("continuation_mode") or "auto"
 
-        if str(c_mode).lower() != "off" and cumulative_history and session.get("context_policy") == "conversation":
+        effective_policy = snapshot.get("context_policy") or session.get("context_policy")
+        topology = (continuation_intent.get("topology") or {}) if isinstance(continuation_intent, dict) else {}
+        actual_binding = thaw_json(fact.continuation_binding) or {}
+        is_interactions = snapshot.get("protocol") == "gemini_interactions"
+        if (is_interactions and topology.get("reusable_on_commit") and actual_binding.get("store_upstream_state")
+                and effective_policy == "conversation" and history_object_id is not None):
+            if ((result.observed or {}).get("interaction_stored") is not True
+                    or (result.observed or {}).get("previous_interaction_id") != actual_binding.get("upstream_handle")):
+                raise ExecutionConflictError("Interaction dispatch differs from the archived continuation binding")
+            if isinstance(result.response_id, str) and result.response_id.strip():
+                continuation_anchor = self._interactions_anchor(
+                    snapshot, topology, actual_binding, new_history, observation, request_row, result.response_id,
+                )
+        elif (not is_interactions and str(c_mode).lower() != "off" and cumulative_history
+              and session.get("context_policy") == "conversation" and effective_policy == "conversation"):
             parent_aid = None
             if isinstance(continuation_intent, dict):
                 parent_aid = continuation_intent.get("parent_anchor_id")
@@ -253,7 +267,20 @@ class ResultCommitter:
             continuation_anchor["state"] = "active"
 
         continuation_summary = None
-        if observation.get("continuation_summary") is not None:
+        if actual_binding.get("schema_version") == "relay-continuation-binding/2":
+            continuation_summary = {
+                "continuation_mode": c_mode,
+                "mechanism": actual_binding["mechanism"],
+                "parent_anchor_id": actual_binding["active_anchor_id"],
+                "active_anchor_id": continuation_anchor["anchor_id"] if continuation_anchor else None,
+                "bound_turns_count": len(history) - actual_binding["covered_turn_count"] if topology.get("model_history_visible") else 0,
+                "fallback_occurred": actual_binding["fallback_occurred"],
+                "fallback_reason": actual_binding["fallback_reason"],
+                "binding_hash": actual_binding["binding_hash"],
+                "plan_hash": continuation_intent.get("plan_hash"),
+                "details": {"effective_mode": actual_binding["effective_mode"]},
+            }
+        elif observation.get("continuation_summary") is not None:
             continuation_summary = dict(observation["continuation_summary"])
         elif observation.get("_relay_continuation") is not None:
             continuation_summary = dict(observation["_relay_continuation"])
@@ -274,6 +301,8 @@ class ResultCommitter:
             }
         if continuation_summary is not None:
             compact_result["_relay_continuation"] = continuation_summary
+        if observation.get("continuation_usage") is not None:
+            compact_result["continuation_usage"] = observation["continuation_usage"]
 
         if is_v3:
             ok = await self.repo.complete_request_v3(
@@ -320,6 +349,35 @@ class ResultCommitter:
             status="succeeded",
         )
         return compact_result
+
+    @staticmethod
+    def _interactions_anchor(snapshot, topology, binding, history, observation, request_row, upstream_handle):
+        from datetime import datetime, timedelta
+        from app.core.continuation_fingerprint import continuation_material_references, extend_native_prefix
+
+        occurrences = [occ for turn in history for occ in (turn.get("material_occurrences") or [])]
+        recorded_at = observation.get("recorded_at")
+        created_at = datetime.fromisoformat(recorded_at) if recorded_at else utcnow()
+        expiry = created_at + timedelta(seconds=topology["retention_ttl_seconds"])
+        for occ in occurrences:
+            material_expiry = occ["binding"].get("expires_at")
+            if material_expiry:
+                expiry = min(expiry, datetime.fromisoformat(material_expiry))
+        chain = topology["turn_prefix_chain"]
+        head = topology["parent_head_fingerprint"]
+        return {
+            "schema_version": "relay-continuation-anchor/2",
+            "anchor_id": str(request_row["id"]),
+            "parent_anchor_id": binding.get("active_anchor_id"),
+            "head_fingerprint": head,
+            "turn_chain_digest": extend_native_prefix(chain[-1] if chain else head, history[-1]),
+            "covered_turn_count": len(history),
+            "covered_material_bindings": continuation_material_references(occurrences),
+            "upstream_handle": upstream_handle,
+            "connection_spec_hash": snapshot["connection_spec_hash"],
+            "account_scope_hash": snapshot["account_scope_id"],
+            "expires_at": expiry.isoformat(),
+        }
 
     @staticmethod
     def _check_observed_contract(
@@ -403,10 +461,13 @@ class ResultCommitter:
             raise ProviderRequestError("THINKING_EXECUTION_FACT_MISSING", "New thinking requests require archived execution facts")
         if plan.snapshot.get("placement_contract_version") is not None and not object_id:
             raise ExecutionConflictError("Material placement requests require archived execution facts")
+        if ((plan.snapshot.get("continuation_intent_plan") or {}).get("schema_version") == "relay-continuation-plan/2"
+                and not object_id):
+            raise ExecutionConflictError("Continuation requests require archived execution facts")
         if object_id:
             identity = {"tenant_id": row["tenant_id"], "conversation_hash": row["conversation_hash"]}
             archive = await self.artifacts.load_json(object_id, **identity)
-            if (archive.get("schema_version") != "relay-execution-fact/1" or archive.get("request_id") != str(row["id"])
+            if (archive.get("schema_version") not in {"relay-execution-fact/1", "relay-execution-fact/2"} or archive.get("request_id") != str(row["id"])
                     or archive.get("snapshot_hash") != stable_hash(plan.snapshot)):
                 raise ExecutionConflictError("Stored execution fact does not match frozen Request")
             raw = await self.artifacts.load_bytes(row["provisional_result_object_id"], **identity)
@@ -418,11 +479,22 @@ class ResultCommitter:
                 if (not isinstance(archive.get("projected_material_occurrences"), list)
                         or archive.get("placement_plan_digest") != plan.snapshot["material_placement_plan"]["plan_digest"]):
                     raise ExecutionConflictError("Archived material placement facts are missing or changed")
+            binding = archive.get("continuation_execution_binding")
+            if (plan.snapshot.get("continuation_intent_plan") or {}).get("schema_version") == "relay-continuation-plan/2":
+                if (not isinstance(binding, dict) or binding.get("binding_hash") != stable_hash({
+                    key: value for key, value in binding.items() if key != "binding_hash"
+                })):
+                    raise ExecutionConflictError("Archived continuation execution binding is missing or changed")
+                if (plan.snapshot.get("protocol") == "gemini_interactions"
+                        and plan.snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}
+                        and (row.get("sealed_continuation_binding") != binding
+                             or row.get("prepared_payload_hash") != archive.get("seal_hash"))):
+                    raise ExecutionConflictError("Archived continuation execution differs from the database seal")
             result = StandardizedProviderResult(raw_bytes=raw, **archive["result"])
             fact = ActualExecutionFact(str(row["id"]), "result_stored", standardized_result=result,
                 provisional_raw_object_id=row["provisional_result_object_id"],
                 provisional_output_object_id=row.get("provisional_output_object_id"),
-                execution_observation=archive["observation"],
+                execution_observation=archive["observation"], continuation_binding=binding,
                 projected_material_occurrences=archive.get("projected_material_occurrences") or [])
             return await self.finalize(plan, fact)
         # Historical requests already contain their validated compact result and

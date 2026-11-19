@@ -17,22 +17,19 @@ class ContinuationExecutionBinding:
     schema_version: str = "relay-continuation-binding/1"
     binding_hash: str = ""
 
+    effective_mode: str | None = None
+    store_upstream_state: bool = False
+    covered_turn_count: int = 0
+    parent_head_fingerprint: str | None = None
+    covered_turn_chain_hash: str | None = None
+
     def __post_init__(self):
         for name in ("upstream_handle", "bound_delta_turns"):
             val = getattr(self, name)
             if val is not None:
                 object.__setattr__(self, name, freeze_json(val))
         if not self.binding_hash:
-            raw = {
-                "schema_version": self.schema_version,
-                "mechanism": self.mechanism,
-                "active_anchor_id": self.active_anchor_id,
-                "upstream_handle": thaw_json(self.upstream_handle) if self.upstream_handle is not None else None,
-                "bound_delta_turns": thaw_json(self.bound_delta_turns),
-                "fallback_occurred": self.fallback_occurred,
-                "fallback_reason": self.fallback_reason,
-            }
-            object.__setattr__(self, "binding_hash", stable_hash(raw))
+            object.__setattr__(self, "binding_hash", stable_hash(self.canonical(include_hash=False)))
 
     def canonical(self, *, include_hash: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -44,6 +41,10 @@ class ContinuationExecutionBinding:
             "fallback_occurred": self.fallback_occurred,
             "fallback_reason": self.fallback_reason,
         }
+        if self.effective_mode is not None:
+            data.update(effective_mode=self.effective_mode, store_upstream_state=self.store_upstream_state,
+                        covered_turn_count=self.covered_turn_count, parent_head_fingerprint=self.parent_head_fingerprint,
+                        covered_turn_chain_hash=self.covered_turn_chain_hash)
         if include_hash:
             data["binding_hash"] = self.binding_hash or stable_hash(data)
         return data
@@ -70,6 +71,11 @@ class ContinuationExecutionBinding:
             fallback_reason=data.get("fallback_reason"),
             schema_version=data.get("schema_version", "relay-continuation-binding/1"),
             binding_hash=data.get("binding_hash", ""),
+            effective_mode=data.get("effective_mode"),
+            store_upstream_state=data.get("store_upstream_state") is True,
+            covered_turn_count=data.get("covered_turn_count", 0),
+            parent_head_fingerprint=data.get("parent_head_fingerprint"),
+            covered_turn_chain_hash=data.get("covered_turn_chain_hash"),
         )
 
 

@@ -12,7 +12,7 @@ import httpx
 
 from app.config import Settings
 from app.observability.response_capture import safe_response_headers
-from app.protocol_adapters.base import ProviderHTTPError
+from app.protocol_adapters.base import ProviderHTTPError, ProviderRequestError
 from app.protocol_adapters.native_evidence import native_response_facts
 from app.protocol_adapters.v2_base import SealedDispatchBundle, StandardizedProviderResult
 from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_payload
@@ -39,6 +39,12 @@ class GeminiInteractionsAdapter:
         context.verify_integrity()
 
         payload, user_content = project_gemini_interactions_payload(context, connection=self.connection)
+
+        physical = context.provider_physical_plan or {}
+        if physical.get("protocol") == "gemini_interactions":
+            from app.core.idempotency import stable_hash
+            if stable_hash(payload) != physical["payload_hash"]:
+                raise ProviderRequestError("WIRE_HISTORY_DIGEST_MISMATCH", "Interactions payload differs from its sealed projection")
 
         url = self.connection.api_url("interactions")
         headers = {
@@ -169,6 +175,7 @@ class GeminiInteractionsAdapter:
 
         observed = {
             "protocol": "gemini_interactions",
+            "interaction_stored": payload.get("store") is True,
             "interaction_id": response_id,
             "upstream_handle": response_id,
             "continuation_handle": response_id,

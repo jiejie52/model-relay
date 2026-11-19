@@ -20,6 +20,52 @@ class ContinuationIntentPlanner:
     """
 
     @classmethod
+    def plan_frozen_context(
+        cls, *, snapshot: dict[str, Any], session: dict[str, Any], request_policy: str,
+        history: list[dict[str, Any]], model_history_visible: bool, body_mode: str | None,
+        cache_mechanism: str | None,
+    ) -> ContinuationIntentPlan:
+        from app.core.continuation_fingerprint import continuation_head, native_prefix_chain
+
+        contract = (snapshot.get("capability_contract") or {}).get("continuation") or {}
+        scope_is_bound = bool(snapshot.get("account_scope_id") and snapshot.get("connection_spec_hash"))
+        mode_off = str(body_mode or session.get("continuation_mode") or "auto").strip().lower() in {
+            "off", "none", "disabled", "false",
+        }
+        enabled = (
+            snapshot.get("protocol") == "gemini_interactions" and scope_is_bound
+            and contract.get("anchor_class") == "immutable_tree_anchor"
+            and contract.get("verification_status") == "verified"
+            and contract.get("requires_upstream_store") is True
+            and int(contract.get("retention_ttl_seconds") or 0) > 0
+            and not ((session.get("metadata") or {}).get("zero_data_retention")
+                     or (snapshot.get("capability_contract") or {}).get("zero_data_retention"))
+            and cache_mechanism not in (contract.get("mutually_exclusive_cache_mechanisms") or [])
+            and not mode_off
+        )
+        reusable = (enabled and model_history_visible and request_policy == "conversation"
+                    and session.get("context_policy") == "conversation"
+                    and session.get("history_mode", "cumulative") == "cumulative")
+        head = continuation_head(snapshot)
+        topology = {
+            "context_policy": request_policy,
+            "model_history_visible": model_history_visible,
+            "visible_turn_count": len(history),
+            "reusable_on_commit": reusable,
+            "parent_head_fingerprint": head,
+            "turn_prefix_chain": native_prefix_chain(head, history),
+            "anchor_class": contract.get("anchor_class") if enabled else None,
+            "supports_multiturn_delta": contract.get("supports_multiturn_delta") is True,
+            "retention_ttl_seconds": int(contract.get("retention_ttl_seconds") or 0),
+            "anchor_safety_margin_seconds": int(contract.get("anchor_safety_margin_seconds") or 30),
+            "max_delta_turns": int(contract.get("max_delta_turns") or 0),
+        }
+        return ContinuationIntentPlan(
+            continuation_mode="auto" if reusable else "off",
+            schema_version="relay-continuation-plan/2", topology=topology,
+        )
+
+    @classmethod
     def plan_continuation_intent(
         cls,
         session: dict[str, Any],

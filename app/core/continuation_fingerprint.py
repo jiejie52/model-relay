@@ -129,3 +129,47 @@ def verify_anchor_fingerprint(anchor_record: dict[str, Any] | Any, current_finge
     if isinstance(current_fingerprint, (list, tuple, set)):
         return anchor_fp in current_fingerprint
     return anchor_fp == current_fingerprint
+
+
+def continuation_head(snapshot: dict[str, Any]) -> str:
+    """Bind durable scope and replayable instructions/tools, independently of turn options."""
+    return stable_hash({
+        "format": "relay-continuation-head/2",
+        **{key: snapshot.get(key) for key in (
+            "session_id", "tenant_id", "conversation_hash", "connection_id",
+            "account_scope_id", "connection_spec_hash", "protocol_profile_hash",
+            "model", "upstream_model", "protocol", "instructions", "tools",
+        )},
+    })
+
+
+def extend_native_prefix(previous: str, turn: dict[str, Any]) -> str:
+    transport = turn.get("transport_history") or {}
+    return stable_hash({
+        "previous": previous,
+        "transport": {k: v for k, v in transport.items()
+                      if k not in ("interaction_id", "previous_interaction_id", "upstream_handle")},
+        "materials": turn.get("material_occurrences") or [],
+    })
+
+
+def native_prefix_chain(head: str, history: list[dict[str, Any]]) -> list[str]:
+    chain = []
+    for turn in history:
+        head = extend_native_prefix(head, turn)
+        chain.append(head)
+    return chain
+
+
+def continuation_material_references(occurrences: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Record ordered material occurrences and the resource identity required by each."""
+    return [{
+        "history_entry_index": occ["history_entry_index"],
+        "part_index": occ["part_index"],
+        "part_digest": occ["part_digest"],
+        "material_id": occ["material_id"],
+        "binding_generation": occ["binding_generation"],
+        "representation": occ["representation_kind"],
+        "external_uri": occ["binding"].get("external_uri"),
+        "provider_binding_id": occ["binding"].get("provider_binding_id"),
+    } for occ in occurrences]

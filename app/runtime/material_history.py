@@ -140,6 +140,9 @@ async def checked_binding(repo, snapshot, state, *, historical):
 
 async def verify_and_pin_historical(repo, state):
     placement = state.snapshot["material_placement_plan"]
+    if (state.snapshot.get("model_history_visible") is False
+            or placement.get("context_policy") in ("explicit", "session_materials_only")):
+        return []
     result = []
     seen = set()
     for occurrence in placement["verified_history_occurrences"]:
@@ -171,13 +174,20 @@ def verify_pre_seal_material_invariants(state):
         raise ProviderRequestError("CURRENT_TURN_MATERIAL_BINDING_MISMATCH", "Current bindings differ from the frozen placement")
     physical = state.provider_physical_plan or {}
     from app.protocol_adapters.wire_projection.gemini_wire import project_history_contents, project_current_user_content
-    expected_history = project_history_contents(state.history)
     current = project_current_user_content(state.snapshot, material_ids=state.material_ids,
         material_bindings=state.material_bindings)
-    full = physical.get("full_uncached_payload") or {}
-    if full.get("contents") != expected_history + [current]:
+    if state.snapshot.get("protocol") == "gemini_interactions":
+        matches = (physical.get("protocol") == "gemini_interactions"
+                   and physical.get("current_user_hash") == stable_hash(current)
+                   and physical.get("visible_history_hash") == stable_hash(state.history))
+    else:
+        full = physical.get("full_uncached_payload") or {}
+        matches = full.get("contents") == project_history_contents(state.history) + [current]
+    if not matches:
         raise ProviderRequestError("WIRE_HISTORY_DIGEST_MISMATCH", "Native history or current material placement changed")
-    verified = placement["verified_history_occurrences"]
+    verified = placement["verified_history_occurrences"] if state.snapshot.get("model_history_visible") is not False else []
+    if placement.get("context_policy") in ("explicit", "session_materials_only"):
+        verified = []
     pins = {(b["material_id"], b["binding_generation"], b.get("external_uri")) for b in state.historical_pinned_bindings}
     if any((o["material_id"], o["binding_generation"], o["binding"].get("external_uri")) not in pins for o in verified):
         raise ProviderRequestError("HISTORICAL_MATERIAL_UNPINNED", "Historical occurrence has no verified resource reference")

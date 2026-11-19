@@ -2,6 +2,7 @@ from __future__ import annotations
 
 
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from app.runtime.affinity import build_wire_context, drift_reason, rotate_affinity
@@ -53,6 +54,25 @@ class PhysicalContextProjector:
                     state.wire["previous_semantic_fingerprint"] = previous.get("semantic_fingerprint")
                     state.wire["compared_request_id"] = str(affinity_rows[0]["id"])
 
+
+    def project_interactions(self, state):
+        from app.observability.http_wire_logger import wire_context
+        from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_payload
+
+        context = SimpleNamespace(
+            snapshot=state.snapshot, session=state.session, history=state.history,
+            material_ids=state.material_ids, material_bindings=state.material_bindings,
+            continuation_execution_binding=state.continuation_binding,
+        )
+        with wire_context(state.wire):
+            payload, current = project_gemini_interactions_payload(context)
+        plan = {
+            "protocol": "gemini_interactions",
+            "payload_hash": stable_hash(payload),
+            "current_user_hash": stable_hash(current),
+            "visible_history_hash": stable_hash(state.history),
+        }
+        state.provider_physical_plan = {**plan, "physical_plan_hash": stable_hash(plan)}
 
     async def project(self, state):
         state.context_plan = state.snapshot.get("context_plan") if isinstance(state.snapshot.get("context_plan"), dict) else None
@@ -151,6 +171,9 @@ class PhysicalContextProjector:
                     ] if present]
                 ),
             )
+
+        if state.snapshot.get("protocol") == "gemini_interactions":
+            self.project_interactions(state)
 
         state.cache_binding = None
         if int(state.upgrade.get("version") or 0) >= 3:

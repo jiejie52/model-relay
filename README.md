@@ -1,3 +1,7 @@
+# Model Relay 10.2.0
+
+Gemini Interactions 派发封存、单轮上下文隔离及续接历史恢复。数据库迁移与验收见 [UPGRADE_10.2.0.md](UPGRADE_10.2.0.md)。
+
 # Model Relay 10.1.4
 
 落实 json_object 的 Relay 结果包装语义：模型正文不需要是 JSON，Relay 原样保存 result.text 并自行构造 JSON result 对象。Interactions 的该模式不发送 response_format，不请求上游 JSON 输出、不补 Schema、不做模型正文 JSON 解析或对象根类型校验。显式业务 json_schema 保留独立校验。见 [UPGRADE_10.1.4.md](UPGRADE_10.1.4.md)。

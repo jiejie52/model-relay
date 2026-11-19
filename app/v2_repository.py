@@ -1191,6 +1191,10 @@ class RelayV2Repository(RelayRepository):
         if "_continuation_anchor" in args:
             anchor = args.pop("_continuation_anchor")
             occurrences = args.pop("_material_occurrences", None)
+            if anchor.get("schema_version") == "relay-continuation-anchor/2":
+                return await self.backend.rpc("complete_continuation_context_v91", {
+                    "p_args": args, "p_material_occurrences": occurrences, "p_anchor": anchor,
+                })
             return await self.complete_continuation_request_v90(
                 p_args=args,
                 p_material_occurrences=occurrences,
@@ -1238,6 +1242,25 @@ class RelayV2Repository(RelayRepository):
             except Exception:
                 continue
         return None
+
+    async def list_continuation_prefixes(self, *, session_id, tenant_id, conversation_hash, head, max_turns):
+        return await self.backend.select(
+            "relay_continuation_anchors",
+            filters={"session_id": f"eq.{session_id}", "tenant_id": f"eq.{tenant_id}",
+                     "conversation_hash": f"eq.{conversation_hash}", "head_fingerprint": f"eq.{head}",
+                     "covered_turn_count": f"lte.{max_turns}", "state": "eq.active",
+                     "source_request_id": "not.is.null", "expires_at": f"gt.{datetime.now(timezone.utc).isoformat()}"},
+            order="covered_turn_count.desc,created_at.desc,id.asc",
+        )
+
+    async def seal_continuation_context_v91(self, *, continuation_binding, anchor_safety_seconds,
+                                            material_occurrences=None, historical_bindings=None, safety_seconds=None, **kwargs):
+        return bool(await self.backend.rpc("seal_continuation_context_v91", {
+            "p_args": {"p_" + key: value for key, value in kwargs.items()},
+            "p_material_occurrences": material_occurrences,
+            "p_historical_bindings": historical_bindings, "p_safety_seconds": safety_seconds,
+            "p_continuation_binding": continuation_binding, "p_anchor_safety_seconds": anchor_safety_seconds,
+        }))
 
     async def get_continuation_anchor(self, anchor_id: str | UUID) -> dict[str, Any] | None:
         rows = await self.backend.select(

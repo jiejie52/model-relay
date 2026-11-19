@@ -1,6 +1,9 @@
 from __future__ import annotations
+
+import json
 from app.runtime.contracts import RuntimeState, ActualExecutionFact
 from app.runtime.condition_verifier import ConditionVerifier
+from app.protocol_adapters.base import ProviderRequestError, ProviderHTTPError
 from app.runtime.continuation_binder import ContinuationBinder
 from app.runtime.physical_context import PhysicalContextProjector
 from app.runtime.dispatch_sealer import AtomicDispatchSealer
@@ -50,12 +53,19 @@ class RelayRuntimeEngine:
             await self.verifier.verify(plan)
             await ensure_execution_allowed(states=("not_sent",))
             await self.projector.prepare_scope(state)
-            state.failure_stage = "continuation_bind"
-            await self.continuation_binder.bind_for_context(state)
-            await ensure_execution_allowed(states=("not_sent",))
+            versioned_continuation = (state.snapshot.get("continuation_intent_plan") or {}).get(
+                "schema_version") == "relay-continuation-plan/2"
+            if not versioned_continuation:
+                state.failure_stage = "continuation_bind"
+                await self.continuation_binder.bind_for_context(state)
+                await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "material_bind"
             await self.bindings.bind_for_plan(state)
             await ensure_execution_allowed(states=("not_sent",))
+            if versioned_continuation:
+                state.failure_stage = "continuation_bind"
+                await self.continuation_binder.bind_for_context(state)
+                await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "cache_assessment"
             await self.projector.project(state)
             state.execution_snapshot = state.snapshot
@@ -63,7 +73,16 @@ class RelayRuntimeEngine:
             if state.is_v3: await self.cache.prepare_for_context(state)
             await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "dispatch_seal"
-            await self.sealer.seal_before_dispatch(state)
+            try:
+                await self.sealer.seal_before_dispatch(state)
+            except ProviderRequestError as exc:
+                if (exc.code != "CONTINUATION_PARENT_NO_LONGER_USABLE"
+                        or not (state.snapshot.get("continuation_intent_plan") or {}).get("allow_fallback_to_full")):
+                    raise
+                await ensure_execution_allowed(states=("not_sent",))
+                await self.continuation_binder.bind_for_context(state, reopen=True)
+                self.projector.project_interactions(state)
+                await self.sealer.seal_before_dispatch(state)
             state.failure_stage = "provider_http"
             return await self.invoker.invoke_once_and_record(state)
         except ExecutionLeaseLost:
@@ -72,11 +91,30 @@ class RelayRuntimeEngine:
             # asyncio cancellation is deliberately propagated to the scheduler.
             current = await self.repo.get_request(state.request_id) or state.request_row
             from app.core.error_classification import error_source
-            error = await self.errors.record(exc=exc, source=error_source(exc), tenant_id=state.request_row["tenant_id"],
+            local_validation = state.failure_stage != "provider_http" and isinstance(exc, ProviderRequestError)
+            error = await self.errors.record(exc=exc, source="relay_validation" if local_validation else error_source(exc), tenant_id=state.request_row["tenant_id"],
                 conversation_hash=state.request_row["conversation_hash"], session_id=state.session_id, request_id=state.request_id)
             error = {**error, "exception_type": type(exc).__name__, "failure_code": getattr(exc, "code", None),
                      "unknown_completion": current.get("provider_dispatch_state")=="dispatch_started" and
                          (bool(getattr(exc, "stream_interrupted", False)) or bool(getattr(exc, "unknown_completion", False)) or
                           not (getattr(exc, "status_code", None) is not None or type(exc).__name__=="ProviderRequestError"))}
+            if local_validation:
+                error.update(phase=state.failure_stage, reason_code=exc.code)
+            continuation = state.continuation_binding
+            if (current.get("provider_dispatch_state") == "dispatch_started"
+                    and not error["unknown_completion"] and continuation is not None
+                    and continuation.active_anchor_id and isinstance(exc, ProviderHTTPError)):
+                try:
+                    details = json.loads(exc.body).get("error") or {}
+                except (TypeError, ValueError, AttributeError):
+                    details = {}
+                message = str(details.get("message") or "").lower() if isinstance(details, dict) else ""
+                identifies_parent = ("previous_interaction_id" in message
+                                     or (continuation.upstream_handle and str(continuation.upstream_handle).lower() in message)
+                                     or (exc.status_code in (404, 410) and
+                                         ("interaction not found" in message or "interaction has expired" in message)))
+                anchor_rejected = any(word in message for word in ("not found", "expired", "invalid", "does not exist"))
+                if exc.status_code in (400, 404, 410) and identifies_parent and anchor_rejected:
+                    error["_relay_invalid_continuation_anchor"] = continuation.active_anchor_id
             return ActualExecutionFact(state.request_id, current.get("provider_dispatch_state", "not_sent"),
                 state.material_bindings, state.cache_binding, raw_error_envelope=error, failure_stage=state.failure_stage)
