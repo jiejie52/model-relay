@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+
+import json
+import logging
+
+from app.core.idempotency import stable_hash
+from app.observability import error as log_error
+from app.protocol_adapters.base import ProviderRequestError
+from app.supabase import SupabaseError
+from app.utils import utcnow
+
+
+logger = logging.getLogger("model-relay-runtime")
+
+
+_PROVIDER_BINDING_SQL_MESSAGES = {
+    "HISTORICAL_MATERIAL_BINDING_EXPIRED",
+    "MATERIAL_BINDING_SCOPE_MISMATCH",
+}
+_PROVIDER_BINDING_DIAGNOSTIC_FIELDS = {
+    "request_id",
+    "session_id",
+    "material_id",
+    "connection_id",
+    "expected_generation",
+    "actual_generation",
+    "binding_state",
+    "processing_state",
+    "validation_failure_reason",
+    "remaining_ttl_seconds",
+    "failure_stage",
+}
+
+
+def _provider_binding_sql_diagnostic(exc: SupabaseError):
+    try:
+        body = json.loads(exc.body or "{}")
+    except (TypeError, ValueError):
+        return {}, None, None
+    if not isinstance(body, dict):
+        return {}, None, None
+
+    detail = body.get("details")
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            detail = {}
+    if not isinstance(detail, dict):
+        detail = {}
+
+    fields = {
+        key: value for key, value in detail.items()
+        if key in _PROVIDER_BINDING_DIAGNOSTIC_FIELDS and value is not None
+    }
+    return fields, str(body.get("message") or ""), str(body.get("code") or "")
+
+
+def _log_provider_binding_sql_failure(exc: SupabaseError, state) -> None:
+    fields, sql_message, sqlstate = _provider_binding_sql_diagnostic(exc)
+    if not fields.get("validation_failure_reason") and sql_message not in _PROVIDER_BINDING_SQL_MESSAGES:
+        return
+    log_error(
+        logger,
+        "provider_binding_validation_failed",
+        request_id=fields.get("request_id") or state.request_id,
+        session_id=fields.get("session_id") or state.session_id,
+        material_id=fields.get("material_id"),
+        connection_id=fields.get("connection_id") or state.snapshot.get("connection_id"),
+        expected_generation=fields.get("expected_generation"),
+        actual_generation=fields.get("actual_generation"),
+        binding_state=fields.get("binding_state"),
+        processing_state=fields.get("processing_state"),
+        validation_failure_reason=fields.get("validation_failure_reason") or sql_message or "BINDING_SQL_VALIDATION_FAILED",
+        remaining_ttl_seconds=fields.get("remaining_ttl_seconds"),
+        failure_stage=fields.get("failure_stage") or "atomic_dispatch_seal_sql",
+        sqlstate=sqlstate or None,
+        sql_http_status=exc.status_code,
+        failure_class="relay_validation",
+    )
+
+
+from app.runtime.contracts import SealedDispatchBundle, dispatch_input_digest
+
+
+class AtomicDispatchSealer:
+    def __init__(self, repo): self.repo = repo
+
+    async def seal_before_dispatch(self, state):
+        if state.snapshot.get("placement_contract_version") is not None:
+            from app.runtime.material_history import verify_pre_seal_material_invariants
+            verify_pre_seal_material_invariants(state)
+            from app.observability.material_metrics import material_metrics
+            from app.observability import info as log_info
+            log_info(logger, "material_placement_pre_seal", request_id=state.request_id, session_id=state.session_id,
+                **material_metrics(state.snapshot, state.provider_physical_plan, state.historical_pinned_bindings, cache_binding=state.cache_binding))
+        continuation_binding_data = None
+        if getattr(state, "continuation_binding", None) is not None:
+            continuation_binding_data = (
+                state.continuation_binding.to_dict()
+                if hasattr(state.continuation_binding, "to_dict")
+                else state.continuation_binding
+            )
+        inputs = dict(snapshot=state.snapshot, session=state.session, history=state.history,
+            material_ids=state.material_ids, material_bindings=state.material_bindings,
+            tenant_id=state.request_row["tenant_id"], conversation_hash=state.request_row["conversation_hash"],
+            request_id=state.request_id, session_id=state.session_id, context_plan=state.context_plan,
+            cache_execution_binding=state.cache_binding,
+            continuation_execution_binding=continuation_binding_data,
+            execution_fence=state.fence.canonical() if state.fence else None,
+            provider_physical_plan=state.provider_physical_plan,
+            affinity_headers={key: state.wire["affinity_token"] for key in (
+                state.wire.get("affinity_header"), state.wire.get("secondary_affinity_header"))
+                if key and state.wire.get("affinity_token")})
+        expected_identity = (state.session.get("metadata") or {}).get("_relay_route", {}).get("connection_identity_hash")
+        if expected_identity and state.snapshot.get("connection_identity_hash") != expected_identity:
+            raise ProviderRequestError("CONNECTION_IDENTITY_MISMATCH", "Dispatch inputs changed the frozen connection")
+        from app.runtime.contracts import frozen_connection_fields
+        spec,scope=frozen_connection_fields(state.snapshot,(state.session.get('metadata') or {}).get('_relay_route'))
+        if spec and (state.plan.connection_spec_hash!=spec or state.plan.account_scope_id!=scope):
+            raise ProviderRequestError('CONNECTION_IDENTITY_MISMATCH','Dispatch connection differs from FrozenExecutionPlan')
+        inputs.update(connection_spec_hash=spec,account_scope_id=scope)
+        if state.snapshot.get("placement_contract_version") is not None:
+            inputs.update(material_occurrences=state.projected_material_occurrences,
+                historical_bindings=state.historical_pinned_bindings)
+        prepared_payload_hash = dispatch_input_digest(**inputs)
+
+        active_anchor_id = None
+        fallback_occurred = False
+        if state.continuation_binding is not None:
+            active_anchor_id = (
+                getattr(state.continuation_binding, "active_anchor_id", None)
+                if hasattr(state.continuation_binding, "active_anchor_id")
+                else (state.continuation_binding.get("active_anchor_id") if isinstance(state.continuation_binding, dict) else None)
+            )
+            fallback_occurred = (
+                getattr(state.continuation_binding, "fallback_occurred", False)
+                if hasattr(state.continuation_binding, "fallback_occurred")
+                else (state.continuation_binding.get("fallback_occurred", False) if isinstance(state.continuation_binding, dict) else False)
+            )
+
+        has_active_continuation = bool(active_anchor_id and not fallback_occurred)
+
+        if has_active_continuation and continuation_binding_data.get("schema_version") != "relay-continuation-binding/2":
+            hold_seconds = 300
+            if isinstance(state.snapshot, dict) and "continuation_hold_seconds" in state.snapshot:
+                hold_seconds = int(state.snapshot["continuation_hold_seconds"])
+            sealed = await self.repo.seal_continuation_and_dispatch_v90(
+                request_id=state.request_id,
+                anchor_id=active_anchor_id,
+                fence_owner=state.fence.owner if state.fence else None,
+                fence_epoch=state.fence.epoch if state.fence else None,
+                hold_seconds=hold_seconds,
+            )
+            if not sealed:
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                if state.fence is not None:
+                    raise ExecutionLeaseLost("Continuation dispatch seal was rejected by execution fence")
+                raise ProviderRequestError(
+                    "CONTINUATION_SEAL_REJECTED",
+                    "Continuation dispatch seal was rejected; Provider dispatch is forbidden",
+                )
+            state.execution_snapshot = dict(state.snapshot)
+            state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+            state.snapshot["_relay_continuation_execution"] = continuation_binding_data
+        elif state.is_v3:
+            binding_hash = state.cache_binding_obj.binding_hash
+            installed = await self.repo.install_cache_binding_v3(
+                request_id=state.request_id,
+                binding_version=state.cache_binding_obj.binding_version,
+                plan_hash=state.cache_binding_obj.plan_hash,
+                binding_hash=binding_hash,
+                final_mechanism=state.cache_binding_obj.mechanism,
+                resource_id=state.cache_binding_obj.resource_id,
+                resource_generation=state.cache_binding_obj.resource_generation,
+                metadata=state.cache_binding,
+                fence_owner=state.fence.owner,
+                fence_epoch=state.fence.epoch,
+            )
+            if not installed:
+                raise ProviderRequestError(
+                    "CACHE_BINDING_FENCE_REJECTED",
+                    "Cache execution binding was rejected by the Request execution fence",
+                )
+
+            has_placement = state.snapshot.get("placement_contract_version") is not None
+            sealed_continuation = state.snapshot.get("protocol") == "gemini_interactions" and (
+                state.snapshot.get("continuation_intent_plan") or {}
+            ).get("schema_version") == "relay-continuation-plan/2"
+            if sealed_continuation:
+                seal_method = self.repo.seal_continuation_context_v91
+            else:
+                seal_method = self.repo.seal_materials_and_dispatch_v89 if has_placement else self.repo.seal_cache_and_dispatch_v3
+            try:
+                sealed = await seal_method(
+                    request_id=state.request_id,
+                    binding_version=state.cache_binding_obj.binding_version,
+                    binding_hash=binding_hash,
+                    payload_hash=prepared_payload_hash,
+                    **({"material_occurrences": state.projected_material_occurrences,
+                        "historical_bindings": state.historical_pinned_bindings,
+                        "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
+                       if state.snapshot.get("placement_contract_version") is not None else {}),
+                    **({"continuation_binding": continuation_binding_data,
+                        "anchor_safety_seconds": state.snapshot["continuation_intent_plan"]["topology"]["anchor_safety_margin_seconds"]}
+                       if sealed_continuation else {}),
+                    fence_owner=state.fence.owner,
+                    fence_epoch=state.fence.epoch,
+                )
+            except SupabaseError as exc:
+                if sealed_continuation and _provider_binding_sql_diagnostic(exc)[1] == "CONTINUATION_PARENT_NO_LONGER_USABLE":
+                    raise ProviderRequestError("CONTINUATION_PARENT_NO_LONGER_USABLE", "Parent anchor became unusable before dispatch") from exc
+                if has_placement:
+                    _log_provider_binding_sql_failure(exc, state)
+                raise
+            if not sealed:
+                raise ProviderRequestError(
+                    "CACHE_BINDING_FENCE_REJECTED",
+                    "Request dispatch seal was rejected; Provider dispatch is forbidden",
+                )
+            state.execution_snapshot = dict(state.snapshot)
+            state.execution_snapshot["_relay_cache_execution"] = state.cache_binding
+            if continuation_binding_data is not None:
+                state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+        else:
+            if state.fence is not None:
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                if not await self.repo.mark_request_dispatch(request_id=state.request_id,
+                        fence_owner=state.fence.owner, fence_epoch=state.fence.epoch,
+                        payload_hash=prepared_payload_hash):
+                    raise ExecutionLeaseLost("Legacy fenced dispatch was rejected")
+            else:
+                # Preserve the historical optional-fence synchronous contract.
+                await self.repo.update_request(state.request_row["id"], {
+                    "provider_dispatch_state": "dispatch_started",
+                    "started_at": state.request_row.get("started_at") or utcnow().isoformat()})
+            if not state.execution_snapshot:
+                state.execution_snapshot = dict(state.snapshot)
+            if continuation_binding_data is not None:
+                state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+
+
+        state.sealed_bundle = SealedDispatchBundle(**{**inputs, "snapshot": state.execution_snapshot or state.snapshot},
+            seal_id=state.request_id, seal_hash=prepared_payload_hash)
+        state.sealed_bundle.verify_integrity()
+        return state.sealed_bundle

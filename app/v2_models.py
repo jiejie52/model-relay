@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, model_validator
+
+
+ContextPolicy = Literal["conversation", "explicit"]
+RequestContextPolicy = Literal["conversation", "explicit", "session_materials_only"]
+ExecutionMode = Literal["sync", "async"]
+MaterialPurpose = Literal["inference_input", "archive"]
+CacheMode = Literal["off", "auto", "on"]
+CacheMechanismPreference = Literal["auto", "implicit_prefix", "stateful_resource"]
+
+
+class SessionCapabilityRequirements(BaseModel):
+    """Capabilities the caller expects this sticky Session route to support.
+
+    These are routing constraints, not provider-native parameters. Request-level
+    options still pass through the frozen capability contract and fail closed if
+    a later Request asks for semantics outside the Session contract.
+    """
+
+    input_modalities: list[str] = Field(default_factory=lambda: ["text"])
+    structured_output: Literal["none", "post_validate", "native"] = "none"
+    think_levels: list[str] = Field(default_factory=list)
+    required_features: list[str] = Field(default_factory=list)
+    channel_allowlist: list[str] = Field(default_factory=list)
+
+
+class SessionContextPolicy(BaseModel):
+    history_mode: Literal["cumulative", "ephemeral_turn"] = "cumulative"
+    sticky_scope: Literal["session", "conversation_family"] = "session"
+    workload_hint: Literal["auto", "multimodal_or_long_doc", "pure_text_qa"] = "auto"
+
+
+class SessionCreateRequest(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=200)
+    conversation_hash: str = Field(min_length=1, max_length=256)
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=200)
+    # Contract 2.1 compatibility only. Relay RouteResolver is authoritative and
+    # never lets this legacy hint select or override an Adapter.
+    connection_id: str | None = Field(default=None, max_length=120)
+    context_policy: ContextPolicy | SessionContextPolicy = "conversation"
+    material_ids: list[str] = Field(default_factory=list)
+    execution_pool: str | None = Field(default=None, max_length=120)
+    capability_requirements: SessionCapabilityRequirements = Field(default_factory=SessionCapabilityRequirements)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionResponse(BaseModel):
+    schema_version: str = "relay-session/2.1"
+    session_id: UUID
+    tenant_id: str
+    conversation_hash: str
+    provider: str
+    model: str
+    context_policy: ContextPolicy
+    material_ids: list[str]
+    history_version: int
+    route_pin_state: str = "pinned"
+    supply_group_id: str | None = None
+    history_mode: str = "cumulative"
+    sticky_scope: str = "session"
+    active_request_id: UUID | None = None
+    execution_pool: str
+    route_revision: str | None = None
+    capability_revision: str | None = None
+    offering_id: str | None = None
+    channel_id: str | None = None
+    protocol: str | None = None
+    capability_contract_id: str | None = None
+    control_plane_hash: str | None = None
+    protocol_profile_id: str | None = None
+    cache_policy_id: str | None = None
+    cache_contract_hash: str | None = None
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class ExecutionSpec(BaseModel):
+    mode: ExecutionMode
+
+
+class SessionRequestCreate(BaseModel):
+    input: Any
+    # Per-Request context view; omitted retains the Session default. Does not
+    # change the frozen Session policy or its cumulative history commits.
+    context_policy: RequestContextPolicy | None = None
+    instructions: str | None = None
+    material_ids: list[str] = Field(default_factory=list)
+    # Contract 2.1 callers omit these. They remain optional during the Relay-first
+    # compatibility window and are treated only as assertions/hints.
+    provider: str | None = Field(default=None, max_length=80)
+    connection_id: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=200)
+    think_level: str | None = Field(default=None, max_length=40)
+    think_level_policy: Literal["prefer", "require"] = "prefer"
+    execution: ExecutionSpec
+    structured_output: dict[str, Any] = Field(default_factory=dict)
+    # Provider-neutral advanced model controls. These are validated by the
+    # Relay capability layer and projected to native provider wire only inside
+    # the selected connection-scoped Adapter.
+    options: dict[str, Any] = Field(default_factory=dict)
+    # v2.1 migration bridge only. New callers must use ``options``. Relay v2.2
+    # converts only known canonical aliases and rejects arbitrary wire fields.
+    provider_payload: dict[str, Any] = Field(default_factory=dict, deprecated=True)
+    # Cache contract 3.0. Callers express intent only; TTL, provider handles,
+    # native cache fields and breakpoint positions stay server-governed.
+    requested_cache_mode: CacheMode = "auto"
+    requested_cache_mechanism: CacheMechanismPreference = "auto"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CacheSummary(BaseModel):
+    gemini_diagnostics: dict[str, Any] | None = None
+    cache_tracks: dict[str, Any] | None = None
+    cache_decision_reason: str | None = None
+    payload_stripped_bytes: int = 0
+    observed_cache_audit: dict[str, Any] | None = None
+    action: str | None = None
+    prefix_diff: dict[str, Any] | None = None
+    material_reuse: dict[str, Any] | None = None
+    material_fingerprint: str | None = None
+    requested_cache_mode: str | None = None
+    requested_cache_mechanism: str | None = None
+    estimated_future_reuses: int | None = None
+    reuse_evidence_source: str | None = None
+    cache_cost_decision: dict[str, Any] | None = None
+    planned_mechanism: str | None = None
+    effective_cache_mechanism: str | None = None
+    execution_mechanism: str | None = None
+    resolution_status: str | None = None
+    decision_reason: str | None = None
+    actual_cache_hit_status: str | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    uncached_input_tokens: int | None = None
+    evidence_level: str | None = None
+    transparent_observation: bool = False
+
+
+class RawErrorMeta(BaseModel):
+    source: str
+    upstream_http_status: int | None = None
+    upstream_request_id: str | None = None
+    upstream_headers: dict[str, str] | None = None
+    phase: str | None = None
+    content_type: str | None = None
+    content_encoding: str | None = None
+    body_encoding: str | None = None
+    body_source: str | None = None
+    body_complete: bool | None = None
+    response_diagnostics: dict[str, Any] | None = None
+    reason_code: str | None = None
+    interaction_status: str | None = None
+    body_size: int | None = None
+    body_sha256: str | None = None
+    body_object_id: str | None = None
+    body_text: str | None = None
+    body_base64: str | None = None
+    exception_type: str | None = None
+    message: str | None = None
+    provider_success_object_id: str | None = None
+    provider_output_object_id: str | None = None
+    archive_error: dict[str, Any] | None = None
+
+
+class ContinuationSummary(BaseModel):
+    schema_version: str = "relay-continuation-summary/1"
+    continuation_mode: str | None = None
+    mechanism: str | None = None
+    active_anchor_id: str | None = None
+    parent_anchor_id: str | None = None
+    bound_turns_count: int | None = None
+    fallback_occurred: bool = False
+    fallback_reason: str | None = None
+    plan_hash: str | None = None
+    binding_hash: str | None = None
+    details: dict[str, Any] | None = None
+
+
+class RequestEnvelope(BaseModel):
+    schema_version: str = "relay-session/2.1"
+    session_id: UUID
+    request_id: UUID
+    job_id: UUID | None = None
+    execution: ExecutionSpec
+    status: str
+    history_version: int
+    result: dict[str, Any] | None = None
+    error: RawErrorMeta | None = None
+    cache: CacheSummary | None = None
+    continuation: ContinuationSummary | None = None
+    poll_after_seconds: int | None = None
+
+
+class MaterialCreateJSON(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=200)
+    conversation_hash: str = Field(min_length=1, max_length=256)
+    filename: str = Field(min_length=1, max_length=500)
+    content_type: str | None = Field(default=None, max_length=250)
+    source_url: str | None = None
+    content_base64: str | None = None
+    source_ref: str | None = Field(default=None, max_length=1000)
+    parent_material_id: str | None = Field(default=None, max_length=220)
+    ordinal: int | None = None
+    provider: str | None = Field(default=None, max_length=80)
+    model: str | None = Field(default=None, max_length=200)
+    purpose: MaterialPurpose = "inference_input"
+    # Legacy compatibility hint only. RouteResolver remains authoritative.
+    target_connection_id: str | None = Field(default=None, max_length=120)
+    durability_policy: Literal["native_first", "relay_backed"] = "native_first"
+    fallback_policy: Literal["never", "on_provider_unavailable", "always"] = "on_provider_unavailable"
+    declared_size: int | None = Field(default=None, ge=0)
+    # 0.5.3 compatibility-only diagnostics. Relay measures received bytes and
+    # recalculates the complete Request material sum itself before dispatch.
+    # These caller fields no longer select Gemini transport.
+    request_file_total_bytes: int | None = Field(default=None, ge=0)
+    request_file_count: int | None = Field(default=None, ge=1)
+    material_batch_id: str | None = Field(default=None, max_length=220)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_material_request(self) -> "MaterialCreateJSON":
+        count = int(bool(self.source_url)) + int(bool(self.content_base64))
+        if count != 1:
+            raise ValueError("exactly one of source_url or content_base64 is required")
+        if self.purpose == "inference_input" and (not self.provider or not self.model):
+            raise ValueError("provider and model are required for inference_input material")
+        return self
+
+
+class MaterialBindingResponse(BaseModel):
+    provider: str | None = None
+    state: str
+    generation: int = 1
+    purpose: str | None = None
+    representation: str | None = None
+    expires_at: datetime | None = None
+    route_revision: str | None = None
+
+
+class MaterialFallbackResponse(BaseModel):
+    stored: bool
+    object_ref: str | None = None
+    storage_id: str | None = None
+
+
+class MaterialResponse(BaseModel):
+    schema_version: str = "relay-material/2.2"
+    material_id: str
+    status: str
+    filename: str
+    content_type: str
+    size: int
+    size_bytes: int
+    sha256: str
+    provider: str | None = None
+    model: str | None = None
+    purpose: str = "inference_input"
+    route_revision: str | None = None
+    durability: str
+    ready_for: list[str] = Field(default_factory=list)
+    fallback: MaterialFallbackResponse
+    provider_binding: MaterialBindingResponse | None = None
+    object_id: str | None = None
+    storage_id: str | None = None
+    source_ref: str | None = None
+    parent_material_id: str | None = None
+    ordinal: int | None = None
+    created_at: datetime | None = None

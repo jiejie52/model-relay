@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import json
+from app.runtime.contracts import RuntimeState, ActualExecutionFact
+from app.runtime.condition_verifier import ConditionVerifier
+from app.protocol_adapters.base import ProviderRequestError, ProviderHTTPError
+from app.runtime.continuation_binder import ContinuationBinder
+from app.runtime.physical_context import PhysicalContextProjector
+from app.runtime.dispatch_sealer import AtomicDispatchSealer
+from app.runtime.controlled_invoker import ControlledInvoker
+from app.runtime.cache_materializer import CacheMaterializer
+from app.core.raw_error import RawErrorRecorder
+from app.persistence.execution_artifacts import ExecutionArtifacts
+from app.observability import now_ms
+from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, ensure_execution_allowed, current_execution_guard, execution_guard
+
+class RelayRuntimeEngine:
+    """Physical execution only; schedules and Session commits belong to the execution plane."""
+    def __init__(self, repo, storage, providers, materials, bindings, settings, cache_orchestrator=None, continuation_binder=None):
+        self.repo, self.storage, self.settings = repo, storage, settings
+        self.providers = providers
+        self.artifacts = ExecutionArtifacts(repo, storage, settings)
+        self.errors = RawErrorRecorder(repo, storage, settings)
+        self.verifier = ConditionVerifier(repo, providers)
+        self.bindings = bindings
+        self.continuation_binder = continuation_binder or ContinuationBinder(repo, settings)
+        self.projector = PhysicalContextProjector(repo, bindings, settings)
+        self.cache = cache_orchestrator or CacheMaterializer(repo)
+        self.cache.settings = settings
+        self.sealer = AtomicDispatchSealer(repo)
+        self.invoker = ControlledInvoker(repo, providers, self.artifacts, self.cache, settings)
+
+    async def execute(self, plan):
+        from app.runtime.connection_scope import connection_scope
+        identity = plan.snapshot.get("connection_identity_hash")
+        route = (plan.session_record.get("metadata") or {}).get("_relay_route") or {}
+        if not identity and route.get("account_scope_hash") and hasattr(self.providers, "frozen_identity"):
+            identity = self.providers.frozen_identity(plan.snapshot["connection_id"], route)
+        with connection_scope(identity):
+            return await self._execute_with_connection(plan)
+
+    async def _execute_with_connection(self, plan):
+        if plan.execution_fence is not None and current_execution_guard() is None:
+            # Direct physical-runtime callers still need the live boundary checks;
+            # scheduling and heartbeat ownership stay in the execution plane.
+            with execution_guard(ExecutionGuard(self.repo, plan.request_record, plan.execution_fence, self.settings)):
+                return await self._execute(plan)
+        return await self._execute(plan)
+
+    async def _execute(self, plan):
+        state = RuntimeState.from_plan(plan, now_ms())
+        try:
+            await self.verifier.verify(plan)
+            await ensure_execution_allowed(states=("not_sent",))
+            await self.projector.prepare_scope(state)
+            versioned_continuation = (state.snapshot.get("continuation_intent_plan") or {}).get(
+                "schema_version") == "relay-continuation-plan/2"
+            if not versioned_continuation:
+                state.failure_stage = "continuation_bind"
+                await self.continuation_binder.bind_for_context(state)
+                await ensure_execution_allowed(states=("not_sent",))
+            state.failure_stage = "material_bind"
+            await self.bindings.bind_for_plan(state)
+            await ensure_execution_allowed(states=("not_sent",))
+            if versioned_continuation:
+                state.failure_stage = "continuation_bind"
+                await self.continuation_binder.bind_for_context(state)
+                await ensure_execution_allowed(states=("not_sent",))
+            state.failure_stage = "cache_assessment"
+            await self.projector.project(state)
+            state.execution_snapshot = state.snapshot
+            state.failure_stage = "cache_materialize"
+            if state.is_v3: await self.cache.prepare_for_context(state)
+            await ensure_execution_allowed(states=("not_sent",))
+            state.failure_stage = "dispatch_seal"
+            try:
+                await self.sealer.seal_before_dispatch(state)
+            except ProviderRequestError as exc:
+                if (exc.code != "CONTINUATION_PARENT_NO_LONGER_USABLE"
+                        or not (state.snapshot.get("continuation_intent_plan") or {}).get("allow_fallback_to_full")):
+                    raise
+                await ensure_execution_allowed(states=("not_sent",))
+                await self.continuation_binder.bind_for_context(state, reopen=True)
+                self.projector.project_interactions(state)
+                await self.sealer.seal_before_dispatch(state)
+            state.failure_stage = "provider_http"
+            return await self.invoker.invoke_once_and_record(state)
+        except ExecutionLeaseLost:
+            raise
+        except Exception as exc:
+            # asyncio cancellation is deliberately propagated to the scheduler.
+            current = await self.repo.get_request(state.request_id) or state.request_row
+            from app.core.error_classification import error_source
+            local_validation = state.failure_stage != "provider_http" and isinstance(exc, ProviderRequestError)
+            error = await self.errors.record(exc=exc, source="relay_validation" if local_validation else error_source(exc), tenant_id=state.request_row["tenant_id"],
+                conversation_hash=state.request_row["conversation_hash"], session_id=state.session_id, request_id=state.request_id)
+            error = {**error, "exception_type": type(exc).__name__, "failure_code": getattr(exc, "code", None),
+                     "unknown_completion": current.get("provider_dispatch_state")=="dispatch_started" and
+                         (bool(getattr(exc, "stream_interrupted", False)) or bool(getattr(exc, "unknown_completion", False)) or
+                          not (getattr(exc, "status_code", None) is not None or type(exc).__name__=="ProviderRequestError"))}
+            if local_validation:
+                error.update(phase=state.failure_stage, reason_code=exc.code)
+            continuation = state.continuation_binding
+            if (current.get("provider_dispatch_state") == "dispatch_started"
+                    and not error["unknown_completion"] and continuation is not None
+                    and continuation.active_anchor_id and isinstance(exc, ProviderHTTPError)):
+                try:
+                    details = json.loads(exc.body).get("error") or {}
+                except (TypeError, ValueError, AttributeError):
+                    details = {}
+                message = str(details.get("message") or "").lower() if isinstance(details, dict) else ""
+                identifies_parent = ("previous_interaction_id" in message
+                                     or (continuation.upstream_handle and str(continuation.upstream_handle).lower() in message)
+                                     or (exc.status_code in (404, 410) and
+                                         ("interaction not found" in message or "interaction has expired" in message)))
+                anchor_rejected = any(word in message for word in ("not found", "expired", "invalid", "does not exist"))
+                if exc.status_code in (400, 404, 410) and identifies_parent and anchor_rejected:
+                    error["_relay_invalid_continuation_anchor"] = continuation.active_anchor_id
+            return ActualExecutionFact(state.request_id, current.get("provider_dispatch_state", "not_sent"),
+                state.material_bindings, state.cache_binding, raw_error_envelope=error, failure_stage=state.failure_stage)

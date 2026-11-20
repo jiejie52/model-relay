@@ -1,0 +1,11 @@
+# Runtime dependencies for the API, Worker, Excel compiler and Gemini SDK.
+fastapi==0.141.1
+uvicorn==0.52.1
+httpx==0.28.1
+pydantic==2.13.4
+pydantic-settings==2.15.0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+jsonschema==4.26.0
+openpyxl==3.1.5
+google-genai==2.28.0

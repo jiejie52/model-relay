@@ -1,0 +1,624 @@
+import asyncio
+import logging
+import time
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from typing import Any
+import base64
+import hashlib
+from uuid import UUID, uuid4
+
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+
+from app.config import get_settings
+from app.control_plane.definitions import ModelControlPlane
+from app.control_plane.snapshot import get_active_config_snapshot, verify_node_snapshot_compatibility
+from app.models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
+from app.v2_repository import RelayV2Repository
+from app.security import require_owner_headers, require_relay_auth
+from app.storage_paths import job_object_path, session_material_prefix_path
+from app.supabase import SupabaseBackend, SupabaseError
+from app.utils import json_bytes, stable_prompt_cache_key, truncate_utf8, utcnow
+from app.compatibility.relay_gateway import router as dify_relay_gateway_router
+from app.api_v2.router import router as relay_v2_router
+from app.persistence.object_storage import StorageRegistry
+from app.persistence.supabase_storage import SupabaseObjectStorage
+from app.materials.ingress import MaterialIngress
+from app.execution_plane.semantic_resolver import CAPABILITY_PROFILE_REVISION
+from app.materials.fallback_storage import FallbackObjectStorage
+from app.runtime.material_binder import MaterialBinder
+from app.materials.provider_files import ProviderFileRegistry
+from app.materials.resolver import MaterialResolver
+from app.protocol_adapters.registry import ProviderRegistry
+from app.protocol_adapters.factory import register_protocol_adapters
+from app.control_plane.catalog import RouteCatalog
+from app.execution_plane.route_resolver import RouteResolver
+from app.runtime.engine import RelayRuntimeEngine
+from app.runtime.cache_materializer import CacheMaterializer
+from app.control_plane.resource_registry import CacheResourceRegistry
+from app.core.raw_error import RawErrorRecorder
+from app.execution_plane.schedulers.inline_scheduler import InlineScheduler
+from app.observability import configure_logging, elapsed_ms, error as log_error, info as log_info, warning as log_warning, now_ms, status_failure_class
+
+
+
+from app.config import RELAY_VERSION, BUILD_GIT_SHA
+API_VERSION = RELAY_VERSION
+
+
+settings = get_settings()
+configure_logging(settings)
+logger = logging.getLogger("model-relay-api")
+
+backend: SupabaseBackend | None = None
+repo: RelayV2Repository | None = None
+
+
+class WorkerWakeNotifier:
+    """Best-effort API -> Worker wake signal for Railway Serverless.
+
+    The queue remains authoritative. A wake failure never changes Request/Job
+    acceptance semantics; subsequent API traffic or Railway cold-start startup
+    polling will retry naturally.
+    """
+
+    def __init__(self) -> None:
+        self.url = settings.effective_worker_wake_url
+        self.enabled = bool(settings.worker_follow_api_enabled and self.url)
+        self._last_scheduled_at = 0.0
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._client = (
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(settings.worker_wake_timeout_seconds),
+                follow_redirects=False,
+            )
+            if self.enabled
+            else None
+        )
+
+    def notify(self, *, reason: str) -> None:
+        if not self.enabled or self._client is None or self.url is None:
+            return
+        now = time.monotonic()
+        if now - self._last_scheduled_at < settings.worker_wake_min_interval_seconds:
+            return
+        self._last_scheduled_at = now
+        task = asyncio.create_task(self._send(reason=reason))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _send(self, *, reason: str) -> None:
+        assert self._client is not None
+        assert self.url is not None
+        headers = {
+            "Authorization": f"Bearer {settings.relay_api_token.get_secret_value()}",
+            "X-Relay-Wake-Reason": reason[:120],
+        }
+        for attempt in (1, 2):
+            try:
+                response = await self._client.post(self.url, headers=headers)
+                if 200 <= response.status_code < 300:
+                    return
+                # Railway documents that the first request to a sleeping service
+                # can return 502 while still waking it. Retry once after a short
+                # delay without blocking the caller-facing API request.
+                if attempt == 1 and response.status_code in {502, 503, 504}:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_rejected",
+                    http_status=response.status_code,
+                    attempt=attempt,
+                    failure_class="dependency",
+                )
+                return
+            except httpx.HTTPError as exc:
+                if attempt == 1:
+                    await asyncio.sleep(0.5)
+                    continue
+                log_warning(
+                    logger,
+                    "worker_wake_failed",
+                    exc_info=True,
+                    attempt=attempt,
+                    failure_class="dependency",
+                    exception_type=type(exc).__name__,
+                )
+
+    async def close(self) -> None:
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._client is not None:
+            await self._client.aclose()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global backend, repo, settings
+    backend = SupabaseBackend(settings)
+    repo = RelayV2Repository(backend, settings)
+    from app.control_plane.auto_workbook import prepare_configuration
+    configuration = await prepare_configuration(settings,backend)
+    settings = settings.model_copy(update={'model_control_plane_file':None,'model_control_plane_file_sha256':None,
+        'model_control_plane_json':None,'model_control_plane_release_pointer':None,'retained_control_plane_files':'[]'})
+    control_plane = configuration.plane
+    app.state.configuration_report = configuration.report
+    log_info(logger,'workbook_configuration_loaded',role='api',**configuration.report)
+
+    storage_registry = StorageRegistry(SupabaseObjectStorage(backend, settings))
+    material_resolver = MaterialResolver(repo, storage_registry, settings)
+    fallback_storage = FallbackObjectStorage(repo, storage_registry, settings)
+    file_adapters = ProviderFileRegistry()
+    material_ingress = MaterialIngress(repo, fallback_storage, file_adapters, settings)
+    binding_resolver = MaterialBinder(repo, fallback_storage, file_adapters)
+    providers = ProviderRegistry(settings)
+    cache_resources = CacheResourceRegistry()
+    connection_assembly = register_protocol_adapters(settings=settings, control_plane=control_plane,
+        providers=providers, materials=material_resolver, repo=repo, file_adapters=file_adapters,
+        cache_resources=cache_resources, storage=storage_registry,retained_control_planes=configuration.retained)
+    route_catalog = RouteCatalog.from_settings(settings, control_plane=control_plane)
+    config_snapshot = get_active_config_snapshot(settings, control_plane=control_plane, catalog=route_catalog)
+    verify_node_snapshot_compatibility(config_snapshot)
+    route_resolver = RouteResolver(
+        settings=settings,
+        config_snapshot=config_snapshot,
+        providers=providers,
+        provider_files=file_adapters,
+    )
+    route_resolver.validate_catalog()
+    cache_orchestrator = CacheMaterializer(repo, resource_registry=cache_resources)
+    runtime = RelayRuntimeEngine(
+        repo, storage_registry, providers, material_resolver, binding_resolver, settings,
+        cache_orchestrator=cache_orchestrator,
+    )
+    raw_errors = RawErrorRecorder(repo, storage_registry, settings)
+    inline_executor = InlineScheduler(runtime, raw_errors, repo, settings)
+
+    app.state.settings = settings
+    app.state.v2_repo = repo
+    app.state.storage_registry = storage_registry
+    app.state.material_ingress = material_ingress
+    app.state.material_resolver = material_resolver
+    app.state.material_fallback_storage = fallback_storage
+    app.state.provider_file_registry = file_adapters
+    app.state.binding_resolver = binding_resolver
+    app.state.provider_registry = providers
+    app.state.config_snapshot = config_snapshot
+    app.state.model_control_plane = control_plane
+    app.state.route_catalog = route_catalog
+    app.state.route_resolver = route_resolver
+    app.state.shared_runtime = runtime
+    app.state.cache_resource_registry = cache_resources
+    app.state.connection_assembly = connection_assembly
+    app.state.gemini_genai_sdk = None
+    app.state.cache_orchestrator = cache_orchestrator
+    app.state.raw_error_recorder = raw_errors
+    app.state.inline_executor = inline_executor
+    app.state.worker_wake_notifier = WorkerWakeNotifier()
+    log_info(
+        logger,
+        "api_started",
+        version=API_VERSION, build_git_sha=BUILD_GIT_SHA,
+        deployment_id=settings.deployment_id,
+        execution_pool=settings.execution_pool,
+        connection_policy=settings.connection_availability_mode,
+        configured_connections=providers.registered_connections(),
+        configured_file_connections=file_adapters.registered_connections(),
+        route_revision=route_catalog.revision,
+        route_catalog_hash=route_catalog.catalog_hash,
+        control_plane_revision=control_plane.revision,
+        control_plane_hash=control_plane.control_plane_hash,
+        route_providers=route_catalog.providers(),
+        capability_revision=CAPABILITY_PROFILE_REVISION,
+        dependency_http_log_level=settings.dependency_http_log_level,
+        uvicorn_access_log=settings.uvicorn_access_log,
+        worker_follow_api=settings.worker_follow_api_enabled,
+        worker_wake_configured=bool(settings.effective_worker_wake_url),
+    )
+    try:
+        yield
+    finally:
+        log_info(logger, "api_stopping", deployment_id=settings.deployment_id)
+        notifier = getattr(app.state, "worker_wake_notifier", None)
+        if notifier is not None:
+            await notifier.close()
+        await connection_assembly.close()
+        await backend.close()
+
+
+app = FastAPI(title="Model Relay API", version=API_VERSION, build_git_sha=BUILD_GIT_SHA, lifespan=lifespan)
+app.include_router(dify_relay_gateway_router)
+app.include_router(relay_v2_router)
+
+
+@app.middleware("http")
+async def relay_http_logging(request: Request, call_next):
+    start_ms = now_ms()
+    wake_notifier = getattr(app.state, "worker_wake_notifier", None)
+    should_wake_worker = settings.worker_follow_api_enabled
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-start")
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        log_error(
+            logger,
+            "api_request_unhandled",
+            exc_info=True,
+            method=request.method,
+            path=request.url.path,
+            duration_ms=elapsed_ms(start_ms),
+            failure_class="relay",
+            exception_type=type(exc).__name__,
+        )
+        raise
+
+    # Do not turn health checks or status/result polling into the dominant log
+    # volume. Mutation requests and all HTTP failures remain visible.
+    if request.method not in {"GET", "HEAD"} or response.status_code >= 400:
+        log_info(
+            logger,
+            "api_request_complete",
+            method=request.method,
+            path=request.url.path,
+            http_status=response.status_code,
+            duration_ms=elapsed_ms(start_ms),
+            failure_class=status_failure_class(response.status_code),
+        )
+    # A long API request may outlive the Worker's short active grace window. A
+    # second debounced signal after completion closes the enqueue/wake race without
+    # adding latency to the caller-facing response path.
+    if should_wake_worker and wake_notifier is not None:
+        wake_notifier.notify(reason="api-request-complete")
+    return response
+
+
+def _repo() -> RelayV2Repository:
+    assert repo is not None
+    return repo
+
+
+def _backend() -> SupabaseBackend:
+    assert backend is not None
+    return backend
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _is_session_expiring(session: dict[str, Any]) -> bool:
+    signed = _parse_dt(session.get("signed_url_expires_at"))
+    if signed is None:
+        return False
+    return signed <= utcnow() + timedelta(seconds=settings.session_expiry_safety_seconds)
+
+
+def _submit_response(job: dict[str, Any]) -> JobSubmitResponse:
+    return JobSubmitResponse(
+        job_id=UUID(job["id"]),
+        relay_session_id=UUID(job["relay_session_id"]) if job.get("relay_session_id") else None,
+        status=job["status"],
+        poll_after_seconds=5,
+        submitted_at=_parse_dt(job.get("created_at")),
+        expires_at=_parse_dt(job.get("expires_at")),
+    )
+
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
+    from app.control_plane.auto_workbook import public_configuration_status
+    return {
+        "ok": True,
+        "service": "relay-api",
+        "configuration": public_configuration_status(getattr(app.state,'configuration_report',{})),
+        "version": API_VERSION, "build_git_sha": BUILD_GIT_SHA,
+        "deployment_id": settings.deployment_id,
+        "execution_pool": settings.execution_pool,
+        "route_revision": getattr(app.state, "route_catalog", None).revision if getattr(app.state, "route_catalog", None) else settings.route_revision,
+        "route_catalog_hash": getattr(app.state, "route_catalog", None).catalog_hash if getattr(app.state, "route_catalog", None) else None,
+        "control_plane_revision": getattr(app.state, "model_control_plane", None).revision if getattr(app.state, "model_control_plane", None) else settings.model_control_plane_revision,
+        "control_plane_status": getattr(app.state, "model_control_plane", None).status if getattr(app.state, "model_control_plane", None) else None,
+        "control_plane_hash": getattr(app.state, "model_control_plane", None).control_plane_hash if getattr(app.state, "model_control_plane", None) else None,
+        "providers": getattr(app.state, "route_catalog", None).providers() if getattr(app.state, "route_catalog", None) else [],
+        "capability_revision": CAPABILITY_PROFILE_REVISION,
+        "worker_follow_api": settings.worker_follow_api_enabled,
+    }
+
+
+@app.get('/configuration',dependencies=[Depends(require_relay_auth)])
+async def configuration_diagnostics() -> dict[str, Any]:
+    return getattr(app.state,'configuration_report',{})
+
+
+@app.post(
+    "/v1/jobs",
+    response_model=JobSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_relay_auth)],
+)
+async def submit_job(
+    request: JobSubmitRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=1, max_length=500),
+) -> JobSubmitResponse:
+    repository = _repo()
+    store = _backend()
+
+    existing = await repository.find_job_by_idempotency(
+        request.tenant_id, idempotency_key
+    )
+    if existing:
+        return _submit_response(existing)
+
+    session_id: UUID | None = None
+    session: dict[str, Any] | None = None
+    material_prefix_path: str | None = None
+    expected_history_version = 0
+
+    if request.mode == "continue_session":
+        session = await repository.get_session(
+            request.relay_session_id,
+            tenant_id=request.tenant_id,
+            conversation_hash=request.conversation_hash,
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="Relay session not found")
+        if session.get("provider") != request.provider:
+            raise HTTPException(
+                status_code=409,
+                detail="Relay session provider cannot change across continuation",
+            )
+        if _is_session_expiring(session):
+            raise HTTPException(
+                status_code=409,
+                detail="RELAY_SESSION_MATERIAL_EXPIRING",
+            )
+        session_id = UUID(session["id"])
+        material_prefix_path = session.get("material_prefix_object_path")
+        expected_history_version = int(session.get("history_version") or 0)
+
+    elif request.mode == "new_session":
+        session_id = uuid4()
+        material_prefix_path = session_material_prefix_path(
+            settings,
+            request.tenant_id,
+            request.conversation_hash,
+            str(session_id),
+        )
+        await store.storage_put(
+            material_prefix_path,
+            json_bytes(request.material_prefix),
+            content_type="application/json",
+        )
+
+        signed_expiry = request.material_expires_at or (
+            utcnow() + timedelta(seconds=settings.supabase_signed_url_ttl)
+        )
+        session_expiry = min(
+            signed_expiry,
+            utcnow() + timedelta(seconds=settings.session_ttl_seconds),
+        )
+        session = await repository.create_session(
+            {
+                "id": str(session_id),
+                "tenant_id": request.tenant_id,
+                "conversation_hash": request.conversation_hash,
+                "provider": request.provider,
+                "model": request.model,
+                "prompt_cache_key": stable_prompt_cache_key(request.conversation_hash),
+                "material_prefix_object_path": material_prefix_path,
+                "history_object_path": None,
+                "signed_url_expires_at": signed_expiry.isoformat(),
+                "history_version": 0,
+                "expires_at": session_expiry.isoformat(),
+            }
+        )
+
+    job_id = uuid4()
+    snapshot = request.model_dump(mode="json")
+    snapshot["relay_session_id"] = str(session_id) if session_id else None
+    snapshot["expected_history_version"] = expected_history_version
+    snapshot["material_prefix_object_path"] = material_prefix_path
+
+    # Avoid duplicating the immutable material prefix for session-backed jobs.
+    if request.mode in {"new_session", "continue_session"}:
+        snapshot["material_prefix"] = None
+
+    request_path = job_object_path(
+        settings,
+        request.tenant_id,
+        request.conversation_hash,
+        str(job_id),
+        "request.json",
+    )
+    await store.storage_put(request_path, json_bytes(snapshot))
+
+    row = {
+        "id": str(job_id),
+        "tenant_id": request.tenant_id,
+        "conversation_hash": request.conversation_hash,
+        "relay_session_id": str(session_id) if session_id else None,
+        "stage": request.stage,
+        "provider": request.provider,
+        "status": "queued",
+        "model": request.model,
+        "think_level": request.think_level,
+        "request_object_path": request_path,
+        "compact_result": None,
+        "idempotency_key": idempotency_key,
+        "attempt_count": 0,
+        "expires_at": repository.default_job_expiry().isoformat(),
+    }
+
+    try:
+        created = await repository.create_job(row)
+    except SupabaseError as exc:
+        # A concurrent retry may have won the idempotency race.
+        if exc.status_code == 409:
+            existing = await repository.find_job_by_idempotency(
+                request.tenant_id, idempotency_key
+            )
+            if existing:
+                return _submit_response(existing)
+        raise HTTPException(status_code=502, detail="Failed to persist Relay job") from exc
+
+    return _submit_response(created)
+
+
+@app.get(
+    "/v1/jobs/{job_id}",
+    response_model=JobStatusResponse,
+    dependencies=[Depends(require_relay_auth)],
+)
+async def get_job_status(
+    job_id: UUID,
+    owner: tuple[str, str] = Depends(require_owner_headers),
+) -> JobStatusResponse:
+    tenant_id, conversation_hash = owner
+    job = await _repo().get_job(
+        job_id, tenant_id=tenant_id, conversation_hash=conversation_hash
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # v2 removes Relay-side provider error classification. Legacy status keeps
+    # this field only for shape compatibility and never derives retry policy.
+    retryable = False
+    return JobStatusResponse(
+        job_id=job_id,
+        relay_session_id=UUID(job["relay_session_id"]) if job.get("relay_session_id") else None,
+        status=job["status"],
+        stage=job["stage"],
+        provider=job["provider"],
+        model=job["model"],
+        heartbeat_at=_parse_dt(job.get("heartbeat_at")),
+        started_at=_parse_dt(job.get("started_at")),
+        completed_at=_parse_dt(job.get("completed_at")),
+        poll_after_seconds=10,
+        retryable=retryable,
+        error_code=job.get("error_code"),
+        error_message=job.get("error_message"),
+    )
+
+
+@app.get(
+    "/v1/jobs/{job_id}/result",
+    dependencies=[Depends(require_relay_auth)],
+)
+async def get_job_result(
+    job_id: UUID,
+    view: str = Query(default="dify"),
+    owner: tuple[str, str] = Depends(require_owner_headers),
+) -> Response:
+    if view != "dify":
+        raise HTTPException(status_code=400, detail="Only view=dify is available")
+
+    tenant_id, conversation_hash = owner
+    job = await _repo().get_job(
+        job_id, tenant_id=tenant_id, conversation_hash=conversation_hash
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] == "succeeded":
+        payload = job.get("compact_result") or {
+            "job_id": str(job_id),
+            "status": "failed",
+            "error_code": "COMPACT_RESULT_MISSING",
+        }
+        raw = json_bytes(payload)
+        if len(raw) > settings.relay_result_hard_limit_bytes:
+            # Last defensive barrier: Dify must never receive an oversized result.
+            safe = dict(payload)
+            safe["text"] = truncate_utf8(
+                str(safe.get("text") or ""), settings.relay_result_preview_bytes
+            )
+            safe["text_truncated"] = True
+            raw = json_bytes(safe)
+        return Response(content=raw, media_type="application/json", status_code=200)
+
+    if job["status"] in {"failed", "cancelled", "expired", "indeterminate"}:
+        raw_path = job.get("raw_response_object_path")
+        raw_error = None
+        if raw_path:
+            try:
+                raw = await _backend().storage_get(raw_path)
+                raw_error = {
+                    "body_base64": base64.b64encode(raw).decode("ascii"),
+                    "body_size": len(raw),
+                    "body_sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                try:
+                    raw_error["body_text"] = raw.decode("utf-8")
+                    raw_error["body_encoding"] = "utf-8"
+                except UnicodeDecodeError:
+                    raw_error["body_encoding"] = "binary"
+            except Exception as exc:
+                raw_error = {
+                    "archive_read_error": {
+                        "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                }
+        payload = {
+            "job_id": str(job_id),
+            "status": job["status"],
+            "error": raw_error,
+        }
+        # Relay-originated failures that never had an HTTP body retain their
+        # exact diagnostic fields; they are not mapped to UPSTREAM_* classes.
+        if raw_error is None and (job.get("error_code") or job.get("error_message")):
+            payload["error"] = {
+                "source": "relay",
+                "code": job.get("error_code"),
+                "message": job.get("error_message"),
+            }
+        return Response(content=json_bytes(payload), media_type="application/json", status_code=200)
+
+    payload = {
+        "job_id": str(job_id),
+        "status": job["status"],
+        "stage": job["stage"],
+        "poll_after_seconds": 10,
+    }
+    return Response(content=json_bytes(payload), media_type="application/json", status_code=202)
+
+
+@app.post(
+    "/v1/jobs/{job_id}/cancel",
+    response_model=CancelResponse,
+    dependencies=[Depends(require_relay_auth)],
+)
+async def cancel_job(
+    job_id: UUID,
+    owner: tuple[str, str] = Depends(require_owner_headers),
+) -> CancelResponse:
+    tenant_id, conversation_hash = owner
+    repository = _repo()
+    job = await repository.get_job(
+        job_id, tenant_id=tenant_id, conversation_hash=conversation_hash
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] not in {"succeeded", "failed", "cancelled", "expired"}:
+        updated = await repository.update_job(
+            job_id,
+            {
+                "status": "cancelled",
+                "completed_at": utcnow().isoformat(),
+                "error_code": "CANCELLED_BY_CLIENT",
+                "error_message": "Job cancelled by client",
+            },
+        )
+        if updated:
+            job = updated
+
+    return CancelResponse(job_id=job_id, status=job["status"])

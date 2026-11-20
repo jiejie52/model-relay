@@ -1,0 +1,302 @@
+from functools import lru_cache
+import hashlib
+import os
+from typing import Literal
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+RELAY_VERSION = "10.2.1"
+BUILD_GIT_SHA = os.getenv("BUILD_GIT_SHA", "unknown")
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    app_name: str = "model-relay"
+    log_level: str = "INFO"
+    dependency_http_log_level: str = "WARNING"
+    uvicorn_access_log: bool = False
+
+    # A comma-separated list of model-name glob patterns. An empty value keeps
+    # HTTP wire logging disabled; a matching model enables it automatically.
+    relay_http_wire_log_providers: str = ""
+    material_placement_mode: Literal["legacy_v1", "shadow", "enforce_new_sessions", "enforce_all_verified"] = "enforce_new_sessions"
+    historical_material_safety_seconds: int = Field(120, ge=30, le=3600)
+    http_wire_body_audit_mode: Literal["redacted_structure", "full_hex_debug"] = "redacted_structure"
+    http_wire_full_debug_until: str | None = None
+    relay_inline_cache_budget_bytes: int = Field(60 * 1024 * 1024, gt=0, le=60 * 1024 * 1024)
+    relay_cache_roll_max_uncached_tokens: int = Field(16384, gt=0)
+    relay_implicit_prefix_min_tokens: int = Field(1024, gt=0)
+    relay_tail_turn_min_reserve_chars: int = Field(1, ge=1)
+    relay_cache_roll_min_delta_tokens: int = Field(2048, gt=0)
+    relay_cache_roll_alpha: float = Field(0.5, gt=0, allow_inf_nan=False)
+    relay_grok_cache_mode: Literal["unified_v2", "legacy_v1"] = "unified_v2"
+
+    relay_api_token: SecretStr
+
+    # Provider connection configuration. 0.5.1 defaults to "all" connection
+    # availability: ENABLED_CONNECTIONS is retained only as a future/optional
+    # allowlist and is ignored unless CONNECTION_AVAILABILITY_MODE=allowlist.
+    aihubmix_api_key: SecretStr | None = None
+    aihubmix_openai_base_url: str = "https://aihubmix.com/v1"
+    aihubmix_claude_base_url: str = "https://aihubmix.com"
+    aihubmix_chat_connection_id: str = "aihubmix_chat_completions"
+    aihubmix_claude_connection_id: str = "aihubmix_claude_messages"
+    aihubmix_gemini_base_url: str | None = None
+    # google-genai custom base URL for AIHubMix Files/Context Caching. Keep this
+    # separate from the existing native generateContent base so frozen routes
+    # do not change when the SDK transport is enabled.
+    aihubmix_gemini_sdk_base_url: str = "https://aihubmix.com/gemini"
+    aihubmix_gemini_connection_id: str = "aihubmix_gemini_native"
+
+    moonshot_api_key: SecretStr | None = None
+    moonshot_base_url: str = "https://api.moonshot.cn/v1"
+    moonshot_connection_id: str = "moonshot_official"
+
+    connection_availability_mode: str = "all"  # all | allowlist
+    enabled_connections: str = "aihubmix_default"  # legacy/future allowlist input
+    default_connection_id: str = "aihubmix_default"
+
+    # Public routing contract 2.1: callers provide provider/model only. The
+    # deployment-local catalog resolves and freezes the private connection_id.
+    route_revision: str = "relay-route-catalog/2026-09-27.1"
+    route_catalog_json: str | None = None
+    # 2.0 control-plane snapshot. This governs model offerings, protocol reuse,
+    # capability contracts and per-model channel priority. Configuration may
+    # reference credential *environment variable names* but never secret values.
+    model_control_plane_revision: str = "relay-model-control-plane/2026-10-02.1"
+    model_workbook_file: str = "config/model_management_v2.xlsx"
+    credential_env_file: str | None = ".env"
+    configuration_io_timeout_seconds: float = Field(5,gt=0,le=30)
+    configuration_probe_timeout_seconds: float = Field(35,gt=0,le=120)
+    configuration_verification_ttl_seconds: int = Field(86400,ge=60,le=604800)
+    model_control_plane_json: str | None = None
+    # V2 governance releases are authored from config/model_management_v2.xlsx
+    # but only an externally approved, SHA256-pinned JSON snapshot enters runtime.
+    model_control_plane_release_pointer: str | None = None
+    retained_control_plane_files: str = "[]"  # JSON array of {path, sha256}; old executable releases
+    model_control_plane_file: str | None = None
+    model_control_plane_file_sha256: str | None = None
+    route_legacy_hint_mode: str = "warn"  # warn | strict
+    route_gemini_model_pattern: str = "gemini-*"
+    route_grok_model_pattern: str = "grok-*"
+    route_kimi_model_pattern: str = "kimi-*"
+
+    # Same source image, different deployment configuration.
+    deployment_id: str = "railway"
+    execution_pool: str = "railway-default"
+    worker_execution_pools: str = "railway-default"
+
+    supabase_url: str
+    supabase_secret_key: SecretStr
+    supabase_bucket: str = "dify-assets"
+    supabase_signed_url_ttl: int = 604800
+    default_storage_id: str = "supabase_shared"
+
+    relay_storage_prefix: str = "relay"
+
+    worker_max_runtime_seconds: int = 2400
+    worker_poll_seconds: float = 2.0
+
+    # Railway Serverless lifecycle coupling. The API sends a short private-network
+    # wake signal when it receives application traffic; the Worker keeps polling
+    # only for a short grace window, drains all claimable jobs, then becomes
+    # network-quiescent so Railway can put it to sleep. Outside Railway this
+    # behavior stays disabled unless WORKER_WAKE_URL is explicitly configured.
+    worker_follow_api: bool = True
+    worker_api_activity_grace_seconds: float = 5.0
+    worker_wake_min_interval_seconds: float = 2.0
+    worker_wake_timeout_seconds: float = 3.0
+    worker_service_name: str = "relay-worker"
+    worker_control_host: str = "0.0.0.0"
+    worker_control_port: int = 8000
+    worker_wake_url: str | None = None
+
+    job_lease_seconds: int = 120
+    job_heartbeat_seconds: int = 30
+    job_ttl_seconds: int = 604800
+    session_ttl_seconds: int = 604800
+    session_expiry_safety_seconds: int = 900
+
+    # Sync requests are still persisted Relay Requests, but the API process owns
+    # the provider connection. A timeout never silently creates an async Job.
+    sync_request_deadline_seconds: int = 120
+
+    relay_result_soft_limit_bytes: int = 524288
+    relay_result_hard_limit_bytes: int = 786432
+    relay_result_preview_bytes: int = 307200
+
+    material_ingress_max_bytes: int = 104857600
+    material_ingress_timeout_seconds: float = 120.0
+    material_allow_http: bool = False
+    material_default_durability_policy: str = "native_first"
+    material_default_fallback_policy: str = "on_provider_unavailable"
+    # Relay 4.3: Gemini material placement is frozen from the authoritative
+    # Request aggregate. Below 70 MiB no Gemini Files API is used; stable Session
+    # material is injected once into CachedContent from Relay bytes. At/above
+    # 70 MiB a deterministic small stable subset is cached inline and all
+    # remaining material uses Gemini Files API for inference, with External URL
+    # fallback on Files upload failure.
+    gemini_cache_inline_fallback_limit_bytes: int = 70 * 1024 * 1024
+    # Deprecated compatibility knob retained so older deployments do not fail
+    # settings validation. It no longer selects Gemini ingress transport.
+    gemini_files_threshold_bytes: int = 99 * 1024 * 1024
+    gemini_file_soft_ttl_seconds: int = 172800
+    gemini_file_poll_seconds: float = 2.0
+    gemini_file_processing_timeout_seconds: float = 300.0
+    kimi_file_poll_seconds: float = 2.0
+    kimi_file_processing_timeout_seconds: float = 300.0
+
+    upstream_connect_timeout_seconds: float = 30.0
+    upstream_write_timeout_seconds: float = 120.0
+    upstream_pool_timeout_seconds: float = 30.0
+
+    supabase_timeout_seconds: float = 60.0
+
+    # Relay 3.1 Stateful Cache pre-dispatch budget. These calls are resource
+    # preparation only; model inference remains governed by the normal upstream
+    # execution timeout/fencing rules.
+    cache_prepare_timeout_seconds: float = 60.0
+    cache_expiry_safety_seconds: int = 30
+
+    @property
+    def supabase_root(self) -> str:
+        return self.supabase_url.rstrip("/")
+
+    @property
+    def aihubmix_root(self) -> str:
+        return self.aihubmix_openai_base_url.rstrip("/")
+
+    @property
+    def moonshot_root(self) -> str:
+        return self.moonshot_base_url.rstrip("/")
+
+    @property
+    def connection_allowlist_set(self) -> set[str]:
+        return {x.strip() for x in self.enabled_connections.split(",") if x.strip()}
+
+    @property
+    def enabled_connection_set(self) -> set[str]:
+        """Compatibility view used by older code/logging.
+
+        In the default ``all`` mode this returns all built-in connection IDs,
+        regardless of the legacy ENABLED_CONNECTIONS value. This is deliberate:
+        route availability is no longer accidentally controlled by an old env
+        variable. A future deployment can opt into the allowlist explicitly.
+        """
+        if not self.connection_restrictions_enabled:
+            return self.known_connection_ids
+        return self.connection_allowlist_set
+
+    @property
+    def known_connection_ids(self) -> set[str]:
+        return {
+            "aihubmix_default",
+            self.aihubmix_chat_connection_id,
+            self.aihubmix_claude_connection_id,
+            self.aihubmix_gemini_connection_id,
+            self.moonshot_connection_id,
+        }
+
+    @property
+    def connection_restrictions_enabled(self) -> bool:
+        return str(self.connection_availability_mode or "all").strip().lower() == "allowlist"
+
+    def connection_is_enabled(self, connection_id: str) -> bool:
+        if not self.connection_restrictions_enabled:
+            return True
+        return connection_id in self.connection_allowlist_set
+
+    def connection_configuration(self, connection_id: str) -> tuple[bool, str | None]:
+        """Return whether the built-in connection has enough server config.
+
+        This does not perform network health checks. Unknown/custom connections
+        are considered configuration-neutral and are validated by adapter
+        registration instead.
+        """
+        if connection_id == "aihubmix_default":
+            if self.aihubmix_api_key is None:
+                return False, "AIHUBMIX_API_KEY is not configured"
+            return True, None
+        if connection_id in {self.aihubmix_chat_connection_id, self.aihubmix_claude_connection_id}:
+            if self.aihubmix_api_key is None:
+                return False, "AIHUBMIX_API_KEY is not configured"
+            return True, None
+        if connection_id == self.aihubmix_gemini_connection_id:
+            missing: list[str] = []
+            if self.aihubmix_api_key is None:
+                missing.append("AIHUBMIX_API_KEY")
+            if not self.aihubmix_gemini_base_url:
+                missing.append("AIHUBMIX_GEMINI_BASE_URL")
+            if missing:
+                return False, "missing server configuration: " + ", ".join(missing)
+            return True, None
+        if connection_id == self.moonshot_connection_id:
+            if self.moonshot_api_key is None:
+                return False, "MOONSHOT_API_KEY is not configured"
+            return True, None
+        return True, None
+
+    def connection_is_configured(self, connection_id: str) -> bool:
+        configured, _ = self.connection_configuration(connection_id)
+        return configured
+
+    def connection_is_active(self, connection_id: str) -> bool:
+        return self.connection_is_enabled(connection_id) and self.connection_is_configured(connection_id)
+
+    @property
+    def worker_pool_set(self) -> set[str]:
+        pools = {x.strip() for x in self.worker_execution_pools.split(",") if x.strip()}
+        return pools or {self.execution_pool}
+
+    @property
+    def worker_follow_api_enabled(self) -> bool:
+        if not self.worker_follow_api:
+            return False
+        # Railway injects these variables into both services. Requiring a Railway
+        # runtime marker (or an explicit URL override) preserves the old always-on
+        # local/dev Worker behavior while making Railway deployments zero-config.
+        return bool(
+            self.worker_wake_url
+            or os.getenv("RAILWAY_PROJECT_ID")
+            or os.getenv("RAILWAY_ENVIRONMENT_ID")
+        )
+
+    @property
+    def effective_worker_wake_url(self) -> str | None:
+        explicit = str(self.worker_wake_url or "").strip()
+        if explicit:
+            return explicit
+        if not self.worker_follow_api_enabled:
+            return None
+        service = str(self.worker_service_name or "relay-worker").strip() or "relay-worker"
+        port = int(self.worker_control_port)
+        return f"http://{service}.railway.internal:{port}/wake"
+
+    def connection_account_scope_hash(self, connection_id: str) -> str:
+        """Opaque fingerprint used to prevent provider file reuse across keys."""
+        if connection_id == self.aihubmix_gemini_connection_id:
+            if self.aihubmix_api_key is None or not self.aihubmix_gemini_base_url:
+                raise RuntimeError("Gemini native connection is not configured")
+            material = f"{connection_id}|{self.aihubmix_gemini_base_url.rstrip('/')}|{self.aihubmix_api_key.get_secret_value()}"
+        elif connection_id == self.moonshot_connection_id:
+            if self.moonshot_api_key is None:
+                raise RuntimeError("Moonshot connection is not configured")
+            material = f"{connection_id}|{self.moonshot_root}|{self.moonshot_api_key.get_secret_value()}"
+        else:
+            # Non-native file connections do not expose a provider-side file
+            # resource, but still get a stable scope for snapshot/audit fields.
+            material = f"{connection_id}|relay-fallback"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
