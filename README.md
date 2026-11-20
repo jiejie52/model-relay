@@ -1,3 +1,9 @@
+# Model Relay 10.3.0
+
+在 Node.js / TypeScript 迁移基线上补齐 Context Continuation 四层架构契约与安全门禁：新增控制面续接合同与编译期交叉校验、执行面纯函数规划与防 `request_hash` 污染硬断言、`require_stateful_anchor` / ZDR Fail-Closed 拦截、`relay-continuation-head/4` 合同驱动头部指纹、运行时 `MaterialBinder → ContinuationBinder → AtomicDispatchSealer` 统一封存与三类 `anchor_class` 准入、Multi-turn Delta `[k, N)` 与原生 `thought + signature` 重放，以及派发后 404/410 零重发失活自愈和全协议 `result_stored` 只提交恢复。
+
+以下保留历史说明。
+
 # Model Relay 10.2.1
 
 Gemini Interactions 按已提交的会话历史续接，支持首轮提交长资料、后续发送新问题。升级和两轮请求示例见 [UPGRADE_10.2.1.md](UPGRADE_10.2.1.md)。

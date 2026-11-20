@@ -1,0 +1,8 @@
+{
+  "name": "Model Relay",
+  "description": "Stateful LLM relay service for Gemini, OpenAI-compatible, Claude, and Moonshot sessions with material ingress, context continuation, and cache governance.",
+  "requestFramePermissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,1 +1,0 @@
-"""Model Relay service package."""
