@@ -17,6 +17,9 @@ logger = logging.getLogger("model-relay-runtime")
 _PROVIDER_BINDING_SQL_MESSAGES = {
     "HISTORICAL_MATERIAL_BINDING_EXPIRED",
     "MATERIAL_BINDING_SCOPE_MISMATCH",
+    "CONTINUATION_BINDING_INVALID",
+    "CONTINUATION_PARENT_NO_LONGER_USABLE",
+    "CONTINUATION_ANCHOR_COMMIT_INVALID",
 }
 _PROVIDER_BINDING_DIAGNOSTIC_FIELDS = {
     "request_id",
@@ -142,7 +145,29 @@ class AtomicDispatchSealer:
 
         has_active_continuation = bool(active_anchor_id and not fallback_occurred)
 
-        if state.is_v3:
+        if has_active_continuation and continuation_binding_data.get("schema_version") != "relay-continuation-binding/2":
+            hold_seconds = 300
+            if isinstance(state.snapshot, dict) and "continuation_hold_seconds" in state.snapshot:
+                hold_seconds = int(state.snapshot["continuation_hold_seconds"])
+            sealed = await self.repo.seal_continuation_and_dispatch_v90(
+                request_id=state.request_id,
+                anchor_id=active_anchor_id,
+                fence_owner=state.fence.owner if state.fence else None,
+                fence_epoch=state.fence.epoch if state.fence else None,
+                hold_seconds=hold_seconds,
+            )
+            if not sealed:
+                from app.runtime.execution_guard import ExecutionLeaseLost
+                if state.fence is not None:
+                    raise ExecutionLeaseLost("Continuation dispatch seal was rejected by execution fence")
+                raise ProviderRequestError(
+                    "CONTINUATION_SEAL_REJECTED",
+                    "Continuation dispatch seal was rejected; Provider dispatch is forbidden",
+                )
+            state.execution_snapshot = dict(state.snapshot)
+            state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
+            state.snapshot["_relay_continuation_execution"] = continuation_binding_data
+        elif state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
                 request_id=state.request_id,
@@ -163,11 +188,9 @@ class AtomicDispatchSealer:
                 )
 
             has_placement = state.snapshot.get("placement_contract_version") is not None
-            sealed_continuation = (
-                (state.snapshot.get("continuation_intent_plan") or {}).get("schema_version") == "relay-continuation-plan/2"
-                and continuation_binding_data is not None
-                and continuation_binding_data.get("effective_mode") not in (None, "disabled")
-            )
+            sealed_continuation = state.snapshot.get("protocol") == "gemini_interactions" and (
+                state.snapshot.get("continuation_intent_plan") or {}
+            ).get("schema_version") == "relay-continuation-plan/2"
             if sealed_continuation:
                 seal_method = self.repo.seal_continuation_context_v91
             else:
@@ -183,7 +206,7 @@ class AtomicDispatchSealer:
                         "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
                        if state.snapshot.get("placement_contract_version") is not None else {}),
                     **({"continuation_binding": continuation_binding_data,
-                        "anchor_safety_seconds": int((state.snapshot.get("continuation_intent_plan") or {}).get("topology", {}).get("anchor_safety_margin_seconds") or 30)}
+                        "anchor_safety_seconds": state.snapshot["continuation_intent_plan"]["topology"]["anchor_safety_margin_seconds"]}
                        if sealed_continuation else {}),
                     fence_owner=state.fence.owner,
                     fence_epoch=state.fence.epoch,

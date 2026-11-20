@@ -18,7 +18,6 @@ def build_context_plan(
     material_rows: list[dict[str, Any]],
     history_identity: dict[str, Any] | None = None,
     history: list[dict[str, Any]] | None = None,
-    continuation_topology: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, provider-neutral cache context IR.
 
@@ -215,10 +214,6 @@ def build_context_plan(
             "historical_material_occurrences_digest": stable_hash(placement["verified_history_occurrences"]),
             "current_turn_material_ids": placement["current_effective_material_ids"],
         }
-    if continuation_topology is not None:
-        plan["continuation_topology"] = continuation_topology
-    elif snapshot.get("continuation_intent_plan", {}).get("topology"):
-        plan["continuation_topology"] = snapshot["continuation_intent_plan"]["topology"]
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 

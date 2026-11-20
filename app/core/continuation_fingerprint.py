@@ -8,7 +8,6 @@ from app.core.idempotency import canonical_json_bytes, stable_hash
 CONTINUATION_CHAIN_FORMAT = "relay-continuation-chain/1"
 LEGACY_CONTINUATION_HEAD = "relay-continuation-head/2"
 INTERACTIONS_HISTORY_HEAD = "relay-continuation-head/3"
-CONTRACT_DRIVEN_HEAD = "relay-continuation-head/4"
 
 
 def extract_turn_semantics(turn: dict[str, Any]) -> dict[str, Any]:
@@ -135,8 +134,7 @@ def verify_anchor_fingerprint(anchor_record: dict[str, Any] | Any, current_finge
 
 
 def continuation_head(
-    snapshot: dict[str, Any], *, head_format: str = CONTRACT_DRIVEN_HEAD,
-    head_invariants: tuple[str, ...] | None = None,
+    snapshot: dict[str, Any], *, head_format: str = LEGACY_CONTINUATION_HEAD,
 ) -> str:
     """Identify the history namespace used by a frozen continuation plan."""
     scope_keys = (
@@ -146,27 +144,12 @@ def continuation_head(
     )
     if head_format == LEGACY_CONTINUATION_HEAD:
         scope_keys += ("instructions", "tools")
-        return stable_hash({"format": head_format, **{key: snapshot.get(key) for key in scope_keys}})
-    elif head_format == INTERACTIONS_HISTORY_HEAD:
-        if snapshot.get("protocol") != "gemini_interactions":
-            raise ValueError("Unsupported continuation head format for this protocol")
-        return stable_hash({"format": head_format, **{key: snapshot.get(key) for key in scope_keys}})
-    elif head_format == CONTRACT_DRIVEN_HEAD:
-        if head_invariants is None:
-            contract = (snapshot.get("capability_contract") or {}).get("continuation") or {}
-            head_invariants = tuple(contract.get("head_invariants") or ("instructions", "tools", "account_scope_id", "model"))
-        payload: dict[str, Any] = {"format": head_format, **{key: snapshot.get(key) for key in scope_keys}}
-        if "instructions" in head_invariants:
-            inst = snapshot.get("instructions")
-            payload["instructions"] = inst.strip() if isinstance(inst, str) else inst
-        if "tools" in head_invariants:
-            from app.core.context_codec import normalize_native_payload
-            raw_tools = snapshot.get("tools") or (snapshot.get("provider_payload") or {}).get("tools")
-            norm_tools = normalize_native_payload({"tools": raw_tools}, response_schemas=True).get("tools") if raw_tools else None
-            payload["tools"] = norm_tools
-        return stable_hash(payload)
-    else:
-        raise ValueError(f"Unsupported continuation head format: {head_format!r}")
+    elif head_format != INTERACTIONS_HISTORY_HEAD or snapshot.get("protocol") != "gemini_interactions":
+        raise ValueError("Unsupported continuation head format for this protocol")
+
+    # Interactions inherits user/model steps. System instructions and tool
+    # declarations are sealed and sent on each request that uses them.
+    return stable_hash({"format": head_format, **{key: snapshot.get(key) for key in scope_keys}})
 
 
 def extend_native_prefix(previous: str, turn: dict[str, Any]) -> str:

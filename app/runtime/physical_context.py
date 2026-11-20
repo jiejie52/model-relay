@@ -74,11 +74,6 @@ class PhysicalContextProjector:
         }
         state.provider_physical_plan = {**plan, "physical_plan_hash": stable_hash(plan)}
 
-    def reproject_for_continuation(self, state):
-        protocol = state.snapshot.get("protocol")
-        if protocol == "gemini_interactions":
-            self.project_interactions(state)
-
     async def project(self, state):
         state.context_plan = state.snapshot.get("context_plan") if isinstance(state.snapshot.get("context_plan"), dict) else None
         if (int(state.upgrade.get("version") or 0) >= 3 and state.upgrade.get("grok_mode") != "legacy_v1"

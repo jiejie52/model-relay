@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 from app.core.idempotency import stable_hash
-from app.shared_contracts import ContinuationDecisionError
 
-ContinuationMode = Literal["off", "auto", "prefer_stateful_anchor", "require_stateful_anchor"]
+ContinuationMode = Literal["none", "auto", "delta_turn", "stateful_anchor"]
 
 
 @dataclass(frozen=True)
@@ -18,10 +17,6 @@ class ContinuationIntentPlan:
     schema_version: str = "relay-continuation-plan/1"
     plan_hash: str = ""
     topology: dict[str, Any] | None = None
-    resolution_status: str = "disabled"
-    decision_reason: str = "continuation_not_enabled"
-    planned_anchor_class: str | None = None
-    requested_mode: str = "prefer_stateful_anchor"
 
     def __post_init__(self):
         if not self.plan_hash:
@@ -35,10 +30,6 @@ class ContinuationIntentPlan:
             "parent_history_version": self.parent_history_version,
             "parent_fingerprint": self.parent_fingerprint,
             "allow_fallback_to_full": self.allow_fallback_to_full,
-            "resolution_status": self.resolution_status,
-            "decision_reason": self.decision_reason,
-            "planned_anchor_class": self.planned_anchor_class,
-            "requested_mode": self.requested_mode,
         }
         if self.topology is not None:
             data["topology"] = self.topology
@@ -60,8 +51,4 @@ class ContinuationIntentPlan:
             schema_version=data.get("schema_version", "relay-continuation-plan/1"),
             plan_hash=data.get("plan_hash", ""),
             topology=data.get("topology"),
-            resolution_status=data.get("resolution_status", "disabled"),
-            decision_reason=data.get("decision_reason", "continuation_not_enabled"),
-            planned_anchor_class=data.get("planned_anchor_class"),
-            requested_mode=data.get("requested_mode", "prefer_stateful_anchor"),
         )

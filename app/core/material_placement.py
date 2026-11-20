@@ -191,28 +191,3 @@ def material_identity(snapshot):
         "expected_history_version": snapshot.get("history_version"),
         "session_manifest_hash": plan["manifest_hash"],
         "explicit_material_ids": snapshot.get("material_ids") or []}
-
-
-def verify_parent_chain_material_coverage(
-    *,
-    placement_plan: dict[str, Any],
-    anchor_material_bindings: list[dict[str, Any]] | tuple[dict[str, Any], ...],
-    delta_turns: list[dict[str, Any]],
-) -> tuple[bool, str | None]:
-    """Verify that all historical_only materials skipped in this turn are covered by parent anchor or delta turns."""
-    historical_only = set(placement_plan.get("historical_only_material_ids") or [])
-    if not historical_only:
-        return True, None
-
-    covered_mids = {
-        b.get("material_id") for b in anchor_material_bindings if isinstance(b, dict) and b.get("material_id")
-    }
-    for turn in delta_turns:
-        for occ in (turn.get("material_occurrences") or []):
-            if isinstance(occ, dict) and occ.get("material_id"):
-                covered_mids.add(occ["material_id"])
-
-    missing = historical_only - covered_mids
-    if missing:
-        return False, f"MATERIAL_COVERAGE_GAP: Missing {sorted(missing)}"
-    return True, None

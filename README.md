@@ -1,7 +1,3 @@
-# Model Relay 10.3.0
-
-Context Continuation（上下文续接）架构设计增强、偏离纠正与封存漏洞修复：消除封存旁路漏洞、升级合同驱动的头部指纹（v4）、确立受理期纯函数规划并阻断动态句柄污染幂等键、根除结果提交脏写入、支持三类锚点形态与 ZDR 安全门禁。升级说明与核心机制见 [UPGRADE_10.3.0.md](UPGRADE_10.3.0.md)。
-
 # Model Relay 10.2.1
 
 Gemini Interactions 按已提交的会话历史续接，支持首轮提交长资料、后续发送新问题。升级和两轮请求示例见 [UPGRADE_10.2.1.md](UPGRADE_10.2.1.md)。

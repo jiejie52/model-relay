@@ -68,12 +68,6 @@ def caller_intent_hash(value: dict[str, Any]) -> str:
     return stable_hash(identity)
 
 
-_FORBIDDEN_DYNAMIC_CONTINUATION_KEYS = frozenset({
-    "previous_interaction_id", "previous_response_id", "selected_anchor_id",
-    "active_anchor_id", "parent_anchor_id", "upstream_handle", "_relay_continuation_execution",
-})
-
-
 def request_identity(snapshot: dict[str, Any]) -> str:
     """Hash execution-relevant facts using the snapshot's exact contract version.
 
@@ -166,10 +160,6 @@ def request_identity(snapshot: dict[str, Any]) -> str:
         identity["material_placement_identity"] = material_identity(snapshot)
     if version == "relay-request/2.5" or snapshot.get("continuation_intent_plan") is not None:
         plan = snapshot.get("continuation_intent_plan")
-        if isinstance(plan, dict):
-            for k in _FORBIDDEN_DYNAMIC_CONTINUATION_KEYS:
-                if plan.get(k) is not None:
-                    raise ValueError(f"Dynamic continuation handle {k!r} must never enter request_identity")
         plan_hash = None
         if hasattr(plan, "plan_hash"):
             plan_hash = plan.plan_hash
@@ -178,8 +168,4 @@ def request_identity(snapshot: dict[str, Any]) -> str:
         elif snapshot.get("continuation_plan_hash") is not None:
             plan_hash = snapshot.get("continuation_plan_hash")
         identity["continuation_plan_hash"] = plan_hash
-        if snapshot.get("continuation_contract_hash") is not None:
-            identity["continuation_contract_hash"] = snapshot.get("continuation_contract_hash")
-        if snapshot.get("continuation_policy_hash") is not None:
-            identity["continuation_policy_hash"] = snapshot.get("continuation_policy_hash")
     return stable_hash(identity)

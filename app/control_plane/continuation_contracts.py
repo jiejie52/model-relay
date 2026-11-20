@@ -3,52 +3,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ContinuationAnchorClass = Literal[
-    "none",
-    "immutable_tree_anchor",       # 不可变树状锚点：Gemini Interactions / OpenAI & Grok Responses
-    "linear_ephemeral_cursor",     # 受限线性游标：仅支持紧邻上一轮续接、不支持历史分叉的网关 context_id
-    "mutable_session_container",   # 可变会话容器：远端有状态 Thread/Session，写入即原地变更远端容器状态
-]
-
-ContinuationMode = Literal[
-    "off",                         # 禁用状态续接，强制 Stateless 全量投影
-    "prefer_stateful_anchor",      # 优先选用最长合法父锚点续接；无合法锚点时在 not_sent 无损回退 Stateless
-    "require_stateful_anchor",     # 要求供应具备已认证续接合同（首轮无历史允许创世锚点，合同缺失则 Fail-Closed）
-]
-
+IMPLEMENTED_CONTINUATION_PROTOCOLS = frozenset({"gemini_interactions", "responses"})
 VALID_ANCHOR_CLASSES = frozenset({
     "none",
     "immutable_tree_anchor",
     "linear_ephemeral_cursor",
     "mutable_session_container",
 })
-
-IMPLEMENTED_CONTINUATION_PROTOCOLS = frozenset({
-    "gemini_interactions",
-})
+DEFAULT_HEAD_INVARIANTS = ("instructions", "tools", "account_scope_id", "model")
 
 
 @dataclass(frozen=True)
 class ContinuationCapabilityContract:
-    """挂装于 CapabilityContract.continuation 的供应级续接能力合同"""
-    version: str = "relay-continuation-contract/1"
-    anchor_class: ContinuationAnchorClass = "none"
-    verification_status: Literal["unverified", "verified", "disabled"] = "disabled"
+    anchor_class: str = "none"
+    verification_status: str = "unspecified"
     supports_branching: bool = False
     supports_multiturn_delta: bool = False
-    requires_upstream_store: bool = True
+    requires_upstream_store: bool = False
     forbid_when_zero_retention: bool = True
     mutually_exclusive_cache_mechanisms: tuple[str, ...] = ()
-    retention_ttl_seconds: int = 86400
+    retention_ttl_seconds: int = 0
     anchor_safety_margin_seconds: int = 30
-    head_invariants: tuple[str, ...] = ("instructions", "tools", "account_scope_id", "model")
-    re_specify_head_on_delta: bool = True
-    requires_thought_signature_on_replay: bool = True
-    max_delta_turns: int = 64
+    head_invariants: tuple[str, ...] = DEFAULT_HEAD_INVARIANTS
+    re_specify_head_on_delta: bool = False
+    requires_thought_signature_on_replay: bool = False
+    max_delta_turns: int = 0
 
     def canonical(self) -> dict[str, Any]:
         return {
-            "version": self.version,
             "anchor_class": self.anchor_class,
             "verification_status": self.verification_status,
             "supports_branching": self.supports_branching,
@@ -64,18 +46,37 @@ class ContinuationCapabilityContract:
             "max_delta_turns": self.max_delta_turns,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> ContinuationCapabilityContract:
+        if not data:
+            return cls()
+        return cls(
+            anchor_class=str(data.get("anchor_class") or "none"),
+            verification_status=str(data.get("verification_status") or "unspecified"),
+            supports_branching=bool(data.get("supports_branching", False)),
+            supports_multiturn_delta=bool(data.get("supports_multiturn_delta", False)),
+            requires_upstream_store=bool(data.get("requires_upstream_store", False)),
+            forbid_when_zero_retention=bool(data.get("forbid_when_zero_retention", True)),
+            mutually_exclusive_cache_mechanisms=tuple(data.get("mutually_exclusive_cache_mechanisms") or ()),
+            retention_ttl_seconds=int(data.get("retention_ttl_seconds") or 0),
+            anchor_safety_margin_seconds=int(data.get("anchor_safety_margin_seconds") or 30),
+            head_invariants=tuple(data.get("head_invariants") or DEFAULT_HEAD_INVARIANTS),
+            re_specify_head_on_delta=bool(data.get("re_specify_head_on_delta", False)),
+            requires_thought_signature_on_replay=bool(data.get("requires_thought_signature_on_replay", False)),
+            max_delta_turns=int(data.get("max_delta_turns") or 0),
+        )
+
 
 @dataclass(frozen=True)
 class ContinuationPolicySpec:
-    """与 CachePolicySpec 对称的续接治理策略，由 ModelOffering.continuation_policy_id 引用"""
     policy_id: str
-    revision: str
-    default_mode: ContinuationMode = "prefer_stateful_anchor"
-    allow_request_override: bool = False
+    revision: str = "1"
+    default_mode: str = "off"
+    allow_request_override: bool = True
     allow_stateless_fallback_pre_dispatch: bool = True
     allow_head_mismatch_reopen: bool = True
     invalidate_on_affinity_rotation: bool = False
-    max_active_anchors_per_session: int = 128
+    max_active_anchors_per_session: int = 10
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self) -> dict[str, Any]:
@@ -91,17 +92,27 @@ class ContinuationPolicySpec:
             "metadata": self.metadata,
         }
 
-    @property
-    def policy_hash(self) -> str:
-        from app.core.idempotency import stable_hash
-        return stable_hash(self.canonical())
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ContinuationPolicySpec:
+        return cls(
+            policy_id=str(data["policy_id"]),
+            revision=str(data.get("revision") or "1"),
+            default_mode=str(data.get("default_mode") or "off"),
+            allow_request_override=bool(data.get("allow_request_override", True)),
+            allow_stateless_fallback_pre_dispatch=bool(data.get("allow_stateless_fallback_pre_dispatch", True)),
+            allow_head_mismatch_reopen=bool(data.get("allow_head_mismatch_reopen", True)),
+            invalidate_on_affinity_rotation=bool(data.get("invalidate_on_affinity_rotation", False)),
+            max_active_anchors_per_session=int(data.get("max_active_anchors_per_session") or 10),
+            metadata=dict(data.get("metadata") or {}),
+        )
 
 
 def validate_continuation_cross_contract(
-    *, connection: Any, capability: Any, profile: Any, policy: Any | None,
+    *, connection: Any, capability: Any, profile: Any, policy: Any | None = None,
 ) -> None:
-    """编译期与准入期续接能力交叉核验门禁"""
-    cont = capability.continuation or {}
+    cont = getattr(capability, "continuation", {}) or {}
+    if isinstance(cont, ContinuationCapabilityContract):
+        cont = cont.canonical()
     anchor_class = str(cont.get("anchor_class") or "none")
     if anchor_class not in VALID_ANCHOR_CLASSES:
         raise ValueError(f"Unknown continuation anchor_class: {anchor_class!r}")
@@ -110,28 +121,30 @@ def validate_continuation_cross_contract(
 
     default_mode = getattr(policy, "default_mode", "off") if policy is not None else "off"
     if default_mode != "off" or anchor_class != "none":
-        if connection.protocol not in IMPLEMENTED_CONTINUATION_PROTOCOLS:
-            raise ValueError(f"Protocol {connection.protocol!r} has no certified continuation implementation")
-        if profile is None or not (profile.continuation or {}).get("request_anchor_field"):
-            raise ValueError(f"Protocol profile for {connection.protocol!r} lacks continuation wire mapping")
-        profile_class = (profile.continuation or {}).get("anchor_class")
+        proto = getattr(connection, "protocol", None)
+        if proto not in IMPLEMENTED_CONTINUATION_PROTOCOLS:
+            raise ValueError(f"Protocol {proto!r} has no certified continuation implementation")
+        prof_cont = getattr(profile, "continuation", {}) or {} if profile else {}
+        if not prof_cont.get("request_anchor_field") and proto != "gemini_interactions":
+            raise ValueError(f"Protocol profile for {proto!r} lacks continuation wire mapping")
+        profile_class = prof_cont.get("anchor_class")
         if profile_class and profile_class != anchor_class:
             raise ValueError("Capability and protocol profile disagree on continuation anchor_class")
 
-    # 显式缓存互斥门禁（例如 Gemini Interactions 严禁同时开启 stateful_resource）
+    # Mutually exclusive cache mechanisms
     exclusive = set(cont.get("mutually_exclusive_cache_mechanisms") or ())
-    if connection.protocol == "gemini_interactions":
+    if getattr(connection, "protocol", None) == "gemini_interactions":
         exclusive.add("stateful_resource")
-    cap_cache = set((capability.cache or {}).get("supported_mechanisms") or ())
-    prof_cache = set((profile.cache or {}).get("supported_mechanisms") or ()) if profile else set()
-    conflicts = sorted(exclusive & (cap_cache | prof_cache))
+    cap_cache = set((getattr(capability, "cache", {}) or {}).get("supported_mechanisms") or ())
+    prof_cache = set((getattr(profile, "cache", {}) or {}).get("supported_mechanisms") or ()) if profile else set()
+    conflicts = exclusive & (cap_cache | prof_cache)
     if conflicts:
-        raise ValueError(f"Continuation mutually exclusive cache mechanisms enabled: {conflicts}")
+        raise ValueError(f"Continuation mutually exclusive cache mechanisms enabled: {sorted(conflicts)}")
 
-    # ZDR 零数据保留静态门禁
-    zdr = bool(
-        (connection.metadata or {}).get("zero_data_retention")
-        or (capability.metadata or {}).get("zero_data_retention")
-    )
+    # Zero Data Retention static gate
+    conn_meta = getattr(connection, "metadata", {}) or {}
+    cap_meta = getattr(capability, "metadata", {}) or {}
+    zdr = bool(conn_meta.get("zero_data_retention") or cap_meta.get("zero_data_retention"))
     if zdr and default_mode == "require_stateful_anchor" and cont.get("requires_upstream_store", True):
         raise ValueError("CONTINUATION_FORBIDDEN_BY_ZDR_POLICY: ZDR supply cannot require upstream stateful anchor")
+

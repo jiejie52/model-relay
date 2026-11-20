@@ -250,18 +250,7 @@ def build_candidate(
                 metadata={**target_policy.metadata, "default_mode": {"关闭":"off","自动":"auto","强制":"on"}[cache["默认策略"]],
                     "allow_force": force})
             overridden_policies.append(target_policy.canonical())
-        contract_for_offering = target_contract if cache_enabled else disabled_contract
-        overridden_contracts.append(contract_for_offering.canonical())
-        from app.control_plane.continuation_contracts import validate_continuation_cross_contract
-        try:
-            validate_continuation_cross_contract(
-                connection=base.connections[original.connection_id],
-                capability=contract_for_offering,
-                profile=base.protocol_profiles.get(original.protocol_profile_id),
-                policy=getattr(base, "continuation_policies", {}).get(original.continuation_policy_id),
-            )
-        except ValueError as exc:
-            raise DeclarationError(str(exc)) from exc
+        overridden_contracts.append((target_contract if cache_enabled else disabled_contract).canonical())
         metadata = dict(original.metadata)
         metadata.update({
             "managed_v2": True,

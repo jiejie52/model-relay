@@ -293,7 +293,7 @@ begin
             topology->'reusable_on_commit' is distinct from 'true'::jsonb
             or topology->>'context_policy' is distinct from 'conversation'
             or topology->>'parent_head_fingerprint' is distinct from p_continuation_binding->>'parent_head_fingerprint'
-            or s.context_policy is distinct from 'conversation' or r.history_mode is distinct from 'cumulative'
+            or s.context_policy is distinct from 'conversation' or coalesce(r.history_mode, s.history_mode, 'cumulative') is distinct from 'cumulative'
             or coalesce(r.material_placement_plan->>'context_policy','conversation')<>'conversation')) then
         raise exception 'CONTINUATION_BINDING_INVALID';
     end if;
@@ -376,7 +376,7 @@ begin
        or r.sealed_continuation_binding->'store_upstream_state' is distinct from 'true'::jsonb
        or r.sealed_continuation_binding->>'active_anchor_id' is distinct from parent::text
        or r.sealed_continuation_binding->>'parent_head_fingerprint' is distinct from p_anchor->>'head_fingerprint'
-       or s.context_policy is distinct from 'conversation' or r.history_mode is distinct from 'cumulative'
+       or s.context_policy is distinct from 'conversation' or coalesce(r.history_mode, s.history_mode, 'cumulative') is distinct from 'cumulative'
        or s.history_version is distinct from r.expected_history_version
        or p_args->>'p_history_object_id' is null
        or nullif(btrim(p_anchor->>'upstream_handle'),'') is null
