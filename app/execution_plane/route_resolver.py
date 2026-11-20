@@ -62,6 +62,11 @@ class RouteBinding:
     cache_policy: dict[str, Any] | None = None
     cache_contract_hash: str | None = None
     cache_contract: dict[str, Any] | None = None
+    continuation_contract_hash: str | None = None
+    continuation_contract: dict[str, Any] | None = None
+    continuation_policy_id: str | None = None
+    continuation_policy_hash: str | None = None
+    continuation_policy: dict[str, Any] | None = None
     control_plane_hash: str | None = None
     capability_requirements: dict[str, Any] = field(default_factory=dict)
     observed_model_policy: str = "audit"
@@ -102,6 +107,15 @@ class RouteBinding:
             "cache_policy": self.cache_policy,
             "cache_contract_hash": self.cache_contract_hash,
             "cache_contract": self.cache_contract,
+            **({
+                "continuation_contract_hash": self.continuation_contract_hash,
+                "continuation_contract": self.continuation_contract,
+            } if self.continuation_contract else {}),
+            **({
+                "continuation_policy_id": self.continuation_policy_id,
+                "continuation_policy_hash": self.continuation_policy_hash,
+                "continuation_policy": self.continuation_policy,
+            } if self.continuation_policy else {}),
             "control_plane_hash": self.control_plane_hash,
             "capability_requirements": self.capability_requirements,
             "observed_model_policy": self.observed_model_policy,
@@ -487,6 +501,20 @@ class RouteResolver:
                 hashlib.sha256(json.dumps(cache_contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
                 if cache_contract else None
             )
+            continuation_contract = (
+                dict((capability_contract or {}).get("continuation") or {})
+                if isinstance((capability_contract or {}).get("continuation"), dict)
+                and (capability_contract or {}).get("continuation")
+                else None
+            )
+            continuation_contract_hash = (
+                hashlib.sha256(json.dumps(continuation_contract, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                if continuation_contract else None
+            )
+            continuation_policy_id = getattr(selected, "continuation_policy_id", None)
+            cont_pol = self.config_snapshot.continuation_policy(continuation_policy_id) if (self.config_snapshot and continuation_policy_id) else None
+            continuation_policy = cont_pol.canonical() if cont_pol else None
+            continuation_policy_hash = cont_pol.policy_hash if cont_pol else None
             connection_spec = self.config_snapshot.connection(selected.connection_id) if self.config_snapshot else None
             from app.core.idempotency import stable_hash
             connection_identity = stable_hash({"connection": connection_spec.identity_hash, "protocol_profile": protocol_profile or {}}) if connection_spec else None
@@ -516,6 +544,9 @@ class RouteResolver:
                 "cache_policy_id": selected.cache_policy_id,
                 "cache_policy_hash": cache_policy_hash,
                 "cache_contract_hash": cache_contract_hash,
+                **({"continuation_contract_hash": continuation_contract_hash} if continuation_contract_hash else {}),
+                **({"continuation_policy_id": continuation_policy_id} if continuation_policy_id else {}),
+                **({"continuation_policy_hash": continuation_policy_hash} if continuation_policy_hash else {}),
                 "capability_requirements": req,
                 "observed_model_policy": selected.observed_model_policy,
                 **({"execution_authorization": selected.execution_authorization} if selected.execution_authorization else {}),
@@ -556,6 +587,11 @@ class RouteResolver:
                 cache_policy=cache_policy,
                 cache_contract_hash=cache_contract_hash,
                 cache_contract=cache_contract,
+                continuation_contract_hash=continuation_contract_hash,
+                continuation_contract=continuation_contract,
+                continuation_policy_id=continuation_policy_id,
+                continuation_policy_hash=continuation_policy_hash,
+                continuation_policy=continuation_policy,
                 control_plane_hash=self.catalog.control_plane_hash,
                 capability_requirements=req,
                 observed_model_policy=selected.observed_model_policy,

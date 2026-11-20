@@ -202,69 +202,21 @@ class ResultCommitter:
         effective_policy = snapshot.get("context_policy") or session.get("context_policy")
         topology = (continuation_intent.get("topology") or {}) if isinstance(continuation_intent, dict) else {}
         actual_binding = thaw_json(fact.continuation_binding) or {}
-        is_interactions = snapshot.get("protocol") == "gemini_interactions"
-        if (is_interactions and topology.get("reusable_on_commit") and actual_binding.get("store_upstream_state")
-                and effective_policy == "conversation" and history_object_id is not None):
-            if ((result.observed or {}).get("interaction_stored") is not True
-                    or (result.observed or {}).get("previous_interaction_id") != actual_binding.get("upstream_handle")):
-                raise ExecutionConflictError("Interaction dispatch differs from the archived continuation binding")
+        can_commit_anchor = (
+            topology.get("reusable_on_commit")
+            and actual_binding.get("store_upstream_state")
+            and effective_policy == "conversation"
+            and history_object_id is not None
+        )
+        if can_commit_anchor:
+            stored_ok = (result.observed or {}).get("upstream_state_stored") is True or (result.observed or {}).get("interaction_stored") is True
+            observed_handle = (result.observed or {}).get("previous_anchor_ref") or (result.observed or {}).get("previous_interaction_id")
+            if not stored_ok or observed_handle != actual_binding.get("upstream_handle"):
+                raise ExecutionConflictError("Continuation dispatch differs from the archived continuation binding")
             if isinstance(result.response_id, str) and result.response_id.strip():
-                continuation_anchor = self._interactions_anchor(
+                continuation_anchor = self._build_committed_anchor(
                     snapshot, topology, actual_binding, new_history, observation, request_row, result.response_id,
                 )
-        elif (not is_interactions and str(c_mode).lower() != "off" and cumulative_history
-              and session.get("context_policy") == "conversation" and effective_policy == "conversation"):
-            parent_aid = None
-            if isinstance(continuation_intent, dict):
-                parent_aid = continuation_intent.get("parent_anchor_id")
-            elif continuation_intent is not None:
-                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
-
-            anchor_id = str(uuid4())
-            new_history_version = int(request_row["expected_history_version"]) + 1
-            instructions = (
-                snapshot.get("instructions")
-                or session.get("instructions")
-                or session.get("system_instructions")
-            )
-            head_fp = build_parent_head_fingerprint(new_history, system_instructions=instructions)
-
-            upstream_h = (
-                (result.observed or {}).get("upstream_handle")
-                or (result.observed or {}).get("continuation_handle")
-                or observation.get("upstream_handle")
-                or (observation.get("continuation_summary") or {}).get("upstream_handle")
-            )
-            mechanism = (
-                (observation.get("continuation_summary") or {}).get("mechanism")
-                or (observation.get("_relay_continuation") or {}).get("mechanism")
-                or c_mode
-                or "auto"
-            )
-            anchor_meta = {
-                **({"parent_anchor_id": parent_aid} if parent_aid else {}),
-                "created_by_request_id": request_id,
-            }
-            anchor_rec = ContinuationAnchorRecord(
-                anchor_id=anchor_id,
-                session_id=session_id,
-                history_version=new_history_version,
-                fingerprint=head_fp,
-                mechanism=str(mechanism),
-                upstream_handle=upstream_h,
-                tenant_id=str(request_row.get("tenant_id") or session.get("tenant_id") or ""),
-                conversation_hash=str(request_row.get("conversation_hash") or session.get("conversation_hash") or ""),
-                turn_index=len(new_history) - 1,
-                metadata=anchor_meta,
-            )
-            continuation_anchor = anchor_rec.to_dict()
-            if parent_aid:
-                continuation_anchor["parent_anchor_id"] = parent_aid
-            continuation_anchor["head_fingerprint"] = head_fp
-            continuation_anchor["provider"] = snapshot.get("provider")
-            continuation_anchor["connection_id"] = snapshot.get("connection_id")
-            continuation_anchor["account_scope_hash"] = snapshot.get("account_scope_hash")
-            continuation_anchor["state"] = "active"
 
         continuation_summary = None
         if actual_binding.get("schema_version") == "relay-continuation-binding/2":
@@ -278,24 +230,22 @@ class ResultCommitter:
                 "fallback_reason": actual_binding["fallback_reason"],
                 "binding_hash": actual_binding["binding_hash"],
                 "plan_hash": continuation_intent.get("plan_hash"),
-                "details": {"effective_mode": actual_binding["effective_mode"]},
+                "details": {
+                    "effective_mode": actual_binding["effective_mode"],
+                    **({"anchor_class": actual_binding.get("anchor_class")} if actual_binding.get("anchor_class") else {}),
+                },
             }
         elif observation.get("continuation_summary") is not None:
             continuation_summary = dict(observation["continuation_summary"])
         elif observation.get("_relay_continuation") is not None:
             continuation_summary = dict(observation["_relay_continuation"])
-        elif continuation_anchor is not None or str(c_mode).lower() != "off":
-            parent_aid = None
-            if isinstance(continuation_intent, dict):
-                parent_aid = continuation_intent.get("parent_anchor_id")
-            elif continuation_intent is not None:
-                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
+        elif continuation_anchor is not None:
             continuation_summary = {
                 "continuation_mode": c_mode,
-                "mechanism": str(mechanism) if continuation_anchor else "none",
-                "active_anchor_id": (continuation_anchor.get("anchor_id") if continuation_anchor else None),
-                "parent_anchor_id": parent_aid if continuation_anchor else None,
-                "bound_turns_count": len(new_history) if (continuation_anchor and 'new_history' in locals()) else None,
+                "mechanism": continuation_anchor.get("mechanism") or "stateful_continuation",
+                "active_anchor_id": continuation_anchor.get("anchor_id"),
+                "parent_anchor_id": continuation_anchor.get("parent_anchor_id"),
+                "bound_turns_count": len(new_history) if 'new_history' in locals() else None,
                 "fallback_occurred": False,
                 "plan_hash": (continuation_intent.get("plan_hash") if isinstance(continuation_intent, dict) else getattr(continuation_intent, "plan_hash", None)),
             }
@@ -351,20 +301,22 @@ class ResultCommitter:
         return compact_result
 
     @staticmethod
-    def _interactions_anchor(snapshot, topology, binding, history, observation, request_row, upstream_handle):
+    def _build_committed_anchor(snapshot, topology, binding, history, observation, request_row, upstream_handle):
         from datetime import datetime, timedelta
         from app.core.continuation_fingerprint import continuation_material_references, extend_native_prefix
 
         occurrences = [occ for turn in history for occ in (turn.get("material_occurrences") or [])]
         recorded_at = observation.get("recorded_at")
         created_at = datetime.fromisoformat(recorded_at) if recorded_at else utcnow()
-        expiry = created_at + timedelta(seconds=topology["retention_ttl_seconds"])
+        ttl = int(topology.get("retention_ttl_seconds") or 3600)
+        expiry = created_at + timedelta(seconds=ttl)
         for occ in occurrences:
-            material_expiry = occ["binding"].get("expires_at")
+            material_expiry = (occ.get("binding") or {}).get("expires_at")
             if material_expiry:
                 expiry = min(expiry, datetime.fromisoformat(material_expiry))
-        chain = topology["turn_prefix_chain"]
-        head = topology["parent_head_fingerprint"]
+        chain = topology.get("turn_prefix_chain") or []
+        head = topology.get("parent_head_fingerprint") or ""
+        anchor_class = binding.get("anchor_class") or topology.get("planned_anchor_class") or "stateful_session_handle"
         return {
             "schema_version": "relay-continuation-anchor/2",
             "anchor_id": str(request_row["id"]),
@@ -373,11 +325,16 @@ class ResultCommitter:
             "turn_chain_digest": extend_native_prefix(chain[-1] if chain else head, history[-1]),
             "covered_turn_count": len(history),
             "covered_material_bindings": continuation_material_references(occurrences),
+            "covered_materials_digest": binding.get("covered_materials_digest"),
             "upstream_handle": upstream_handle,
-            "connection_spec_hash": snapshot["connection_spec_hash"],
-            "account_scope_hash": snapshot["account_scope_id"],
+            "anchor_class": anchor_class,
+            "is_root_prefix": binding.get("active_anchor_id") is None,
+            "connection_spec_hash": snapshot.get("connection_spec_hash"),
+            "account_scope_hash": snapshot.get("account_scope_id") or snapshot.get("account_scope_hash"),
             "expires_at": expiry.isoformat(),
         }
+
+    _interactions_anchor = _build_committed_anchor
 
     @staticmethod
     def _check_observed_contract(
@@ -485,8 +442,7 @@ class ResultCommitter:
                     key: value for key, value in binding.items() if key != "binding_hash"
                 })):
                     raise ExecutionConflictError("Archived continuation execution binding is missing or changed")
-                if (plan.snapshot.get("protocol") == "gemini_interactions"
-                        and plan.snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}
+                if (plan.snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}
                         and (row.get("sealed_continuation_binding") != binding
                              or row.get("prepared_payload_hash") != archive.get("seal_hash"))):
                     raise ExecutionConflictError("Archived continuation execution differs from the database seal")

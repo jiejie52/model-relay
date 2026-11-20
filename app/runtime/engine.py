@@ -53,19 +53,12 @@ class RelayRuntimeEngine:
             await self.verifier.verify(plan)
             await ensure_execution_allowed(states=("not_sent",))
             await self.projector.prepare_scope(state)
-            versioned_continuation = (state.snapshot.get("continuation_intent_plan") or {}).get(
-                "schema_version") == "relay-continuation-plan/2"
-            if not versioned_continuation:
-                state.failure_stage = "continuation_bind"
-                await self.continuation_binder.bind_for_context(state)
-                await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "material_bind"
             await self.bindings.bind_for_plan(state)
             await ensure_execution_allowed(states=("not_sent",))
-            if versioned_continuation:
-                state.failure_stage = "continuation_bind"
-                await self.continuation_binder.bind_for_context(state)
-                await ensure_execution_allowed(states=("not_sent",))
+            state.failure_stage = "continuation_bind"
+            await self.continuation_binder.bind_for_context(state)
+            await ensure_execution_allowed(states=("not_sent",))
             state.failure_stage = "cache_assessment"
             await self.projector.project(state)
             state.execution_snapshot = state.snapshot
@@ -81,7 +74,7 @@ class RelayRuntimeEngine:
                     raise
                 await ensure_execution_allowed(states=("not_sent",))
                 await self.continuation_binder.bind_for_context(state, reopen=True)
-                self.projector.project_interactions(state)
+                self.projector.reproject_for_continuation(state)
                 await self.sealer.seal_before_dispatch(state)
             state.failure_stage = "provider_http"
             return await self.invoker.invoke_once_and_record(state)
@@ -110,9 +103,14 @@ class RelayRuntimeEngine:
                     details = {}
                 message = str(details.get("message") or "").lower() if isinstance(details, dict) else ""
                 identifies_parent = ("previous_interaction_id" in message
+                                     or "previous_response_id" in message
                                      or (continuation.upstream_handle and str(continuation.upstream_handle).lower() in message)
                                      or (exc.status_code in (404, 410) and
-                                         ("interaction not found" in message or "interaction has expired" in message)))
+                                         any(msg in message for msg in (
+                                             "interaction not found", "interaction has expired",
+                                             "response not found", "response has expired",
+                                             "anchor not found", "anchor has expired"
+                                         ))))
                 anchor_rejected = any(word in message for word in ("not found", "expired", "invalid", "does not exist"))
                 if exc.status_code in (400, 404, 410) and identifies_parent and anchor_rejected:
                     error["_relay_invalid_continuation_anchor"] = continuation.active_anchor_id

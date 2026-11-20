@@ -8,6 +8,7 @@ from typing import Any
 from app.core.continuation_fingerprint import (
     LEGACY_CONTINUATION_HEAD, continuation_head, continuation_material_references, native_prefix_chain,
 )
+from app.core.material_placement import verify_parent_chain_material_coverage
 from app.protocol_adapters.base import ProviderRequestError
 from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
 from app.runtime.continuation_contracts import ContinuationExecutionBinding
@@ -199,13 +200,12 @@ class ContinuationBinder:
 
         can_store = (topology.get("reusable_on_commit") is True and
                      (placement is not None or not state.material_bindings))
-        binding = ContinuationExecutionBinding(
-            schema_version="relay-continuation-binding/2",
-            effective_mode="stateful_root_init" if can_store else "stateless_full_replay",
-            store_upstream_state=can_store, parent_head_fingerprint=head,
-            fallback_occurred=bool(can_store and history),
-            fallback_reason="NO_VALID_PARENT_ANCHOR" if can_store and history else None,
-        )
+        rejections: list[dict[str, Any]] = []
+        selected_candidate = None
+        anchor_class = topology.get("anchor_class") or "immutable_tree_anchor"
+        invalidate_on_affinity = bool(topology.get("invalidate_on_affinity_rotation"))
+        current_affinity = (state.wire or {}).get("affinity_epoch")
+
         if can_store and history and not reopen:
             refs = continuation_material_references((placement or {}).get("verified_history_occurrences") or [])
             live = {(b["material_id"], b["binding_generation"], b.get("provider_binding_id"), b.get("external_uri"))
@@ -215,28 +215,91 @@ class ContinuationBinder:
                 conversation_hash=state.request_row["conversation_hash"], head=head, max_turns=len(history),
             )
             for candidate in candidates:
+                aid = candidate.get("id") or candidate.get("anchor_id")
                 covered = candidate.get("covered_turn_count")
                 handle = candidate.get("upstream_handle")
-                if (type(covered) is not int or not 1 <= covered <= len(history)
-                        or not isinstance(handle, str) or not handle.strip()
-                        or candidate.get("turn_chain_digest") != chain[covered - 1]
-                        or len(history) - covered > topology["max_delta_turns"]
-                        or (covered < len(history) and not topology["supports_multiturn_delta"])
-                        or not self._is_anchor_valid(candidate, state, topology["anchor_safety_margin_seconds"])):
+                if not self._is_anchor_valid(candidate, state, topology.get("anchor_safety_margin_seconds", 30)):
+                    rejections.append({"anchor_id": str(aid), "reason": "scope_state_or_ttl_invalid"})
+                    continue
+                if invalidate_on_affinity and candidate.get("affinity_epoch") != current_affinity:
+                    rejections.append({"anchor_id": str(aid), "reason": "affinity_epoch_rotated"})
+                    continue
+                if type(covered) is not int or not 1 <= covered <= len(history):
+                    rejections.append({"anchor_id": str(aid), "reason": "turn_count_out_of_bounds"})
+                    continue
+                if not isinstance(handle, str) or not handle.strip():
+                    rejections.append({"anchor_id": str(aid), "reason": "upstream_handle_empty"})
+                    continue
+                if anchor_class in {"linear_ephemeral_cursor", "mutable_session_container"} and (
+                    covered != len(history) or int(candidate.get("history_version") or 0) != int(state.session.get("history_version") or 0)
+                ):
+                    rejections.append({"anchor_id": str(aid), "reason": "linear_continuity_broken"})
+                    continue
+                if anchor_class == "mutable_session_container":
+                    if hasattr(self.repo, "has_unreconciled_indeterminate_request") and await self.repo.has_unreconciled_indeterminate_request(state.session_id):
+                        rejections.append({"anchor_id": str(aid), "reason": "mutable_container_tainted"})
+                        continue
+                if candidate.get("turn_chain_digest") != chain[covered - 1]:
+                    rejections.append({"anchor_id": str(aid), "reason": "not_true_ordered_prefix"})
+                    continue
+                if len(history) - covered > topology.get("max_delta_turns", 64):
+                    rejections.append({"anchor_id": str(aid), "reason": "exceeds_max_delta_turns"})
+                    continue
+                if covered < len(history) and not topology.get("supports_multiturn_delta", False):
+                    rejections.append({"anchor_id": str(aid), "reason": "multiturn_delta_not_supported"})
                     continue
                 covered_refs = [ref for ref in refs if ref["history_entry_index"] < covered]
                 if candidate.get("covered_material_bindings") != covered_refs or any(
                     (ref["material_id"], ref["binding_generation"], ref["provider_binding_id"], ref["external_uri"]) not in live
                     for ref in covered_refs
                 ):
+                    rejections.append({"anchor_id": str(aid), "reason": "ANCHOR_MATERIAL_GENERATION_MISMATCH"})
                     continue
-                binding = ContinuationExecutionBinding(
-                    schema_version="relay-continuation-binding/2", effective_mode="stateful_anchor_delta",
-                    mechanism="immutable_tree_anchor", active_anchor_id=candidate["id"], upstream_handle=handle,
-                    covered_turn_count=covered, store_upstream_state=True, parent_head_fingerprint=head,
-                    covered_turn_chain_hash=chain[covered - 1],
-                )
+                if placement is not None:
+                    cov_ok, cov_reason = verify_parent_chain_material_coverage(
+                        placement_plan=placement,
+                        anchor_material_bindings=covered_refs,
+                        delta_turns=history[covered:],
+                    )
+                    if not cov_ok:
+                        rejections.append({"anchor_id": str(aid), "reason": cov_reason or "material_coverage_gap"})
+                        continue
+                selected_candidate = candidate
                 break
+
+        if selected_candidate is not None:
+            covered = selected_candidate.get("covered_turn_count")
+            handle = selected_candidate.get("upstream_handle")
+            binding = ContinuationExecutionBinding(
+                schema_version="relay-continuation-binding/2",
+                effective_mode="stateful_anchor_delta",
+                mechanism=anchor_class,
+                anchor_class=anchor_class,
+                active_anchor_id=selected_candidate["id"],
+                upstream_handle=handle,
+                covered_turn_count=covered,
+                delta_start_turn_index=covered,
+                delta_end_turn_index=len(history),
+                store_upstream_state=True,
+                parent_head_fingerprint=head,
+                covered_turn_chain_hash=chain[covered - 1],
+                decision_reason="matched_longest_true_prefix",
+                rejected_candidates_audit=rejections,
+            )
+        else:
+            binding = ContinuationExecutionBinding(
+                schema_version="relay-continuation-binding/2",
+                effective_mode="stateful_root_init" if can_store else "stateless_full_replay",
+                anchor_class=anchor_class if can_store else "none",
+                store_upstream_state=can_store,
+                parent_head_fingerprint=head,
+                delta_start_turn_index=0,
+                delta_end_turn_index=len(history),
+                fallback_occurred=bool(can_store and history),
+                fallback_reason="NO_VALID_PARENT_ANCHOR" if can_store and history else None,
+                decision_reason="reopen_stateless" if reopen else ("genesis_turn" if not history else "no_valid_parent_fallback"),
+                rejected_candidates_audit=rejections,
+            )
 
         state.continuation_binding = binding
         state.continuation_anchor = None
@@ -298,6 +361,50 @@ class ContinuationBinder:
             else None
         )
         if anchor_tenant and req_tenant and str(anchor_tenant) != str(req_tenant):
+            return False
+
+        # Conversation scope check
+        anchor_conv = (
+            anchor.get("conversation_hash")
+            if isinstance(anchor, dict)
+            else getattr(anchor, "conversation_hash", None)
+        )
+        req_conv = (
+            (state.request_row or {}).get("conversation_hash")
+            if isinstance(state.request_row, dict)
+            else None
+        )
+        if anchor_conv and req_conv and str(anchor_conv) != str(req_conv):
+            return False
+
+        # Connection ID check
+        anchor_conn = (
+            anchor.get("connection_id")
+            if isinstance(anchor, dict)
+            else getattr(anchor, "connection_id", None)
+        )
+        req_conn = state.snapshot.get("connection_id")
+        if anchor_conn and req_conn and str(anchor_conn) != str(req_conn):
+            return False
+
+        # Connection spec hash check
+        anchor_spec = (
+            anchor.get("connection_spec_hash")
+            if isinstance(anchor, dict)
+            else getattr(anchor, "connection_spec_hash", None)
+        )
+        req_spec = state.snapshot.get("connection_spec_hash")
+        if anchor_spec and req_spec and str(anchor_spec) != str(req_spec):
+            return False
+
+        # Account scope check
+        anchor_scope = (
+            anchor.get("account_scope_hash")
+            if isinstance(anchor, dict)
+            else getattr(anchor, "account_scope_hash", None)
+        )
+        req_scope = state.snapshot.get("account_scope_id")
+        if anchor_scope and req_scope and str(anchor_scope) != str(req_scope):
             return False
 
         return True

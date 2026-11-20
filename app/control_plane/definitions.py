@@ -84,7 +84,7 @@ class CapabilityContract:
             "features": list(self.features),
             "provider_defaults": self.provider_defaults,
             "cache": self.cache,
-            "continuation": self.continuation,
+            **({"continuation": self.continuation} if self.continuation else {}),
             "metadata": self.metadata,
         }
 
@@ -110,6 +110,8 @@ class CapabilityContract:
             if str(x).strip()
         }
         available_features = {x.lower() for x in self.features}
+        if self.continuation.get("verification_status") == "verified" and self.continuation.get("anchor_class") not in (None, "", "none"):
+            available_features.add("stateful_continuation")
         if self.thinking.get("version") == "relay-thinking/2":
             from app.thinking_contracts import derive_thinking_summary
             if derive_thinking_summary(self.thinking)["supports_thinking"]: available_features.add("thinking")
@@ -174,7 +176,7 @@ class ProtocolProfileSpec:
             "revision": self.revision,
             "protocol": self.protocol,
             "cache": self.cache,
-            "continuation": self.continuation,
+            **({"continuation": self.continuation} if self.continuation else {}),
             "metadata": self.metadata,
         }
 
@@ -221,6 +223,7 @@ class ModelOffering:
     supply_group_id: str | None = None
     protocol_profile_id: str | None = None
     cache_policy_id: str | None = None
+    continuation_policy_id: str | None = None
     priority: int = 100
     deployment_id: str | None = None
     requires_file_adapter: bool = False
@@ -248,6 +251,7 @@ class ModelOffering:
             "capability_contract_id": self.capability_contract_id,
             "protocol_profile_id": self.protocol_profile_id,
             "cache_policy_id": self.cache_policy_id,
+            **({"continuation_policy_id": self.continuation_policy_id} if self.continuation_policy_id else {}),
             "priority": self.priority,
             "deployment_id": self.deployment_id,
             "requires_file_adapter": self.requires_file_adapter,
@@ -276,6 +280,7 @@ class ModelControlPlane:
         protocol_profiles: Iterable[ProtocolProfileSpec],
         cache_policies: Iterable[CachePolicySpec],
         offerings: Iterable[ModelOffering],
+        continuation_policies: Iterable[Any] | None = None,
         status: str = "published",
         release_metadata: dict[str, Any] | None = None,
     ) -> None:
@@ -286,6 +291,7 @@ class ModelControlPlane:
         self.capability_contracts = {x.contract_id: x for x in capability_contracts}
         self.protocol_profiles = {x.profile_id: x for x in protocol_profiles}
         self.cache_policies = {x.policy_id: x for x in cache_policies}
+        self.continuation_policies = {x.policy_id: x for x in (continuation_policies or [])}
         self.offerings = {x.offering_id: x for x in offerings}
         self._validate()
         canonical = {
@@ -303,12 +309,15 @@ class ModelControlPlane:
             "cache_policies": [
                 self.cache_policies[k].canonical() for k in sorted(self.cache_policies)
             ],
+            **({"continuation_policies": [
+                self.continuation_policies[k].canonical() for k in sorted(self.continuation_policies)
+            ]} if self.continuation_policies else {}),
             "offerings": [self.offerings[k].canonical() for k in sorted(self.offerings)],
         }
         self.control_plane_hash = _hash_json(canonical)
         # Published catalog collections and nested contract dictionaries are
         # immutable while their canonical serialization/hash stays unchanged.
-        for name in ("connections", "capability_contracts", "protocol_profiles", "cache_policies", "offerings"):
+        for name in ("connections", "capability_contracts", "protocol_profiles", "cache_policies", "continuation_policies", "offerings"):
             frozen = {}
             for key, item in getattr(self, name).items():
                 changes = {f.name: freeze_json(getattr(item, f.name)) for f in fields(item)
@@ -389,12 +398,14 @@ class ModelControlPlane:
             contracts: dict[str, CapabilityContract] = {}
             profiles: dict[str, ProtocolProfileSpec] = {}
             policies: dict[str, CachePolicySpec] = {}
+            continuation_policies: dict[str, Any] = {}
             offerings: dict[str, ModelOffering] = {}
         else:
             connections = dict(base.connections)
             contracts = dict(base.capability_contracts)
             profiles = dict(base.protocol_profiles)
             policies = dict(base.cache_policies)
+            continuation_policies = dict(base.continuation_policies)
             offerings = dict(base.offerings)
 
         for value in parsed.get("connections") or []:
@@ -409,6 +420,9 @@ class ModelControlPlane:
         for value in parsed.get("cache_policies") or []:
             policy = cls._cache_policy_from_mapping(value)
             policies[policy.policy_id] = policy
+        for value in parsed.get("continuation_policies") or []:
+            cont_policy = cls._continuation_policy_from_mapping(value)
+            continuation_policies[cont_policy.policy_id] = cont_policy
         for value in parsed.get("offerings") or []:
             offering = cls._offering_from_mapping(value, settings.deployment_id)
             offerings[offering.offering_id] = offering
@@ -420,6 +434,7 @@ class ModelControlPlane:
             capability_contracts=contracts.values(),
             protocol_profiles=profiles.values(),
             cache_policies=policies.values(),
+            continuation_policies=continuation_policies.values(),
             offerings=offerings.values(),
             status=status,
             release_metadata=dict(parsed.get("release_metadata") or {}),
@@ -661,6 +676,9 @@ class ModelControlPlane:
     def cache_policy(self, policy_id: str | None) -> CachePolicySpec | None:
         return self.cache_policies.get(policy_id) if policy_id else None
 
+    def continuation_policy(self, policy_id: str | None):
+        return self.continuation_policies.get(policy_id) if policy_id else None
+
     def credential(self, connection_id: str, settings: Settings) -> str | None:
         spec = self.connections.get(connection_id)
         if spec is None:
@@ -730,6 +748,17 @@ class ModelControlPlane:
                 raise ValueError(
                     f"Offering {offering.offering_id!r} references unknown cache policy {offering.cache_policy_id!r}"
                 )
+            if offering.continuation_policy_id and offering.continuation_policy_id not in self.continuation_policies:
+                raise ValueError(
+                    f"Offering {offering.offering_id!r} references unknown continuation policy {offering.continuation_policy_id!r}"
+                )
+            from app.control_plane.continuation_contracts import validate_continuation_cross_contract
+            validate_continuation_cross_contract(
+                connection=self.connections[offering.connection_id],
+                capability=self.capability_contracts[offering.capability_contract_id],
+                profile=self.protocol_profiles.get(offering.protocol_profile_id),
+                policy=self.continuation_policies.get(offering.continuation_policy_id),
+            )
             policy = offering.observed_model_policy.lower()
             from app.control_plane.cache_contracts import validate_supply_cache_transport
             validate_supply_cache_transport(self.connections[offering.connection_id],self.capability_contracts[offering.capability_contract_id],requires_file_adapter=offering.requires_file_adapter)
@@ -855,6 +884,27 @@ class ModelControlPlane:
         )
 
     @staticmethod
+    def _continuation_policy_from_mapping(value: Any):
+        if not isinstance(value, dict):
+            raise ValueError("Each continuation policy must be an object")
+        policy_id = str(value.get("policy_id") or "").strip()
+        revision = str(value.get("revision") or "").strip()
+        if not policy_id or not revision:
+            raise ValueError("Continuation policies require policy_id and revision")
+        from app.control_plane.continuation_contracts import ContinuationPolicySpec
+        return ContinuationPolicySpec(
+            policy_id=policy_id,
+            revision=revision,
+            default_mode=str(value.get("default_mode") or "prefer_stateful_anchor"),
+            allow_request_override=bool(value.get("allow_request_override", False)),
+            allow_stateless_fallback_pre_dispatch=bool(value.get("allow_stateless_fallback_pre_dispatch", True)),
+            allow_head_mismatch_reopen=bool(value.get("allow_head_mismatch_reopen", True)),
+            invalidate_on_affinity_rotation=bool(value.get("invalidate_on_affinity_rotation", False)),
+            max_active_anchors_per_session=int(value.get("max_active_anchors_per_session", 128)),
+            metadata=dict(value.get("metadata") or {}),
+        )
+
+    @staticmethod
     def _offering_from_mapping(value: Any, default_deployment: str) -> ModelOffering:
         if not isinstance(value, dict):
             raise ValueError("Each model offering must be an object")
@@ -872,6 +922,7 @@ class ModelControlPlane:
             supply_group_id=(str(value["supply_group_id"]) if value.get("supply_group_id") else None),
             protocol_profile_id=(str(value.get("protocol_profile_id")) if value.get("protocol_profile_id") else None),
             cache_policy_id=(str(value.get("cache_policy_id")) if value.get("cache_policy_id") else None),
+            continuation_policy_id=(str(value.get("continuation_policy_id")) if value.get("continuation_policy_id") else None),
             priority=int(value.get("priority", 100)),
             deployment_id=str(value.get("deployment_id") or default_deployment),
             requires_file_adapter=bool(value.get("requires_file_adapter", False)),
