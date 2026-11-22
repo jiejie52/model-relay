@@ -1278,6 +1278,25 @@ class RelayV2Repository(RelayRepository):
         )
         return rows[0] if rows else None
 
+    async def invalidate_continuation_anchor(
+        self,
+        *,
+        anchor_id: str | UUID,
+        session_id: str | UUID,
+        request_id: str | UUID | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        result = await self.backend.rpc(
+            "invalidate_continuation_anchor_v91",
+            {
+                "p_anchor_id": str(anchor_id),
+                "p_session_id": str(session_id),
+                "p_request_id": str(request_id) if request_id is not None else None,
+                "p_reason": reason or "upstream_anchor_rejected",
+            },
+        )
+        return bool(result)
+
     async def seal_continuation_and_dispatch_v90(
         self,
         request_id: str | UUID | None = None,

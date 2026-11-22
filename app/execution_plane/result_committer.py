@@ -328,14 +328,17 @@ class ResultCommitter:
             or (observation.get("cache_usage") or {}).get("affinity_audit")
             or {}
         )
+        covered_refs = continuation_material_references(occurrences)
         return {
             "schema_version": "relay-continuation-anchor/2",
             "anchor_id": str(request_row["id"]),
             "parent_anchor_id": binding.get("active_anchor_id"),
             "head_fingerprint": head,
             "turn_chain_digest": extend_native_prefix(chain[-1] if chain else head, history[-1]),
+            "is_root_prefix": True,
             "covered_turn_count": len(history),
-            "covered_material_bindings": continuation_material_references(occurrences),
+            "covered_material_bindings": covered_refs,
+            "covered_materials_digest": stable_hash(covered_refs),
             "upstream_handle": upstream_handle,
             "connection_spec_hash": snapshot["connection_spec_hash"],
             "account_scope_hash": snapshot["account_scope_id"],
@@ -491,6 +494,16 @@ class ResultCommitter:
         kwargs = dict(request_id=str(row["id"]), session_id=str(row["session_id"]), error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
         if row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS:
-            return await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
-        return await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None,
-                                          lease_epoch=fence.epoch if fence else None)
+            ok = await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
+        else:
+            ok = await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None,
+                                              lease_epoch=fence.epoch if fence else None)
+        invalid_anchor_id = error.get("_relay_invalid_continuation_anchor")
+        if ok and not unknown and invalid_anchor_id and hasattr(self.repo, "invalidate_continuation_anchor"):
+            await self.repo.invalidate_continuation_anchor(
+                anchor_id=str(invalid_anchor_id),
+                session_id=str(row["session_id"]),
+                request_id=str(row["id"]),
+                reason=str(error.get("_relay_invalid_continuation_reason") or "upstream_anchor_rejected"),
+            )
+        return ok

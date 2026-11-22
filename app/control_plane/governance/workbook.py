@@ -258,7 +258,7 @@ def compile_workbook(content, settings):
                 'anchor_safety_margin_seconds': 300,
                 'head_invariants': ['instructions', 'tools', 'account_scope_id', 'model'],
                 're_specify_head_on_delta': True,
-                'requires_thought_signature_on_replay': True,
+                'requires_thought_signature_on_replay': connection.protocol == 'gemini_interactions',
                 'max_delta_turns': 64,
             }
             cont_policy_id = 'excel-cont-policy:' + stable_hash([model, env, channel])[:20]
@@ -274,9 +274,15 @@ def compile_workbook(content, settings):
             })
         contracts[cap_id]=replace(contract,contract_id=cap_id,cache=cache_contract,continuation=continuation_contract)
         profile_id='excel-profile:'+stable_hash([profile.profile_id,connection.connection_id])[:20]
+        if connection.protocol=='gemini_interactions':
+            profile_continuation={'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'}
+        elif connection.protocol=='responses' and cont_mode!='off':
+            profile_continuation={'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_response_id','response_anchor_field':'id','wire_endpoint':'/responses'}
+        else:
+            profile_continuation={}
         profiles[profile_id]=replace(profile,profile_id=profile_id,cache={'supported_mechanisms':sorted(RESOURCE_MECHANISMS[connection.protocol]),
             **({'token_count_connection_id':connection.connection_id} if connection.protocol=='gemini_native' else {}),'composite_mode':'mutually_exclusive'},
-            continuation=({'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if connection.protocol=='gemini_interactions' else {}))
+            continuation=profile_continuation)
         from app.control_plane.continuation_contracts import validate_continuation_cross_contract
         try:
             validate_continuation_cross_contract(

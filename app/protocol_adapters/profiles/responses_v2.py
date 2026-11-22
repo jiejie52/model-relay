@@ -64,73 +64,77 @@ class ResponsesV2Adapter:
         if not binding_dict and isinstance(snapshot.get("_relay_continuation_execution"), dict):
             binding_dict = dict(snapshot["_relay_continuation_execution"])
 
+        effective_mode: str | None = None
+        store_state = False
         active_continuation = False
         active_anchor_id = None
         upstream_handle = None
 
         if binding_dict:
-            mechanism = binding_dict.get("mechanism") or "none"
-            fallback_occurred = bool(binding_dict.get("fallback_occurred", False))
-            if mechanism != "none" and not fallback_occurred:
-                active_continuation = True
-                active_anchor_id = binding_dict.get("active_anchor_id")
-                if not active_anchor_id and isinstance(binding_dict.get("active_anchor"), dict):
-                    active_anchor_id = binding_dict["active_anchor"].get("anchor_id")
+            from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
 
-                upstream_handle = binding_dict.get("upstream_handle")
-                if upstream_handle is None and isinstance(binding_dict.get("active_anchor"), dict):
-                    upstream_handle = binding_dict["active_anchor"].get("upstream_handle")
-
-                if upstream_handle is not None:
-                    snapshot["upstream_handle"] = upstream_handle
-                    if isinstance(upstream_handle, str):
-                        snapshot["previous_interaction_id"] = upstream_handle
-                    elif isinstance(upstream_handle, dict):
-                        for k, v in upstream_handle.items():
-                            snapshot[k] = v
-                        if "previous_interaction_id" not in snapshot:
-                            if "previous_interaction_id" in upstream_handle:
-                                snapshot["previous_interaction_id"] = upstream_handle["previous_interaction_id"]
-                            elif "interaction_id" in upstream_handle:
-                                snapshot["previous_interaction_id"] = upstream_handle["interaction_id"]
-                            elif "response_id" in upstream_handle:
-                                snapshot["previous_interaction_id"] = upstream_handle["response_id"]
-
-                if active_anchor_id:
-                    snapshot["active_anchor_id"] = active_anchor_id
-                snapshot["continuation_active"] = True
-
-                from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
-
-                covered_version = binding_dict.get("covered_history_version")
-                if covered_version is None:
-                    covered_version = binding_dict.get("parent_history_version")
-                if covered_version is None and isinstance(binding_dict.get("active_anchor"), dict):
-                    covered_version = binding_dict["active_anchor"].get("history_version")
-                if covered_version is None and isinstance(snapshot.get("active_anchor"), dict):
-                    covered_version = snapshot["active_anchor"].get("history_version")
-                if covered_version is None and isinstance(context.context_plan, dict):
-                    covered_version = context.context_plan.get("covered_history_version") or context.context_plan.get("parent_history_version")
-                if covered_version is None:
-                    intent = snapshot.get("continuation_intent_plan") or (context.context_plan.get("continuation_intent_plan") if isinstance(context.context_plan, dict) else None)
-                    if hasattr(intent, "parent_history_version"):
-                        covered_version = intent.parent_history_version
-                    elif isinstance(intent, dict):
-                        covered_version = intent.get("parent_history_version")
-                if covered_version is None:
-                    covered_version = snapshot.get("covered_history_version")
-
-                if covered_version is None:
-                    if "bound_delta_turns" in binding_dict and isinstance(binding_dict["bound_delta_turns"], list):
+            schema_ver = str(binding_dict.get("schema_version") or "")
+            if schema_ver == "relay-continuation-binding/2":
+                effective_mode = str(binding_dict.get("effective_mode") or "disabled")
+                store_state = bool(binding_dict.get("store_upstream_state") is True) and effective_mode in {
+                    "stateful_root_init",
+                    "stateful_anchor_delta",
+                }
+                if effective_mode == "stateful_anchor_delta":
+                    raw_handle = binding_dict.get("upstream_handle")
+                    if raw_handle is not None and str(raw_handle).strip():
+                        upstream_handle = str(raw_handle)
+                    active_anchor_id = binding_dict.get("active_anchor_id")
+                    active_continuation = upstream_handle is not None
+                    covered_turns = binding_dict.get("covered_turn_count")
+                    legacy_history = slice_continuation_history(
+                        legacy_history,
+                        covered_turns,
+                        allow_fallback=False,
+                    )
+            else:
+                mechanism = binding_dict.get("mechanism") or "none"
+                fallback_occurred = bool(binding_dict.get("fallback_occurred", False))
+                if mechanism != "none" and not fallback_occurred:
+                    active_continuation = True
+                    store_state = True
+                    active_anchor_id = binding_dict.get("active_anchor_id")
+                    if not active_anchor_id and isinstance(binding_dict.get("active_anchor"), dict):
+                        active_anchor_id = binding_dict["active_anchor"].get("anchor_id")
+                    raw_handle = binding_dict.get("upstream_handle")
+                    if raw_handle is None and isinstance(binding_dict.get("active_anchor"), dict):
+                        raw_handle = binding_dict["active_anchor"].get("upstream_handle")
+                    if isinstance(raw_handle, dict):
+                        raw_handle = (
+                            raw_handle.get("previous_response_id")
+                            or raw_handle.get("response_id")
+                            or raw_handle.get("id")
+                        )
+                    if raw_handle is not None and str(raw_handle).strip():
+                        upstream_handle = str(raw_handle)
+                    covered_version = binding_dict.get("covered_turn_count")
+                    if covered_version is None:
+                        covered_version = binding_dict.get("covered_history_version") or binding_dict.get("parent_history_version")
+                    if covered_version is None and isinstance(binding_dict.get("bound_delta_turns"), list):
                         covered_version = max(0, len(legacy_history) - len(binding_dict["bound_delta_turns"]))
-                    elif upstream_handle is not None:
-                        covered_version = len(legacy_history)
+                    legacy_history = slice_continuation_history(
+                        legacy_history,
+                        covered_version,
+                        allow_fallback=True,
+                    )
 
-                legacy_history = slice_continuation_history(
-                    legacy_history,
-                    covered_version,
-                    allow_fallback=True,
-                )
+        if effective_mode in {"stateful_root_init", "stateful_anchor_delta", "stateless_full_replay"} or binding_dict:
+            snapshot["_relay_responses_continuation"] = {
+                "effective_mode": effective_mode or ("stateful_anchor_delta" if upstream_handle else "stateless_full_replay"),
+                "previous_response_id": upstream_handle if active_continuation else None,
+                "store": store_state,
+            }
+        if upstream_handle is not None and active_continuation:
+            snapshot["previous_response_id"] = upstream_handle
+        if active_anchor_id:
+            snapshot["active_anchor_id"] = active_anchor_id
+        if active_continuation:
+            snapshot["continuation_active"] = True
 
         if snapshot.get("upstream_model"): snapshot["model"] = snapshot["upstream_model"]
         result = await self.legacy.execute(
@@ -151,23 +155,20 @@ class ResponsesV2Adapter:
 
         new_handle = None
         if isinstance(result.raw_json, dict):
-            new_handle = (
-                result.raw_json.get("interaction_id")
-                or result.raw_json.get("id")
-                or result.raw_json.get("response_id")
-            )
+            new_handle = result.raw_json.get("id") or result.raw_json.get("response_id")
         if not new_handle and result.response_id:
             new_handle = result.response_id
-        if not new_handle and result.response_headers:
-            new_handle = (
-                result.response_headers.get("x-interaction-id")
-                or result.response_headers.get("interaction-id")
-            )
+
+        if effective_mode in {"stateful_root_init", "stateful_anchor_delta", "stateless_full_replay"}:
+            observed["continuation_stored"] = store_state
+            observed["previous_anchor_ref"] = upstream_handle if active_continuation else None
+            if active_continuation and upstream_handle is not None:
+                observed["previous_response_id"] = upstream_handle
 
         if new_handle:
             observed["upstream_handle"] = new_handle
-            observed["interaction_id"] = new_handle
             observed["response_id"] = result.response_id or new_handle
+            observed["continuation_handle"] = new_handle
 
         if active_continuation:
             observed["continuation_active"] = True
@@ -201,7 +202,7 @@ class ResponsesV2Adapter:
         by_id = {str(x.get("material_id")): x for x in context.material_bindings}
         for material_id in context.material_ids:
             frozen = by_id.get(material_id) or {}
-            if context.snapshot.get("schema_version") == "relay-request/2.4":
+            if context.snapshot.get("schema_version") in {"relay-request/2.4", "relay-request/2.5"}:
                 resolved = await self.materials.resolve_frozen(frozen, tenant_id=context.tenant_id,
                     conversation_hash=context.conversation_hash, with_bytes=False)
             else:
@@ -239,7 +240,7 @@ class ResponsesV2Adapter:
                 "text/markdown",
             }:
                 data = (await self.materials.resolve_frozen(frozen, tenant_id=context.tenant_id,
-                    conversation_hash=context.conversation_hash, with_bytes=True)).data if context.snapshot.get("schema_version") == "relay-request/2.4" else await self.materials.read_object(obj)
+                    conversation_hash=context.conversation_hash, with_bytes=True)).data if context.snapshot.get("schema_version") in {"relay-request/2.4", "relay-request/2.5"} else await self.materials.read_object(obj)
                 text = data.decode("utf-8", errors="replace")
                 items.append(
                     self.legacy.make_user_item(

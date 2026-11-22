@@ -1000,6 +1000,22 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
             },
         ),
         ProtocolProfileSpec(
+            profile_id="responses-official-v1",
+            revision="relay-protocol-profile/responses-official/2026-11-22.1",
+            protocol="responses",
+            continuation={
+                "anchor_class": "immutable_tree_anchor",
+                "request_anchor_field": "previous_response_id",
+                "response_anchor_field": "id",
+                "wire_endpoint": "/responses",
+            },
+            cache={
+                "supported_mechanisms": ["implicit_prefix"],
+                "prompt_cache_key_field": "prompt_cache_key",
+                "usage_mapping": "openai_compatible",
+            },
+        ),
+        ProtocolProfileSpec(
             profile_id="claude-messages-aihubmix-v1",
             revision="relay-protocol-profile/claude-aihubmix/2026-09-30.1",
             protocol="claude_messages",

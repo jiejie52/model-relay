@@ -171,10 +171,14 @@ class ContinuationBinder:
             supports_multiturn = bool(topology.get("supports_multiturn_delta"))
             current_epoch = (state.wire or {}).get("affinity_epoch")
 
+            valid_matches: list[tuple[int, int, dict[str, Any]]] = []
             for candidate in candidates:
                 aid = _anchor_field(candidate, "id") or _anchor_field(candidate, "anchor_id") or ""
 
-                # Gate 1: State, scope, and TTL safety margin
+                # Gate 1: State, root prefix, scope, and TTL safety margin
+                if _anchor_field(candidate, "is_root_prefix") is False:
+                    rejections.append({"anchor_id": str(aid), "reason": "not_active_root_prefix"})
+                    continue
                 validity_reason = self._anchor_validity_reason(candidate, state, safety_seconds)
                 if validity_reason is not None:
                     rejections.append({"anchor_id": str(aid), "reason": validity_reason})
@@ -239,24 +243,31 @@ class ContinuationBinder:
                         rejections.append({"anchor_id": str(aid), "reason": cov_reason or "material_coverage_gap"})
                         continue
 
+                valid_matches.append((
+                    covered,
+                    int(candidate.get("history_version") or 0),
+                    {"aid": str(aid), "handle": handle, "covered": covered},
+                ))
+
+            if valid_matches:
+                _, _, best = max(valid_matches, key=lambda item: (item[0], item[1]))
                 mechanism = anchor_class if anchor_class != "none" else "immutable_tree_anchor"
                 matched_binding = ContinuationExecutionBinding(
                     schema_version="relay-continuation-binding/2",
                     effective_mode="stateful_anchor_delta",
                     mechanism=mechanism,
-                    active_anchor_id=str(aid),
-                    upstream_handle=handle,
-                    covered_turn_count=covered,
+                    active_anchor_id=best["aid"],
+                    upstream_handle=best["handle"],
+                    covered_turn_count=best["covered"],
                     store_upstream_state=True,
                     parent_head_fingerprint=head,
-                    covered_turn_chain_hash=chain[covered - 1],
+                    covered_turn_chain_hash=chain[best["covered"] - 1],
                     anchor_class=anchor_class,
-                    delta_start_turn_index=covered,
+                    delta_start_turn_index=best["covered"],
                     delta_end_turn_index=len(history),
                     decision_reason="matched_longest_true_prefix",
                     rejected_candidates_audit=tuple(rejections[:20]),
                 )
-                break
 
             if not isinstance(state.wire, dict):
                 state.wire = {}

@@ -203,7 +203,7 @@ def extend_native_prefix(previous: str, turn: dict[str, Any]) -> str:
     return stable_hash({
         "previous": previous,
         "transport": {k: v for k, v in transport.items()
-                      if k not in ("interaction_id", "previous_interaction_id", "upstream_handle")},
+                      if k not in ("interaction_id", "previous_interaction_id", "response_id", "previous_response_id", "upstream_handle")},
         "materials": turn.get("material_occurrences") or [],
     })
 

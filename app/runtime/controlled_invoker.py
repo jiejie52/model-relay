@@ -506,10 +506,13 @@ class ControlledInvoker:
                     or transport.get("response_output")
                     or transport.get("assistant_message"),
                 ])
+            upstream_total_input = result.usage.get("input_tokens")
+            if upstream_total_input is None:
+                upstream_total_input = result.usage.get("prompt_tokens", result.usage.get("total_input_tokens"))
             observation["continuation_usage"] = {
                 "covered_turn_count": covered,
                 "relay_omitted_history_estimated_tokens": omitted_tokens,
-                "upstream_total_input_tokens": result.usage.get("prompt_tokens"),
+                "upstream_total_input_tokens": upstream_total_input,
                 "upstream_implicit_cached_tokens": result.cached_tokens,
             }
         if state.snapshot.get("placement_contract_version") is not None:

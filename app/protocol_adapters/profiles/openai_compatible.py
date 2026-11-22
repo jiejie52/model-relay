@@ -75,16 +75,19 @@ class OpenAICompatibleResponsesProvider:
         if not (request_snapshot.get("mode") == "new_session" and prefix_has_query):
             input_items.append(current_user_item)
 
+        store_upstream, _ = self._resolve_continuation_control(request_snapshot)
         payload: dict[str, Any] = {
             "model": model,
             "input": input_items,
-            # This Relay is intentionally responsible for external history.
-            "store": False,
+            "store": store_upstream,
         }
 
         instructions = request_snapshot.get("instructions")
         if instructions:
             payload["instructions"] = instructions
+        tools = request_snapshot.get("tools")
+        if isinstance(tools, list) and tools:
+            payload["tools"] = json.loads(json.dumps(tools))
 
         self._apply_reasoning(
             payload,
@@ -287,37 +290,49 @@ class OpenAICompatibleResponsesProvider:
             payload["prompt_cache_key"] = str(key)
 
     @classmethod
-    def _apply_continuation(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
-        """Inject continuation handle (e.g. previous_interaction_id) safely into payload."""
-        prev_id = snapshot.get("previous_interaction_id")
-        upstream_handle = snapshot.get("upstream_handle")
-        if not prev_id and isinstance(upstream_handle, str):
-            prev_id = upstream_handle
-        elif not prev_id and isinstance(upstream_handle, dict):
-            prev_id = (
-                upstream_handle.get("previous_interaction_id")
-                or upstream_handle.get("interaction_id")
-                or upstream_handle.get("response_id")
-                or upstream_handle.get("session_id")
-                or upstream_handle.get("id")
-            )
-        if not prev_id:
-            binding = snapshot.get("_relay_continuation_execution") or snapshot.get("continuation_execution_binding")
-            if isinstance(binding, dict) and not binding.get("fallback_occurred") and binding.get("mechanism") != "none":
+    def _resolve_continuation_control(cls, snapshot: dict[str, Any]) -> tuple[bool, str | None]:
+        """Resolve canonical Responses continuation state: (store, previous_response_id)."""
+        ctrl = snapshot.get("_relay_responses_continuation")
+        if isinstance(ctrl, dict):
+            store_flag = bool(ctrl.get("store"))
+            prev_id = ctrl.get("previous_response_id")
+            return store_flag, (str(prev_id) if prev_id else None)
+
+        binding = snapshot.get("_relay_continuation_execution") or snapshot.get("continuation_execution_binding")
+        if isinstance(binding, dict):
+            if binding.get("schema_version") == "relay-continuation-binding/2":
+                eff = binding.get("effective_mode")
+                store_flag = (binding.get("store_upstream_state") is True) and eff in {
+                    "stateful_root_init",
+                    "stateful_anchor_delta",
+                }
+                prev_id = binding.get("upstream_handle") if eff == "stateful_anchor_delta" else None
+                return store_flag, (str(prev_id) if prev_id else None)
+            if not binding.get("fallback_occurred") and binding.get("mechanism") not in (None, "none"):
                 b_handle = binding.get("upstream_handle")
-                if isinstance(b_handle, str):
-                    prev_id = b_handle
-                elif isinstance(b_handle, dict):
+                if isinstance(b_handle, str) and b_handle.strip():
+                    return True, b_handle
+                if isinstance(b_handle, dict):
                     prev_id = (
-                        b_handle.get("previous_interaction_id")
-                        or b_handle.get("interaction_id")
+                        b_handle.get("previous_response_id")
                         or b_handle.get("response_id")
-                        or b_handle.get("session_id")
                         or b_handle.get("id")
                     )
+                    return True, (str(prev_id) if prev_id else None)
 
+        prev_id = snapshot.get("previous_response_id")
+        if isinstance(prev_id, str) and prev_id.strip():
+            return False, prev_id
+        return False, None
+
+    @classmethod
+    def _apply_continuation(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        """Inject OpenAI/Grok Responses previous_response_id safely into payload."""
+        store_flag, prev_id = cls._resolve_continuation_control(snapshot)
+        if store_flag:
+            payload["store"] = True
         if prev_id:
-            payload["previous_interaction_id"] = str(prev_id)
+            payload["previous_response_id"] = str(prev_id)
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
