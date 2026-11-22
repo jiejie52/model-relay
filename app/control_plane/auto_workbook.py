@@ -18,11 +18,11 @@ def encode(value): return json.dumps(value,sort_keys=True,separators=(',',':'),e
 def serialize(plane):
     return {'revision':plane.revision,'status':plane.status,'release_metadata':dict(plane.release_metadata),
         **{name:[item.canonical() for _,item in sorted(getattr(plane,name).items())]
-           for name in ('connections','capability_contracts','protocol_profiles','cache_policies','offerings')}}
+           for name in ('connections','capability_contracts','protocol_profiles','cache_policies','continuation_policies','offerings')}}
 
 def deserialize(value):
-    parsers={'connections':'_connection_from_mapping','capability_contracts':'_contract_from_mapping','protocol_profiles':'_profile_from_mapping','cache_policies':'_cache_policy_from_mapping'}
-    parts={name:[getattr(ModelControlPlane,parser)(item) for item in value[name]] for name,parser in parsers.items()}
+    parsers={'connections':'_connection_from_mapping','capability_contracts':'_contract_from_mapping','protocol_profiles':'_profile_from_mapping','cache_policies':'_cache_policy_from_mapping','continuation_policies':'_continuation_policy_from_mapping'}
+    parts={name:[getattr(ModelControlPlane,parser)(item) for item in (value.get(name) or [])] for name,parser in parsers.items()}
     return ModelControlPlane(revision=value['revision'],status=value['status'],release_metadata=value['release_metadata'],
         **parts,offerings=[ModelControlPlane._offering_from_mapping(item,'*') for item in value['offerings']])
 
@@ -40,7 +40,7 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
     report={'source':'excel','compiler_version':COMPILER_VERSION,'path':settings.model_workbook_file,'state':'ready','issues':[],'supplies':[]}
     base=ModelControlPlane._builtin(settings)
     empty=lambda:ModelControlPlane(revision='configuration-pending',connections=base.connections.values(),capability_contracts=base.capability_contracts.values(),
-        protocol_profiles=base.protocol_profiles.values(),cache_policies=base.cache_policies.values(),offerings=[])
+        protocol_profiles=base.protocol_profiles.values(),cache_policies=base.cache_policies.values(),continuation_policies=base.continuation_policies.values(),offerings=[])
     prefix=settings.relay_storage_prefix+'/configuration/'+sha256(settings.deployment_id.encode()).hexdigest()[:20]+'/'
     archive_ok=True; retained=[]
     try:
@@ -134,7 +134,7 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
                 'deployment_validation_reason':results[supply.offering_id].get('reason')})
         supplies.append(supply)
     active=ModelControlPlane(revision=plane.revision,connections=plane.connections.values(),capability_contracts=contracts.values(),
-        protocol_profiles=plane.protocol_profiles.values(),cache_policies=plane.cache_policies.values(),offerings=supplies,release_metadata=dict(plane.release_metadata))
+        protocol_profiles=plane.protocol_profiles.values(),cache_policies=plane.cache_policies.values(),continuation_policies=plane.continuation_policies.values(),offerings=supplies,release_metadata=dict(plane.release_metadata))
     if any(r['status'] in ('pending','unavailable') for r in results.values()): report['state']='partial'
     if not archive_ok: report['state']='pending'
     if archive_ok:
@@ -149,7 +149,7 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
             report['ready_supplies']=0
             report['pending_supplies']=sum(r['status'] in ('pending','unavailable') for r in results.values())
             active=ModelControlPlane(revision=active.revision,connections=active.connections.values(),capability_contracts=active.capability_contracts.values(),
-                protocol_profiles=active.protocol_profiles.values(),cache_policies=active.cache_policies.values(),
+                protocol_profiles=active.protocol_profiles.values(),cache_policies=active.cache_policies.values(),continuation_policies=active.continuation_policies.values(),
                 offerings=[replace(s,metadata={**s.metadata,
                     'deployment_validation_state':results[s.offering_id]['status'],
                     'deployment_validation_reason':results[s.offering_id].get('reason')}) if s.offering_id in targets else s

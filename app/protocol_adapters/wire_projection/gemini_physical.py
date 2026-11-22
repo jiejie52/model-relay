@@ -174,191 +174,6 @@ def uses_supported_physical_layout(session: dict[str, Any]) -> bool:
     return session_projection_version(session) in SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
 
 
-def _extract_continuation_state(
-    snapshot: dict[str, Any],
-    context_plan: dict[str, Any],
-) -> dict[str, Any] | None:
-    # 1. Look for continuation binding
-    binding = (
-        snapshot.get("_relay_continuation_execution")
-        or snapshot.get("continuation_execution_binding")
-        or snapshot.get("continuation_binding")
-        or (context_plan.get("continuation_execution_binding") if isinstance(context_plan, dict) else None)
-        or (context_plan.get("continuation_binding") if isinstance(context_plan, dict) else None)
-    )
-    if hasattr(binding, "to_dict"):
-        binding_dict = binding.to_dict()
-    elif isinstance(binding, dict):
-        binding_dict = binding
-    else:
-        binding_dict = None
-
-    if binding_dict and binding_dict.get("fallback_occurred"):
-        return None
-
-    # 2. Look for active anchor
-    active_anchor = (
-        snapshot.get("active_anchor")
-        or snapshot.get("continuation_anchor")
-        or (context_plan.get("active_anchor") if isinstance(context_plan, dict) else None)
-        or (context_plan.get("continuation_anchor") if isinstance(context_plan, dict) else None)
-        or (binding_dict.get("active_anchor") if binding_dict else None)
-    )
-    if hasattr(active_anchor, "to_dict"):
-        anchor_dict = active_anchor.to_dict()
-    elif isinstance(active_anchor, dict):
-        anchor_dict = active_anchor
-    else:
-        anchor_dict = None
-
-    active_anchor_id = None
-    if anchor_dict:
-        active_anchor_id = anchor_dict.get("anchor_id")
-    if not active_anchor_id and binding_dict:
-        active_anchor_id = binding_dict.get("active_anchor_id")
-    if not active_anchor_id and isinstance(context_plan, dict):
-        active_anchor_id = context_plan.get("active_anchor_id")
-    if not active_anchor_id:
-        active_anchor_id = snapshot.get("active_anchor_id")
-
-    if not active_anchor_id and not anchor_dict:
-        return None
-
-    # 3. Resolve covered_history_version
-    covered_history_version = None
-    if anchor_dict and "history_version" in anchor_dict:
-        covered_history_version = anchor_dict.get("history_version")
-    if covered_history_version is None and binding_dict:
-        covered_history_version = binding_dict.get("covered_history_version")
-        if covered_history_version is None:
-            covered_history_version = binding_dict.get("parent_history_version")
-    if covered_history_version is None and isinstance(context_plan, dict):
-        covered_history_version = context_plan.get("covered_history_version")
-        if covered_history_version is None:
-            covered_history_version = context_plan.get("parent_history_version")
-    if covered_history_version is None:
-        intent = snapshot.get("continuation_intent_plan") or (context_plan.get("continuation_intent_plan") if isinstance(context_plan, dict) else None)
-        if hasattr(intent, "parent_history_version"):
-            covered_history_version = intent.parent_history_version
-        elif isinstance(intent, dict):
-            covered_history_version = intent.get("parent_history_version")
-    if covered_history_version is None:
-        covered_history_version = snapshot.get("covered_history_version")
-
-    if covered_history_version is not None and isinstance(covered_history_version, int) and not isinstance(covered_history_version, bool):
-        cov_ver = int(covered_history_version)
-    else:
-        cov_ver = 0
-
-    # 4. Resolve upstream_handle
-    upstream_handle = None
-    if anchor_dict and anchor_dict.get("upstream_handle") is not None:
-        upstream_handle = anchor_dict.get("upstream_handle")
-    if upstream_handle is None and binding_dict and binding_dict.get("upstream_handle") is not None:
-        upstream_handle = binding_dict.get("upstream_handle")
-    if upstream_handle is None and isinstance(context_plan, dict):
-        upstream_handle = context_plan.get("upstream_handle")
-    if upstream_handle is None:
-        upstream_handle = snapshot.get("upstream_handle")
-
-    mechanism = (
-        (binding_dict.get("mechanism") if binding_dict else None)
-        or (anchor_dict.get("mechanism") if anchor_dict else None)
-        or "delta_turn"
-    )
-
-    return {
-        "active_anchor_id": str(active_anchor_id) if active_anchor_id else None,
-        "covered_history_version": cov_ver,
-        "upstream_handle": upstream_handle,
-        "mechanism": mechanism,
-        "binding": binding_dict,
-        "anchor": anchor_dict,
-    }
-
-
-def _apply_continuation_to_plan(
-    *,
-    plan: dict[str, Any],
-    snapshot: dict[str, Any],
-    context_plan: dict[str, Any],
-    history: list[dict[str, Any]],
-    current_user: dict[str, Any] | None,
-) -> dict[str, Any]:
-    continuation_state = _extract_continuation_state(snapshot, context_plan)
-    if not continuation_state:
-        return plan
-
-    from app.protocol_adapters.wire_projection.continuation_wire import slice_continuation_history
-
-    covered_version = continuation_state["covered_history_version"]
-    upstream_handle = continuation_state["upstream_handle"]
-    active_anchor_id = continuation_state["active_anchor_id"]
-
-    # 1. Delta slicing of history
-    delta_history = slice_continuation_history(history, covered_version, allow_fallback=True)
-
-    # 2. Rebuild full_uncached_payload
-    full_uncached_payload = copy.deepcopy(plan.get("full_uncached_payload") or {})
-    delta_contents = project_history_contents(delta_history)
-    user_content = current_user or plan.get("history_entry_user_content")
-    if user_content:
-        full_uncached_payload["contents"] = [*delta_contents, copy.deepcopy(user_content)]
-    else:
-        existing_contents = list(full_uncached_payload.get("contents") or [])
-        user_tail = existing_contents[-1] if existing_contents else {}
-        full_uncached_payload["contents"] = [*delta_contents, copy.deepcopy(user_tail)]
-
-    # Mount continuation handle
-    if upstream_handle is not None:
-        full_uncached_payload["continuation_handle"] = upstream_handle
-        handle_str = (
-            upstream_handle.get("cachedContent") or upstream_handle.get("handle")
-            if isinstance(upstream_handle, dict)
-            else str(upstream_handle or "")
-        )
-        if isinstance(handle_str, str) and handle_str.startswith("cachedContents/"):
-            full_uncached_payload["cachedContent"] = handle_str
-            full_uncached_payload.pop("systemInstruction", None)
-
-    plan["full_uncached_payload"] = full_uncached_payload
-    plan["full_uncached_wire_hash"] = stable_hash(full_uncached_payload)
-
-    # If uncached_suffix is also provided, keep it aligned
-    suffix_map = plan.get("uncached_suffix_by_prefix_version")
-    if isinstance(suffix_map, dict) and str(covered_version) in suffix_map:
-        plan["uncached_suffix"] = copy.deepcopy(suffix_map[str(covered_version)])
-        plan["uncached_suffix_wire_hash"] = stable_hash(plan["uncached_suffix"])
-    elif "uncached_suffix" in plan and isinstance(plan["uncached_suffix"], dict):
-        uncached_suffix = copy.deepcopy(plan["uncached_suffix"])
-        user_suffix_tail = user_content or (
-            uncached_suffix.get("contents")[-1] if uncached_suffix.get("contents") else {}
-        )
-        uncached_suffix["contents"] = [*delta_contents, copy.deepcopy(user_suffix_tail)]
-        plan["uncached_suffix"] = uncached_suffix
-        plan["uncached_suffix_wire_hash"] = stable_hash(uncached_suffix)
-
-    plan["continuation_execution"] = {
-        "active_anchor_id": active_anchor_id,
-        "covered_history_version": covered_version,
-        "upstream_handle": upstream_handle,
-        "bound_delta_turns_count": len(delta_history),
-        "bound_delta_turns": delta_history,
-        "mechanism": continuation_state["mechanism"],
-    }
-
-    if "dependencies" in plan and isinstance(plan["dependencies"], dict):
-        plan["dependencies"]["continuation_active_anchor_id"] = active_anchor_id
-        plan["dependencies"]["continuation_covered_history_version"] = covered_version
-        plan["dependencies"]["continuation_bound_delta_turns_count"] = len(delta_history)
-
-    # Recalculate physical_plan_hash
-    plan.pop("physical_plan_hash", None)
-    plan["physical_plan_hash"] = stable_hash(plan)
-
-    return plan
-
-
 def _build_gemini_physical_cache_plan_v10(
     *,
     snapshot: dict[str, Any],
@@ -525,13 +340,7 @@ def _build_gemini_physical_cache_plan_v10(
     ):
         plan[field] = stable_hash(value)
     plan["physical_plan_hash"] = stable_hash(plan)
-    return _apply_continuation_to_plan(
-        plan=plan,
-        snapshot=snapshot,
-        context_plan=context_plan,
-        history=history,
-        current_user=plan.get("history_entry_user_content"),
-    )
+    return plan
 
 
 def build_gemini_physical_cache_plan(
@@ -580,18 +389,11 @@ def build_gemini_physical_cache_plan(
 
     if snapshot.get("placement_contract_version") is not None and (snapshot.get("material_placement_plan") or {}).get("deduplicate_auto", True):
         from app.protocol_adapters.wire_projection.gemini_native_prefix import build_native_prefix_plan
-        plan = build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
+        return build_native_prefix_plan(snapshot=snapshot, session=session, history=history,
             material_ids=material_ids, material_bindings=material_bindings, context_plan=context_plan,
             placement_session=placement_session, placement_history=placement_history)
-        return _apply_continuation_to_plan(
-            plan=plan,
-            snapshot=snapshot,
-            context_plan=context_plan,
-            history=history,
-            current_user=plan.get("history_entry_user_content"),
-        )
     if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V10:
-        plan = _build_gemini_physical_cache_plan_v10(
+        return _build_gemini_physical_cache_plan_v10(
             snapshot=snapshot,
             session=session,
             history=history,
@@ -602,15 +404,8 @@ def build_gemini_physical_cache_plan(
             placement_session=placement_session,
             placement_history=placement_history,
         )
-        return _apply_continuation_to_plan(
-            plan=plan,
-            snapshot=snapshot,
-            context_plan=context_plan,
-            history=history,
-            current_user=plan.get("history_entry_user_content"),
-        )
     if layout_version == GEMINI_PHYSICAL_LAYOUT_VERSION_V9:
-        plan = _build_gemini_physical_cache_plan_v9(
+        return _build_gemini_physical_cache_plan_v9(
             snapshot=snapshot,
             session=session,
             history=history,
@@ -618,13 +413,6 @@ def build_gemini_physical_cache_plan(
             material_bindings=material_bindings,
             context_plan=context_plan,
             cache_material_projection=cache_material_projection,
-        )
-        return _apply_continuation_to_plan(
-            plan=plan,
-            snapshot=snapshot,
-            context_plan=context_plan,
-            history=history,
-            current_user=plan.get("history_entry_user_content"),
         )
 
     manifest = (
@@ -918,14 +706,7 @@ def build_gemini_physical_cache_plan(
     plan["full_uncached_wire_hash"] = stable_hash(full_uncached_payload)
     plan["occurrence_mapping_hash"] = stable_hash(occurrence_mapping)
     plan["physical_plan_hash"] = stable_hash(plan)
-    return _apply_continuation_to_plan(
-        plan=plan,
-        snapshot=snapshot,
-        context_plan=context_plan,
-        history=history,
-        current_user=plan.get("history_entry_user_content"),
-    )
-
+    return plan
 
 
 def _build_gemini_physical_cache_plan_v9(
@@ -1427,13 +1208,7 @@ def _build_gemini_physical_cache_plan_v9(
     plan["occurrence_mapping_hash"] = stable_hash(occurrence_mapping)
     plan["implicit_prefix_payload_hash"] = stable_hash(implicit_prefix_payload)
     plan["physical_plan_hash"] = stable_hash(plan)
-    return _apply_continuation_to_plan(
-        plan=plan,
-        snapshot=snapshot,
-        context_plan=context_plan,
-        history=history,
-        current_user=plan.get("history_entry_user_content"),
-    )
+    return plan
 
 
 def _project_dynamic_history_entries_v9(

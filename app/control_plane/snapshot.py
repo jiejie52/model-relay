@@ -20,14 +20,18 @@ class ImmutableConfigSnapshot:
     control_plane_hash: str
     connections: Mapping[str, ConnectionSpec] = field(default_factory=dict)
     route_catalog: Any = None
+    continuation_policies: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        for name in ("supplies", "capabilities", "protocols", "cache_policies"):
+        for name in ("supplies", "capabilities", "protocols", "cache_policies", "continuation_policies"):
             object.__setattr__(self, name, freeze_json(dict(getattr(self, name))))
         object.__setattr__(self, "connections", freeze_json({k: ConnectionSpec(
             **{**v.canonical(), "metadata": freeze_json(v.metadata), "sdk_endpoint_options": freeze_json(v.sdk_endpoint_options)}) for k, v in self.connections.items()}))
         if self.route_catalog is not None and self.catalog_hash != self.route_catalog.catalog_hash:
             raise ValueError("Snapshot route catalog digest mismatch")
+
+    def continuation_policy(self, policy_id: str | None) -> Mapping[str, Any] | None:
+        return self.continuation_policies.get(policy_id) if policy_id else None
 
     def connection(self, connection_id):
         return self.connections.get(connection_id)
@@ -61,7 +65,8 @@ def get_active_config_snapshot(settings, *, control_plane=None, catalog=None):
         {k: v.canonical() for k, v in plane.capability_contracts.items()},
         {k: v.canonical() for k, v in plane.protocol_profiles.items()},
         {k: v.canonical() for k, v in plane.cache_policies.items()}, plane.control_plane_hash,
-        connections=plane.connections, route_catalog=catalog)
+        connections=plane.connections, route_catalog=catalog,
+        continuation_policies={k: v.canonical() for k, v in getattr(plane, "continuation_policies", {}).items()})
 
 def verify_node_snapshot_compatibility(snapshot, *, supported_protocols=SUPPORTED_PROTOCOLS):
     enabled_profiles = {s.get("protocol_profile_id") for s in snapshot.supplies.values() if s.get("enabled", True)}

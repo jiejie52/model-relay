@@ -129,45 +129,7 @@ class AtomicDispatchSealer:
                 historical_bindings=state.historical_pinned_bindings)
         prepared_payload_hash = dispatch_input_digest(**inputs)
 
-        active_anchor_id = None
-        fallback_occurred = False
-        if state.continuation_binding is not None:
-            active_anchor_id = (
-                getattr(state.continuation_binding, "active_anchor_id", None)
-                if hasattr(state.continuation_binding, "active_anchor_id")
-                else (state.continuation_binding.get("active_anchor_id") if isinstance(state.continuation_binding, dict) else None)
-            )
-            fallback_occurred = (
-                getattr(state.continuation_binding, "fallback_occurred", False)
-                if hasattr(state.continuation_binding, "fallback_occurred")
-                else (state.continuation_binding.get("fallback_occurred", False) if isinstance(state.continuation_binding, dict) else False)
-            )
-
-        has_active_continuation = bool(active_anchor_id and not fallback_occurred)
-
-        if has_active_continuation and continuation_binding_data.get("schema_version") != "relay-continuation-binding/2":
-            hold_seconds = 300
-            if isinstance(state.snapshot, dict) and "continuation_hold_seconds" in state.snapshot:
-                hold_seconds = int(state.snapshot["continuation_hold_seconds"])
-            sealed = await self.repo.seal_continuation_and_dispatch_v90(
-                request_id=state.request_id,
-                anchor_id=active_anchor_id,
-                fence_owner=state.fence.owner if state.fence else None,
-                fence_epoch=state.fence.epoch if state.fence else None,
-                hold_seconds=hold_seconds,
-            )
-            if not sealed:
-                from app.runtime.execution_guard import ExecutionLeaseLost
-                if state.fence is not None:
-                    raise ExecutionLeaseLost("Continuation dispatch seal was rejected by execution fence")
-                raise ProviderRequestError(
-                    "CONTINUATION_SEAL_REJECTED",
-                    "Continuation dispatch seal was rejected; Provider dispatch is forbidden",
-                )
-            state.execution_snapshot = dict(state.snapshot)
-            state.execution_snapshot["_relay_continuation_execution"] = continuation_binding_data
-            state.snapshot["_relay_continuation_execution"] = continuation_binding_data
-        elif state.is_v3:
+        if state.is_v3:
             binding_hash = state.cache_binding_obj.binding_hash
             installed = await self.repo.install_cache_binding_v3(
                 request_id=state.request_id,
@@ -188,13 +150,21 @@ class AtomicDispatchSealer:
                 )
 
             has_placement = state.snapshot.get("placement_contract_version") is not None
-            sealed_continuation = state.snapshot.get("protocol") == "gemini_interactions" and (
-                state.snapshot.get("continuation_intent_plan") or {}
-            ).get("schema_version") == "relay-continuation-plan/2"
+            sealed_continuation = (
+                (state.snapshot.get("continuation_intent_plan") or {}).get("schema_version") == "relay-continuation-plan/2"
+                and isinstance(continuation_binding_data, dict)
+                and continuation_binding_data.get("effective_mode") in {"stateless_full_replay", "stateful_root_init", "stateful_anchor_delta"}
+            )
             if sealed_continuation:
                 seal_method = self.repo.seal_continuation_context_v91
             else:
                 seal_method = self.repo.seal_materials_and_dispatch_v89 if has_placement else self.repo.seal_cache_and_dispatch_v3
+            anchor_safety_seconds = int(
+                ((state.snapshot.get("continuation_intent_plan") or {}).get("topology") or {}).get(
+                    "anchor_safety_margin_seconds"
+                )
+                or 30
+            )
             try:
                 sealed = await seal_method(
                     request_id=state.request_id,
@@ -206,7 +176,7 @@ class AtomicDispatchSealer:
                         "safety_seconds": state.snapshot["historical_material_safety_seconds"]}
                        if state.snapshot.get("placement_contract_version") is not None else {}),
                     **({"continuation_binding": continuation_binding_data,
-                        "anchor_safety_seconds": state.snapshot["continuation_intent_plan"]["topology"]["anchor_safety_margin_seconds"]}
+                        "anchor_safety_seconds": anchor_safety_seconds}
                        if sealed_continuation else {}),
                     fence_owner=state.fence.owner,
                     fence_epoch=state.fence.epoch,

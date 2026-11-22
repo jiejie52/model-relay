@@ -60,6 +60,22 @@ class ControlledInvoker:
         metadata = state.snapshot.get("metadata") if isinstance(state.snapshot.get("metadata"), dict) else {}
         input_value = state.snapshot.get("input") if isinstance(state.snapshot.get("input"), dict) else {}
         business_stage = metadata.get("stage") or metadata.get("purpose") or input_value.get("stage")
+        cont_binding = thaw_json(state.sealed_bundle.continuation_execution_binding)
+        if not isinstance(cont_binding, dict):
+            raw_cb = getattr(state, "continuation_binding", None)
+            if hasattr(raw_cb, "to_dict"):
+                cont_binding = raw_cb.to_dict()
+            elif isinstance(raw_cb, dict):
+                cont_binding = dict(raw_cb)
+            else:
+                cont_binding = {}
+        cont_mode = cont_binding.get("effective_mode") or cont_binding.get("mechanism") or "disabled"
+        used_parent_anchor = bool(cont_binding.get("active_anchor_id") and not cont_binding.get("fallback_occurred"))
+        delta_turns_count = (
+            max(0, len(state.history) - int(cont_binding.get("covered_turn_count") or 0))
+            if used_parent_anchor
+            else len(state.history)
+        )
         log_info(
             logger,
             "provider_call_started",
@@ -74,6 +90,9 @@ class ControlledInvoker:
             business_stage=business_stage,
             material_count=len(state.material_ids),
             cache_mechanism=(state.cache_binding or {}).get("mechanism"),
+            continuation_mode=cont_mode,
+            used_parent_anchor=used_parent_anchor,
+            delta_turns_count=delta_turns_count,
         )
         diagnostics = current_response_capture()
         if diagnostics is None:
@@ -190,6 +209,9 @@ class ControlledInvoker:
             upstream_request_id=result.provider_request_id,
             provider_response_id=result.response_id,
             response_bytes=len(result.raw_bytes),
+            continuation_mode=cont_mode,
+            used_parent_anchor=used_parent_anchor,
+            delta_turns_count=delta_turns_count,
             **provider_cache_observation,
         )
 
@@ -455,9 +477,19 @@ class ControlledInvoker:
         result = replace(result, normalized_usage={**result.normalized_usage, **(cache_usage or {})})
         observation = {"response_capture": response_diagnostics(diagnostics), "observed_thinking": (result.observed or {}).get("observed_thinking"),
                        "cache_summary": cache_summary, "cache_usage": cache_usage,
+                       "affinity_epoch": (state.wire.get("affinity_epoch") if isinstance(state.wire, dict) else None),
                        "normalize": bool(state.wire.get("normalize")), "recorded_at": utcnow().isoformat()}
         continuation_binding = thaw_json(state.sealed_bundle.continuation_execution_binding)
-        if state.snapshot.get("protocol") == "gemini_interactions":
+        if isinstance(state.wire, dict) and "continuation_rejected_candidates" in state.wire:
+            observation["continuation_rejected_candidates"] = state.wire["continuation_rejected_candidates"]
+        if (
+            state.snapshot.get("protocol") == "gemini_interactions"
+            or (
+                isinstance(continuation_binding, dict)
+                and continuation_binding.get("effective_mode")
+                in {"stateless_full_replay", "stateful_root_init", "stateful_anchor_delta"}
+            )
+        ):
             from app.core.cache_fingerprint import estimated_tokens
 
             covered = (continuation_binding or {}).get("covered_turn_count", 0)
@@ -465,8 +497,14 @@ class ControlledInvoker:
             for turn in state.history[:covered]:
                 transport = turn.get("transport_history") or {}
                 omitted_tokens += estimated_tokens([
-                    transport.get("interaction_user_input") or transport.get("user_content"),
-                    transport.get("interaction_model_steps") or transport.get("model_content"),
+                    transport.get("interaction_user_input")
+                    or transport.get("user_content")
+                    or transport.get("user_item")
+                    or transport.get("user_message"),
+                    transport.get("interaction_model_steps")
+                    or transport.get("model_content")
+                    or transport.get("response_output")
+                    or transport.get("assistant_message"),
                 ])
             observation["continuation_usage"] = {
                 "covered_turn_count": covered,

@@ -369,7 +369,19 @@ class RelayV2Repository(RelayRepository):
         metadata: dict[str, Any],
         job_id: str | None,
         route_pin: dict[str, Any] | None = None,
+        continuation_plan_object_id: str | None = None,
+        continuation_plan_hash: str | None = None,
     ) -> dict[str, Any]:
+        effective_metadata = metadata
+        if continuation_plan_object_id is not None or continuation_plan_hash is not None:
+            effective_metadata = dict(metadata or {})
+            existing_cont = effective_metadata.get("_relay_continuation")
+            cont = dict(existing_cont) if isinstance(existing_cont, dict) else {}
+            if continuation_plan_object_id is not None and cont.get("plan_object_id") is None:
+                cont["plan_object_id"] = continuation_plan_object_id
+            if continuation_plan_hash is not None and cont.get("plan_hash") is None:
+                cont["plan_hash"] = continuation_plan_hash
+            effective_metadata["_relay_continuation"] = cont
         result = await self._placement_rpc(
             "accept_relay_request_v66" if route_pin is not None else "accept_relay_request_v3",
             {
@@ -394,7 +406,7 @@ class RelayV2Repository(RelayRepository):
                 "p_model": model,
                 "p_execution_pool": execution_pool,
                 "p_expected_history_version": expected_history_version,
-                "p_metadata": metadata,
+                "p_metadata": effective_metadata,
                 "p_job_id": job_id,
                 "p_job_expires_at": self.default_job_expiry().isoformat(),
             },
@@ -1191,15 +1203,11 @@ class RelayV2Repository(RelayRepository):
         if "_continuation_anchor" in args:
             anchor = args.pop("_continuation_anchor")
             occurrences = args.pop("_material_occurrences", None)
-            if anchor.get("schema_version") == "relay-continuation-anchor/2":
-                return await self.backend.rpc("complete_continuation_context_v91", {
-                    "p_args": args, "p_material_occurrences": occurrences, "p_anchor": anchor,
-                })
-            return await self.complete_continuation_request_v90(
-                p_args=args,
-                p_material_occurrences=occurrences,
-                p_continuation_anchor=anchor,
-            )
+            if not isinstance(anchor, dict) or anchor.get("schema_version") != "relay-continuation-anchor/2":
+                raise ValueError("Unsupported continuation anchor schema version")
+            return await self.backend.rpc("complete_continuation_context_v91", {
+                "p_args": args, "p_material_occurrences": occurrences, "p_anchor": anchor,
+            })
         if "_material_occurrences" in args:
             occurrences = args.pop("_material_occurrences")
             return await self.backend.rpc("complete_material_request_v89", {

@@ -251,6 +251,16 @@ def build_candidate(
                     "allow_force": force})
             overridden_policies.append(target_policy.canonical())
         overridden_contracts.append((target_contract if cache_enabled else disabled_contract).canonical())
+        from app.control_plane.continuation_contracts import validate_continuation_cross_contract
+        try:
+            validate_continuation_cross_contract(
+                connection=connection,
+                capability=target_contract if cache_enabled else disabled_contract,
+                profile=profile,
+                policy=base.continuation_policy(getattr(original, "continuation_policy_id", None)),
+            )
+        except ValueError as exc:
+            raise DeclarationError(str(exc)) from exc
         metadata = dict(original.metadata)
         metadata.update({
             "managed_v2": True,
@@ -295,6 +305,8 @@ def build_candidate(
         "connections": [x.canonical() for x in base.connections.values()] if extension else [],
         "protocol_profiles": [x.canonical() for x in base.protocol_profiles.values()] if extension else [],
         "cache_policies": ([x.canonical() for x in base.cache_policies.values()] if extension else []) + overridden_policies,
+        **({"continuation_policies": [x.canonical() for x in getattr(base, "continuation_policies", {}).values()]}
+           if extension and getattr(base, "continuation_policies", None) else {}),
         "capability_contracts": overridden_contracts,
         "offerings": offerings,
     }

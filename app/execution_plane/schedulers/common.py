@@ -6,6 +6,7 @@ from app.shared_contracts import ExecutionConflictError
 from app.execution_plane.structured_output import StructuredOutputError
 from app.protocol_adapters.base import ProviderRequestError
 from app.core.error_classification import error_source
+from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS
 from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, execution_guard
 
 class RequestExecutionService:
@@ -75,7 +76,7 @@ class RequestExecutionService:
         unknown = state == "dispatch_started" and not contract_failure
         kwargs = dict(request_id=row["id"], session_id=row["session_id"], error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}:
+        if row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS:
             await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         else:
             await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None, lease_epoch=fence.epoch if fence else None)

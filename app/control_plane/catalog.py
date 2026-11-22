@@ -30,6 +30,8 @@ class RouteEntry:
     protocol_profile: dict[str, Any] | None = None
     cache_policy_id: str | None = None
     cache_policy: dict[str, Any] | None = None
+    continuation_policy_id: str | None = None
+    continuation_policy: dict[str, Any] | None = None
     observed_model_policy: str = "audit"
     quota: dict[str, Any] = field(default_factory=dict)
     source: str = "legacy"
@@ -56,6 +58,7 @@ class RouteEntry:
             features=tuple(str(x) for x in (self.capability_contract.get("features") or [])),
             provider_defaults=dict(self.capability_contract.get("provider_defaults") or {}),
             cache=dict(self.capability_contract.get("cache") or {}),
+            continuation=dict(self.capability_contract.get("continuation") or {}),
             metadata=dict(self.capability_contract.get("metadata") or {}),
         )
         return contract.supports_requirements(requirements)
@@ -113,6 +116,8 @@ class RouteCatalog:
                     "protocol_profile": x.protocol_profile,
                     "cache_policy_id": x.cache_policy_id,
                     "cache_policy": x.cache_policy,
+                    **({"continuation_policy_id": x.continuation_policy_id} if x.continuation_policy_id else {}),
+                    **({"continuation_policy": x.continuation_policy} if x.continuation_policy else {}),
                     "observed_model_policy": x.observed_model_policy,
                     "quota": x.quota,
                     "source": x.source,
@@ -165,6 +170,7 @@ class RouteCatalog:
             contract = cp.contract(offering.capability_contract_id)
             profile = cp.protocol_profile(offering.protocol_profile_id)
             cache_policy = cp.cache_policy(offering.cache_policy_id)
+            cont_policy = cp.continuation_policy(getattr(offering, "continuation_policy_id", None))
             if connection is None or contract is None:
                 # ControlPlane validation normally makes this unreachable.
                 continue
@@ -186,6 +192,8 @@ class RouteCatalog:
                     protocol_profile=(profile.canonical() if profile else None),
                     cache_policy_id=(cache_policy.policy_id if cache_policy else None),
                     cache_policy=(cache_policy.canonical() if cache_policy else None),
+                    continuation_policy_id=(cont_policy.policy_id if cont_policy else None),
+                    continuation_policy=(cont_policy.canonical() if cont_policy else None),
                     observed_model_policy=offering.observed_model_policy,
                     quota=dict(offering.quota),
                     execution_authorization=(dict(execution_authorization(offering.metadata["execution_authorization"])) if "execution_authorization" in offering.metadata else {}),
@@ -229,6 +237,8 @@ class RouteCatalog:
             protocol_profile=(dict(value.get("protocol_profile")) if isinstance(value.get("protocol_profile"), dict) else None),
             cache_policy_id=(str(value.get("cache_policy_id")) if value.get("cache_policy_id") else None),
             cache_policy=(dict(value.get("cache_policy")) if isinstance(value.get("cache_policy"), dict) else None),
+            continuation_policy_id=(str(value.get("continuation_policy_id")) if value.get("continuation_policy_id") else None),
+            continuation_policy=(dict(value.get("continuation_policy")) if isinstance(value.get("continuation_policy"), dict) else None),
             observed_model_policy=str(value.get("observed_model_policy") or "audit").lower(),
             quota=dict(value.get("quota") or {}),
             source="legacy",

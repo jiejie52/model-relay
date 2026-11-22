@@ -22,7 +22,7 @@ def freeze_dual_track_plan(intent: CacheIntentPlan | CacheConditionSet, *, snaps
     controlled_candidate = controlled or intent.selection_evidence.get("controlled_candidate")
     profile_mode = profile.get("composite_mode")
     compatibility = (
-        "mutually_exclusive" if protocol == "gemini_native"
+        "mutually_exclusive" if protocol in {"gemini_native", "gemini_interactions"}
         else "composite_layered" if profile_mode == contract.get("composite_mode") == "composite_layered"
         else "implicit_only"
     )
@@ -131,7 +131,7 @@ def build_unified_plan(conditions: CacheConditionSet | CacheIntentPlan, *,
     implicit = "implicit_prefix" in allowed
     wire = protocol_profile.get("cache") or {}
     compatibility = (
-        "mutually_exclusive" if protocol_profile.get("protocol") == "gemini_native"
+        "mutually_exclusive" if protocol_profile.get("protocol") in {"gemini_native", "gemini_interactions"}
         else "composite_layered" if wire.get("composite_mode") == contract.get("composite_mode") == "composite_layered"
         and controlled == "breakpoint" else "exclusive_by_policy"
     )

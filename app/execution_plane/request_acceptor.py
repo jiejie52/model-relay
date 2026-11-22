@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from app.core.idempotency import caller_intent_hash, request_identity, stable_hash
 from app.execution_plane.request_identity import semantic_intent_hash
+from app.control_plane.continuation_contracts import IMPLEMENTED_CONTINUATION_PROTOCOLS
 from app.control_plane.execution_authorization import execution_authorization
 from app.persistence.execution_artifacts import ExecutionArtifacts
 from app.runtime.affinity import session_affinity_token
@@ -16,7 +17,7 @@ from app.execution_plane.cache_intent_planner import freeze_dual_track_plan
 from app.core.context_codec import canonical_structure, normalize_structured_output, freeze_history
 from app.execution_plane.context_planner import build_context_plan
 from app.execution_plane.cache_intent_resolver import CacheIntentResolver
-from app.shared_contracts import CacheDecisionError
+from app.shared_contracts import CacheDecisionError, ContinuationDecisionError
 from app.runtime.cache_economics import reuse_evidence_key, stable_attachment_evidence
 from app.execution_plane.semantic_resolver import CAPABILITY_PROFILE_REVISION, ModelOptionError, resolve_model_options, validate_structured_output_capability
 from app.observability import error as log_error, info as log_info, warning as log_warning
@@ -98,7 +99,7 @@ class RequestAcceptor:
             raise ExecutionRequestError(422, {"code": "AUDIT_CONTEXT_OVERRIDE_FORBIDDEN"})
 
         protected_metadata = [
-            str(key) for key in body.metadata if str(key).startswith(("_relay_cache", "_relay_material"))
+            str(key) for key in body.metadata if str(key).startswith(("_relay_cache", "_relay_material", "_relay_continuation"))
         ]
         if protected_metadata:
             raise ExecutionRequestError(
@@ -302,6 +303,7 @@ class RequestAcceptor:
             effective_material_ids = [str(x) for x in session.get("material_manifest") or []] + effective_material_ids
         effective_material_ids = list(dict.fromkeys(effective_material_ids))
         placement_plan = None
+        placement_history = None
         from app.execution_plane.context_material_planner import placement_enabled, plan_effective_materials
         from app.core.material_placement import MaterialPlacementError, placement_summary
         route_for_placement = (session.get("metadata") or {}).get("_relay_route") or {}
@@ -518,6 +520,7 @@ class RequestAcceptor:
         base_snapshot = {
             "audit_context": {"entry_point": services.entry_point},
             "protocol_profile": frozen_route.get("protocol_profile"),
+            "protocol_profile_hash": frozen_route.get("protocol_profile_hash"),
             "execution_authorization": dict(execution_authorization(frozen_route.get("execution_authorization"))),
             "session_id": str(session_id),
             "tenant_id": tenant_id,
@@ -527,8 +530,10 @@ class RequestAcceptor:
             "material_ids": body.material_ids,
             # Only explicitly supplied overrides appear in legacy identities;
             # old accepted Request snapshots remain bit-for-bit compatible.
-            **({"request_context_policy": body.context_policy, "context_policy": request_policy,
-                "model_history_visible": model_history_visible} if body.context_policy is not None else {}),
+            **({"request_context_policy": body.context_policy} if body.context_policy is not None else {}),
+            "context_policy": request_policy,
+            "model_history_visible": model_history_visible,
+            "tools": (body.provider_payload or {}).get("tools"),
             "effective_material_ids": effective_material_ids,
             "material_hashes": material_hashes,
             "material_total_bytes": material_total_bytes,
@@ -548,6 +553,12 @@ class RequestAcceptor:
             "capability_contract_id": frozen_route.get("capability_contract_id") if frozen_route else None,
             "capability_contract_hash": frozen_route.get("capability_contract_hash") if frozen_route else None,
             "capability_contract": (dict(frozen_route.get("capability_contract")) if isinstance(frozen_route.get("capability_contract"), dict) else None),
+            "continuation_contract": frozen_route.get("continuation_contract"),
+            "continuation_contract_hash": frozen_route.get("continuation_contract_hash"),
+            "continuation_policy_id": frozen_route.get("continuation_policy_id"),
+            "continuation_policy": frozen_route.get("continuation_policy"),
+            "continuation_policy_hash": frozen_route.get("continuation_policy_hash"),
+            **({"continuation_mode_explicit": True} if body_continuation_mode is not None else {}),
             "observed_model_policy": str(frozen_route.get("observed_model_policy") or "audit") if frozen_route else "audit",
             **({"thinking": resolved_options.thinking} if resolved_options.thinking is not None else {}),
             "requested_think_level": resolved_options.requested_think_level,
@@ -560,6 +571,14 @@ class RequestAcceptor:
             "provider_payload": body.provider_payload,
             "metadata": body.metadata,
         }
+        if (
+            (base_snapshot.get("protocol") in IMPLEMENTED_CONTINUATION_PROTOCOLS or not model_history_visible)
+            and request_policy == "conversation"
+            and not base_snapshot.get("instructions")
+        ):
+            fallback_instructions = session.get("instructions") or session.get("system_instructions")
+            if fallback_instructions:
+                base_snapshot["instructions"] = fallback_instructions
 
         if placement_plan is not None:
             base_snapshot["placement_contract_version"] = "material-placement/2"
@@ -605,68 +624,21 @@ class RequestAcceptor:
                         except (ValueError, TypeError, AttributeError) as exc:
                             raise ExecutionRequestError(status_code=409, detail={"code": "HISTORY_INTEGRITY_MISMATCH"}) from exc
 
-        if base_snapshot["protocol"] == "gemini_interactions" or not model_history_visible:
-            base_snapshot.update(context_policy=request_policy, model_history_visible=model_history_visible)
-            if request_policy == "conversation" and not base_snapshot.get("instructions"):
-                base_snapshot["instructions"] = session.get("instructions") or session.get("system_instructions")
-            base_snapshot["protocol_profile_hash"] = frozen_route.get("protocol_profile_hash")
-            base_snapshot["tools"] = (body.provider_payload or {}).get("tools")
-            visible_history = planning_history if planning_history is not None else (
-                placement_history if placement_plan is not None else None
-            )
-            if model_history_visible and visible_history is None and session.get("history_object_id"):
-                visible_history = await ExecutionArtifacts(repo, services.storage, settings).load_json(
-                    session["history_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash,
-                )
-            visible_history = (visible_history or []) if model_history_visible else []
-            if model_history_visible and len(visible_history) != int(session.get("history_version") or 0):
-                raise ExecutionRequestError(409, {"code": "HISTORY_INTEGRITY_MISMATCH"})
-            continuation_plan = ContinuationIntentPlanner.plan_frozen_context(
-                snapshot=base_snapshot, session=session, request_policy=request_policy,
-                history=visible_history, model_history_visible=model_history_visible,
-                body_mode=body_continuation_mode,
-                cache_mechanism=body.requested_cache_mechanism if cache_mechanism_explicit else None,
-            )
+        if not model_history_visible:
+            visible_history: list[dict[str, Any]] = []
         else:
-            candidate_anchor = None
-            history_version = int(session.get("history_version") or 0)
-            if hasattr(repo, "find_active_continuation_anchor"):
-                try:
-                    candidate_anchor = await repo.find_active_continuation_anchor(
-                        session_id=session_id,
-                        history_version=history_version,
-                        tenant_id=tenant_id,
-                        conversation_hash=conversation_hash,
-                    )
-                except Exception as exc:
-                    log_warning(logger, "find_active_continuation_anchor_failed", session_id=str(session_id), error=str(exc))
-                    candidate_anchor = None
+            loaded_history = planning_history if planning_history is not None else placement_history
+            if loaded_history is None and session.get("history_object_id"):
+                loaded_history = await ExecutionArtifacts(repo, services.storage, settings).load_json(
+                    session["history_object_id"],
+                    tenant_id=tenant_id,
+                    conversation_hash=conversation_hash,
+                )
+            visible_history = loaded_history if loaded_history is not None else []
+            if not isinstance(visible_history, list) or len(visible_history) != int(session.get("history_version") or 0):
+                raise ExecutionRequestError(409, {"code": "HISTORY_INTEGRITY_MISMATCH"})
 
-            continuation_history = planning_history if planning_history is not None else (
-                placement_history if 'placement_history' in locals() and placement_history is not None else None
-            )
-            if continuation_history is None and session.get("history_object_id"):
-                try:
-                    artifacts = ExecutionArtifacts(repo, services.storage, settings)
-                    loaded_h = await artifacts.load_json(
-                        session["history_object_id"], tenant_id=tenant_id, conversation_hash=conversation_hash
-                    )
-                    if isinstance(loaded_h, list):
-                        continuation_history = loaded_h
-                except Exception:
-                    continuation_history = []
-            if continuation_history is None:
-                continuation_history = []
-
-            continuation_plan = ContinuationIntentPlanner.plan_continuation_intent(
-                session=session,
-                body_mode=body_continuation_mode,
-                candidate_anchor=candidate_anchor,
-                history=continuation_history,
-                route_profile=frozen_route or session.get("route_profile") or {},
-            )
-        base_snapshot["continuation_intent_plan"] = continuation_plan.to_dict()
-
+        plan_seed: dict[str, Any] = {}
         if cache_contract_session:
             plan_seed = dict(base_snapshot)
             plan_seed["schema_version"] = "relay-request/2.4"
@@ -713,14 +685,28 @@ class RequestAcceptor:
                 session=visible_session,
                 material_rows=material_rows,
                 history_identity=history_identity if model_history_visible else None,
-                history=(planning_history if planning_history is not None else ([] if is_v66 else None))
-                    if model_history_visible else [],
+                history=visible_history,
             )
-            if continuation_plan.topology is not None:
-                context_plan["continuation_topology"] = continuation_plan.topology
-                context_plan["context_plan_hash"] = stable_hash({
-                    key: value for key, value in context_plan.items() if key != "context_plan_hash"
-                })
+
+        try:
+            continuation_plan = ContinuationIntentPlanner.plan(
+                snapshot=base_snapshot,
+                session=session,
+                request_policy=request_policy,
+                history=visible_history,
+                model_history_visible=model_history_visible,
+                body_mode=body_continuation_mode,
+                cache_mechanism=body.requested_cache_mechanism if cache_mechanism_explicit else None,
+                context_plan=context_plan,
+            )
+        except ContinuationDecisionError as exc:
+            raise ExecutionRequestError(
+                status_code=409 if exc.code == "CONTINUATION_FORBIDDEN_BY_ZDR_POLICY" else 422,
+                detail=exc.public_detail(),
+            ) from exc
+        base_snapshot["continuation_intent_plan"] = continuation_plan.to_dict()
+
+        if cache_contract_session:
             evidence_key = reuse_evidence_key(plan_seed, context_plan)
             observed_reuse: dict[str, Any] = {"observed_compatible_uses": 0}
             frozen_cache_policy = frozen_route.get("cache_policy") if isinstance(frozen_route.get("cache_policy"), dict) else {}
@@ -783,7 +769,11 @@ class RequestAcceptor:
                 "cache_plan": cache_plan,
                 "cache_plan_hash": cache_plan["plan_hash"],
                 "cache_upgrade": cache_upgrade,
-                "continuation_plan_hash": continuation_plan.plan_hash,
+                "continuation_plan_hash": (
+                    continuation_plan.plan_hash
+                    if continuation_plan is not None and continuation_plan.resolution_status != "disabled"
+                    else None
+                ),
             }
         else:
             snapshot = {"schema_version": "relay-request/2.2", **base_snapshot}
@@ -832,7 +822,7 @@ class RequestAcceptor:
                 value=cache_plan,
             )
         continuation_plan_object_id: str | None = None
-        if continuation_plan is not None:
+        if continuation_plan is not None and continuation_plan.resolution_status != "disabled":
             continuation_plan_object_id = await _store_request_json_artifact(
                 services,
                 tenant_id=tenant_id,
@@ -854,14 +844,21 @@ class RequestAcceptor:
 
         job_id = str(uuid4()) if body.execution.mode == "async" else None
         accept_metadata = dict(body.metadata)
-        if continuation_plan is not None:
+        if continuation_plan is not None and continuation_plan.resolution_status != "disabled":
             accept_metadata["_relay_continuation"] = {
+                "schema_version": continuation_plan.schema_version,
                 "continuation_mode": continuation_plan.continuation_mode,
+                "resolution_status": continuation_plan.resolution_status,
+                "decision_reason": continuation_plan.decision_reason,
+                "planned_anchor_class": continuation_plan.planned_anchor_class,
+                "requested_mode": continuation_plan.requested_mode,
                 "parent_anchor_id": continuation_plan.parent_anchor_id,
                 "parent_history_version": continuation_plan.parent_history_version,
                 "parent_fingerprint": continuation_plan.parent_fingerprint,
                 "allow_fallback_to_full": continuation_plan.allow_fallback_to_full,
                 "plan_hash": continuation_plan.plan_hash,
+                "plan_object_id": continuation_plan_object_id,
+                "continuation_plan_object_id": continuation_plan_object_id,
                 **({"topology": continuation_plan.topology} if continuation_plan.topology is not None else {}),
             }
         if placement_plan is not None:
@@ -907,6 +904,12 @@ class RequestAcceptor:
                     cache_plan_object_id=cache_plan_object_id,
                     cache_plan_hash=str(cache_plan["plan_hash"]),
                     cache_resolution_status=str(cache_plan["resolution_status"]),
+                    continuation_plan_object_id=continuation_plan_object_id,
+                    continuation_plan_hash=(
+                        continuation_plan.plan_hash
+                        if continuation_plan is not None and continuation_plan.resolution_status != "disabled"
+                        else None
+                    ),
                     provider=provider,
                     connection_id=connection_id,
                     model=model,

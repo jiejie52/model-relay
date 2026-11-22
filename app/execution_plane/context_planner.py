@@ -3,6 +3,11 @@ from app.materials.classification import material_cache_class
 import json
 from typing import Any
 
+from app.core.continuation_fingerprint import (
+    CONTRACT_DRIVEN_HEAD,
+    compute_parent_head_fingerprint,
+    native_prefix_chain,
+)
 from app.core.idempotency import stable_hash
 from app.core.context_codec import freeze_history, normalize_native_payload
 
@@ -18,6 +23,7 @@ def build_context_plan(
     material_rows: list[dict[str, Any]],
     history_identity: dict[str, Any] | None = None,
     history: list[dict[str, Any]] | None = None,
+    continuation_topology: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic, provider-neutral cache context IR.
 
@@ -214,6 +220,37 @@ def build_context_plan(
             "historical_material_occurrences_digest": stable_hash(placement["verified_history_occurrences"]),
             "current_turn_material_ids": placement["current_effective_material_ids"],
         }
+    if continuation_topology is not None:
+        plan["continuation_topology"] = continuation_topology
+    else:
+        continuation_contract = (
+            snapshot.get("continuation_contract")
+            or (snapshot.get("capability_contract") or {}).get("continuation")
+            or {}
+        )
+        if (
+            isinstance(continuation_contract, dict)
+            and continuation_contract.get("anchor_class") not in (None, "", "none")
+            and snapshot.get("account_scope_id")
+            and snapshot.get("connection_spec_hash")
+        ):
+            head_format = snapshot.get("head_format") or CONTRACT_DRIVEN_HEAD
+            head = compute_parent_head_fingerprint(snapshot, head_format=head_format)
+            default_visible = (
+                session.get("context_policy") == "conversation"
+                and session.get("history_mode", "cumulative") != "ephemeral_turn"
+            )
+            raw_visible = snapshot.get("model_history_visible")
+            is_visible = default_visible if raw_visible is None else bool(raw_visible)
+            visible_hist = freeze_history(history or []) if is_visible else []
+            chain = native_prefix_chain(head, visible_hist)
+            plan["continuation_topology"] = {
+                "version": "relay-continuation-topology/1",
+                "head_format": head_format,
+                "parent_head_fingerprint": head,
+                "visible_turn_count": len(visible_hist),
+                "turn_prefix_chain": chain,
+            }
     plan["context_plan_hash"] = stable_hash(plan)
     return plan
 

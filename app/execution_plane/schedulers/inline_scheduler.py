@@ -2,13 +2,14 @@ from __future__ import annotations
 import asyncio
 import time
 from uuid import uuid4
+from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS
 from app.observability.response_capture import response_capture_scope, attach_response_evidence
 from app.shared_contracts import ExecutionFence
 from app.execution_plane.schedulers.common import RequestExecutionService
 
 class InlineScheduler(RequestExecutionService):
     async def execute(self, request_row):
-        is_v3 = request_row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4"}
+        is_v3 = request_row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS
         fence = None
         if is_v3:
             owner = f"sync:{uuid4()}"

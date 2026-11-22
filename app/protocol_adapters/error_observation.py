@@ -215,3 +215,86 @@ def _sanitize_request_url(value: str | None) -> str | None:
     except Exception:
         pass
     return text.split("?", 1)[0][:4096]
+
+
+def classify_invalid_continuation_anchor(
+    exc: BaseException,
+    *,
+    protocol: str | None = None,
+    upstream_handle: Any = None,
+) -> str | None:
+    """Identify upstream 400/404/410 rejections of a parent continuation anchor."""
+    del protocol
+    if not isinstance(exc, ProviderHTTPError) or exc.status_code not in (400, 404, 410):
+        return None
+
+    raw = exc.body
+    if isinstance(raw, bytes):
+        raw_text = raw.decode("utf-8", errors="replace")
+    elif isinstance(raw, str):
+        raw_text = raw
+    else:
+        raw_text = ""
+
+    message = ""
+    err_param = ""
+    if raw_text:
+        try:
+            parsed = json.loads(raw_text)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            err_obj = parsed.get("error")
+            if isinstance(err_obj, dict):
+                if err_obj.get("message"):
+                    message = str(err_obj["message"])
+                if err_obj.get("param"):
+                    err_param = str(err_obj["param"]).strip().lower()
+            elif isinstance(err_obj, str):
+                message = err_obj
+            elif parsed.get("message"):
+                message = str(parsed["message"])
+    if not message:
+        message = raw_text
+    msg = message.lower()
+    if not msg:
+        return None
+
+    handle_str = ""
+    if isinstance(upstream_handle, str):
+        handle_str = upstream_handle.strip().lower()
+    elif isinstance(upstream_handle, dict):
+        for key in ("previous_interaction_id", "previous_response_id", "interaction_id", "response_id", "id", "handle"):
+            if upstream_handle.get(key):
+                handle_str = str(upstream_handle[key]).strip().lower()
+                break
+    elif upstream_handle is not None:
+        handle_str = str(upstream_handle).strip().lower()
+
+    identifies_parent = (
+        "previous_interaction_id" in msg
+        or "previous_response_id" in msg
+        or err_param in ("previous_interaction_id", "previous_response_id")
+        or (bool(handle_str) and handle_str in msg)
+        or (
+            exc.status_code in (404, 410)
+            and any(
+                phrase in msg
+                for phrase in (
+                    "interaction not found",
+                    "interaction has expired",
+                    "response not found",
+                    "response has expired",
+                    "anchor not found",
+                    "anchor has expired",
+                )
+            )
+        )
+    )
+    anchor_rejected = any(
+        word in msg
+        for word in ("not found", "expired", "invalid", "does not exist")
+    )
+    if identifies_parent and anchor_rejected:
+        return "upstream_anchor_invalid_or_expired"
+    return None

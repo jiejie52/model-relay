@@ -5,8 +5,23 @@ alter table public.relay_continuation_anchors
     add column if not exists source_request_id uuid references public.relay_requests(id) on delete cascade,
     add column if not exists covered_turn_count integer,
     add column if not exists covered_material_bindings jsonb,
-    add column if not exists connection_spec_hash text;
-alter table public.relay_requests add column if not exists sealed_continuation_binding jsonb;
+    add column if not exists connection_spec_hash text,
+    add column if not exists anchor_class text,
+    add column if not exists affinity_epoch bigint,
+    add column if not exists protocol text,
+    add column if not exists model text,
+    add column if not exists invalidated_by_request_id uuid references public.relay_requests(id) on delete set null,
+    add column if not exists invalidation_reason text;
+alter table public.relay_continuation_anchors
+    drop constraint if exists relay_continuation_anchors_state_check;
+alter table public.relay_continuation_anchors
+    add constraint relay_continuation_anchors_state_check
+    check (state in ('active', 'superseded', 'expired', 'invalidated'));
+alter table public.relay_requests
+    add column if not exists sealed_continuation_binding jsonb,
+    add column if not exists continuation_plan_object_id text,
+    add column if not exists continuation_plan_hash text,
+    add column if not exists produced_anchor_id uuid;
 create unique index if not exists relay_continuation_anchor_source_v91
     on public.relay_continuation_anchors(source_request_id);
 create index if not exists relay_continuation_prefix_v91
@@ -292,8 +307,10 @@ begin
        or (mode<>'stateless_full_replay' and (
             topology->'reusable_on_commit' is distinct from 'true'::jsonb
             or topology->>'context_policy' is distinct from 'conversation'
+            or coalesce(topology->>'history_mode', 'cumulative') is distinct from 'cumulative'
             or topology->>'parent_head_fingerprint' is distinct from p_continuation_binding->>'parent_head_fingerprint'
-            or s.context_policy is distinct from 'conversation' or coalesce(r.history_mode, s.history_mode, 'cumulative') is distinct from 'cumulative'
+            or s.context_policy is distinct from 'conversation'
+            or coalesce(s.history_mode, 'cumulative') is distinct from 'cumulative'
             or coalesce(r.material_placement_plan->>'context_policy','conversation')<>'conversation')) then
         raise exception 'CONTINUATION_BINDING_INVALID';
     end if;
@@ -376,7 +393,7 @@ begin
        or r.sealed_continuation_binding->'store_upstream_state' is distinct from 'true'::jsonb
        or r.sealed_continuation_binding->>'active_anchor_id' is distinct from parent::text
        or r.sealed_continuation_binding->>'parent_head_fingerprint' is distinct from p_anchor->>'head_fingerprint'
-       or s.context_policy is distinct from 'conversation' or coalesce(r.history_mode, s.history_mode, 'cumulative') is distinct from 'cumulative'
+       or s.context_policy is distinct from 'conversation' or coalesce(s.history_mode, 'cumulative') is distinct from 'cumulative'
        or s.history_version is distinct from r.expected_history_version
        or p_args->>'p_history_object_id' is null
        or nullif(btrim(p_anchor->>'upstream_handle'),'') is null
@@ -405,13 +422,19 @@ begin
         id,source_request_id,tenant_id,conversation_hash,session_id,parent_anchor_id,
         history_version,head_fingerprint,turn_chain_digest,upstream_handle,
         provider,connection_id,account_scope_hash,connection_spec_hash,
-        state,expires_at,covered_turn_count,covered_material_bindings
+        state,expires_at,covered_turn_count,covered_material_bindings,
+        anchor_class,affinity_epoch,protocol,model
     ) values (
         req,req,r.tenant_id,r.conversation_hash,s.id,parent,
         r.expected_history_version+1,p_anchor->>'head_fingerprint',p_anchor->>'turn_chain_digest',p_anchor->>'upstream_handle',
         r.provider,r.connection_id,p_anchor->>'account_scope_hash',p_anchor->>'connection_spec_hash',
-        'active',(p_anchor->>'expires_at')::timestamptz,(p_anchor->>'covered_turn_count')::integer,p_anchor->'covered_material_bindings'
+        'active',(p_anchor->>'expires_at')::timestamptz,(p_anchor->>'covered_turn_count')::integer,p_anchor->'covered_material_bindings',
+        coalesce(p_anchor->>'anchor_class', 'immutable_tree_anchor'),
+        nullif(p_anchor->>'affinity_epoch', '')::bigint,
+        coalesce(p_anchor->>'protocol', s.metadata->'_relay_route'->>'protocol'),
+        coalesce(p_anchor->>'model', r.model)
     );
+    update public.relay_requests set produced_anchor_id = req where id = req;
     return true;
 end;
 $$;
@@ -424,8 +447,11 @@ begin
     if new.provider_dispatch_state='committed'
        or (new.status='failed' and not coalesce((new.error->>'unknown_completion')::boolean,false)) then
         if new.status='failed' and new.error->>'_relay_invalid_continuation_anchor'=parent::text then
-            update public.relay_continuation_anchors set state='invalidated'
-             where id=parent and session_id=new.session_id and state='active';
+            update public.relay_continuation_anchors
+               set state = 'invalidated',
+                   invalidated_by_request_id = new.id,
+                   invalidation_reason = coalesce(new.error->>'_relay_invalid_continuation_reason', 'upstream_anchor_rejected')
+             where id = parent and session_id = new.session_id and state = 'active';
         end if;
         delete from public.relay_anchor_pins where request_id=new.id and anchor_id=parent;
     end if;
@@ -444,6 +470,24 @@ begin
 end;
 $$;
 
+create or replace function public.sync_continuation_plan_columns_v91()
+returns trigger language plpgsql security definer set search_path=public as $$
+begin
+    if new.continuation_plan_object_id is null then
+        new.continuation_plan_object_id := new.metadata->'_relay_continuation'->>'plan_object_id';
+    end if;
+    if new.continuation_plan_hash is null then
+        new.continuation_plan_hash := new.metadata->'_relay_continuation'->>'plan_hash';
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists sync_continuation_plan_columns_v91 on public.relay_requests;
+create trigger sync_continuation_plan_columns_v91
+    before insert on public.relay_requests
+    for each row execute function public.sync_continuation_plan_columns_v91();
+
 drop trigger if exists release_continuation_after_request_v91 on public.relay_requests;
 create trigger release_continuation_after_request_v91
     after update of status,provider_dispatch_state on public.relay_requests
@@ -455,7 +499,8 @@ create trigger protect_continuation_pin_v91 before delete on public.relay_contin
 
 revoke all on function public.seal_continuation_context_v91(jsonb,jsonb,jsonb,integer,jsonb,integer),
     public.complete_continuation_context_v91(jsonb,jsonb,jsonb),
-    public.release_continuation_after_request_v91(),public.protect_continuation_pin_v91()
+    public.release_continuation_after_request_v91(),public.protect_continuation_pin_v91(),
+    public.sync_continuation_plan_columns_v91()
     from public, anon, authenticated;
 grant execute on function public.seal_continuation_context_v91(jsonb,jsonb,jsonb,integer,jsonb,integer),
     public.complete_continuation_context_v91(jsonb,jsonb,jsonb) to service_role;

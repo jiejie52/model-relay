@@ -15,6 +15,7 @@ DEFAULT_HEAD_INVARIANTS = ("instructions", "tools", "account_scope_id", "model")
 
 @dataclass(frozen=True)
 class ContinuationCapabilityContract:
+    version: str = "relay-continuation-contract/1"
     anchor_class: str = "none"
     verification_status: str = "unspecified"
     supports_branching: bool = False
@@ -31,6 +32,7 @@ class ContinuationCapabilityContract:
 
     def canonical(self) -> dict[str, Any]:
         return {
+            "version": self.version,
             "anchor_class": self.anchor_class,
             "verification_status": self.verification_status,
             "supports_branching": self.supports_branching,
@@ -51,6 +53,7 @@ class ContinuationCapabilityContract:
         if not data:
             return cls()
         return cls(
+            version=str(data.get("version") or "relay-continuation-contract/1"),
             anchor_class=str(data.get("anchor_class") or "none"),
             verification_status=str(data.get("verification_status") or "unspecified"),
             supports_branching=bool(data.get("supports_branching", False)),
@@ -92,6 +95,11 @@ class ContinuationPolicySpec:
             "metadata": self.metadata,
         }
 
+    @property
+    def policy_hash(self) -> str:
+        from app.core.idempotency import stable_hash
+        return stable_hash(self.canonical())
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ContinuationPolicySpec:
         return cls(
@@ -116,16 +124,37 @@ def validate_continuation_cross_contract(
     anchor_class = str(cont.get("anchor_class") or "none")
     if anchor_class not in VALID_ANCHOR_CLASSES:
         raise ValueError(f"Unknown continuation anchor_class: {anchor_class!r}")
-    if anchor_class in {"linear_ephemeral_cursor", "mutable_session_container"} and cont.get("supports_branching") is True:
-        raise ValueError(f"{anchor_class} cannot declare supports_branching=True")
+    if anchor_class in {"linear_ephemeral_cursor", "mutable_session_container"}:
+        if cont.get("supports_branching") is True:
+            raise ValueError(f"{anchor_class} cannot declare supports_branching=True")
+        if cont.get("supports_multiturn_delta") is True:
+            raise ValueError(f"{anchor_class} cannot declare supports_multiturn_delta=True")
 
-    default_mode = getattr(policy, "default_mode", "off") if policy is not None else "off"
+    if anchor_class != "none" and cont.get("requires_upstream_store", True):
+        ttl = int(cont.get("retention_ttl_seconds") or 0)
+        margin = int(cont.get("anchor_safety_margin_seconds") or 0)
+        if not (ttl > margin > 0):
+            raise ValueError("Stateful continuation requires retention_ttl_seconds > anchor_safety_margin_seconds > 0")
+
+    if isinstance(policy, dict):
+        default_mode = str(policy.get("default_mode") or "off")
+        policy_meta = policy.get("metadata") or {}
+    elif policy is not None:
+        default_mode = str(getattr(policy, "default_mode", "off") or "off")
+        policy_meta = getattr(policy, "metadata", {}) or {}
+    else:
+        default_mode = "off"
+        policy_meta = {}
+
+    if default_mode not in {"off", "prefer_stateful_anchor", "require_stateful_anchor"}:
+        raise ValueError(f"Unknown continuation policy default_mode: {default_mode!r}")
+
     if default_mode != "off" or anchor_class != "none":
         proto = getattr(connection, "protocol", None)
         if proto not in IMPLEMENTED_CONTINUATION_PROTOCOLS:
             raise ValueError(f"Protocol {proto!r} has no certified continuation implementation")
-        prof_cont = getattr(profile, "continuation", {}) or {} if profile else {}
-        if not prof_cont.get("request_anchor_field") and proto != "gemini_interactions":
+        prof_cont = (getattr(profile, "continuation", None) or {}) if profile else {}
+        if not prof_cont.get("request_anchor_field") or not prof_cont.get("response_anchor_field"):
             raise ValueError(f"Protocol profile for {proto!r} lacks continuation wire mapping")
         profile_class = prof_cont.get("anchor_class")
         if profile_class and profile_class != anchor_class:
@@ -144,7 +173,12 @@ def validate_continuation_cross_contract(
     # Zero Data Retention static gate
     conn_meta = getattr(connection, "metadata", {}) or {}
     cap_meta = getattr(capability, "metadata", {}) or {}
-    zdr = bool(conn_meta.get("zero_data_retention") or cap_meta.get("zero_data_retention"))
+    zdr = bool(
+        cont.get("zero_data_retention")
+        or conn_meta.get("zero_data_retention")
+        or cap_meta.get("zero_data_retention")
+        or policy_meta.get("zero_data_retention")
+    )
     if zdr and default_mode == "require_stateful_anchor" and cont.get("requires_upstream_store", True):
         raise ValueError("CONTINUATION_FORBIDDEN_BY_ZDR_POLICY: ZDR supply cannot require upstream stateful anchor")
 

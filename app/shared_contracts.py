@@ -18,6 +18,20 @@ class CacheDecisionError(RuntimeError):
         return value
 
 
+class ContinuationDecisionError(RuntimeError):
+    def __init__(self, code: str, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.reason = reason
+
+    def public_detail(self) -> dict[str, Any]:
+        value: dict[str, Any] = {"code": self.code, "message": self.message}
+        if self.reason:
+            value["reason"] = self.reason
+        return value
+
+
 @dataclass(frozen=True)
 class ExecutionFence:
     owner: str

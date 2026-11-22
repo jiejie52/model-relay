@@ -271,6 +271,7 @@
         "inlineData"
       ],
       "continuation": {
+        "anchor_class": "immutable_tree_anchor",
         "request_anchor_field": "previous_interaction_id",
         "response_anchor_field": "id",
         "wire_endpoint": "/v1beta/interactions"
@@ -314,6 +315,18 @@
       }
     }
   ],
+  "continuation_policies": [
+    {
+      "policy_id": "default-prefer-stateful-anchor",
+      "revision": "8.0.0-draft",
+      "default_mode": "prefer_stateful_anchor",
+      "allow_request_override": false,
+      "allow_stateless_fallback_pre_dispatch": true,
+      "allow_head_mismatch_reopen": true,
+      "invalidate_on_affinity_rotation": false,
+      "max_active_anchors_per_session": 128
+    }
+  ],
   "offerings": [
     {
       "offering_id": "gemini-2.5-pro-google-official",
@@ -347,6 +360,7 @@
       "capability_contract_id": "gemini-2.5-pro-google-interactions-capability",
       "protocol_profile_id": "gemini-interactions-google-official",
       "cache_policy_id": "google-official-session-cache",
+      "continuation_policy_id": "default-prefer-stateful-anchor",
       "deployment_id": "railway",
       "priority": 15,
       "requires_file_adapter": true,

@@ -11,7 +11,7 @@ from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MOD
 from app.core.idempotency import stable_hash
 
 COMPILER_VERSION = 'relay-excel/8.9.0'
-SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
+SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算','续接模式','锚点保留时长秒数')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
 from app.control_plane.governance.thinking_mappings import FIELDS as THINKING_FIELDS, CONTRACT_OPTIONAL, compile_thinking_mappings
 
@@ -100,6 +100,7 @@ def compile_workbook(content, settings):
         scopes[env]=(value(row,'部署ID'),parts(value(row,'管理提供方')))
     base=ModelControlPlane._builtin(settings)
     connections=dict(base.connections); profiles=dict(base.protocol_profiles); contracts=dict(base.capability_contracts); policies=dict(base.cache_policies)
+    continuation_policies=dict(getattr(base,'continuation_policies',{}))
     conn_rows=unique(ext['连接配置'],'连接ID')
     for cid,row in conn_rows.items():
         protocol=value(row,'协议族'); auth=value(row,'鉴权方式'); credential=value(row,'凭据引用')
@@ -138,7 +139,7 @@ def compile_workbook(content, settings):
         if source=='first_party_native_payload' and (value(row,'协议族') not in ('gemini_native', 'gemini_interactions') or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
         profiles[pid]=ModelControlPlane._profile_from_mapping({'profile_id':pid,'revision':COMPILER_VERSION,'protocol':value(row,'协议族'),
             **history_material_capability(value(row,'协议族')),
-            'cache':{},'continuation':({'request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if value(row,'协议族')=='gemini_interactions' else {}),'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
+            'cache':{},'continuation':({'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if value(row,'协议族')=='gemini_interactions' else {}),'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
                 'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
     extra_thinking=unique(ext['思考合同配置'],'合同ID')
@@ -226,8 +227,24 @@ def compile_workbook(content, settings):
             'mechanism_profiles':{mech:{'verification_status':'unverified','minimum_cacheable_tokens':cache['计划门槛 Token'] or 1024,
                 'threshold_mode':'count_tokens' if mech=='stateful_resource' else 'provider_enforced','final_threshold_guard':True,
                 'ttl_seconds':(cache['资源有效期 分钟'] or 60)*60} for mech in mechanisms}}
+        raw_cont_mode = value(binding, '续接模式', True)
+        cont_mode_map = {
+            '关闭': 'off', 'off': 'off',
+            '优先锚点': 'prefer_stateful_anchor', 'prefer_stateful_anchor': 'prefer_stateful_anchor',
+            '强制锚点': 'require_stateful_anchor', 'require_stateful_anchor': 'require_stateful_anchor',
+        }
+        if raw_cont_mode is not None:
+            if raw_cont_mode not in cont_mode_map:
+                fail(binding, '续接模式', '仅支持 关闭 / 优先锚点 / 强制锚点')
+            cont_mode = cont_mode_map[raw_cont_mode]
+        else:
+            cont_mode = 'prefer_stateful_anchor' if connection.protocol == 'gemini_interactions' else 'off'
+        cont_ttl_seconds = number(binding, '锚点保留时长秒数', optional=True, minimum=60)
+        if cont_ttl_seconds is None:
+            cont_ttl_seconds = 86400
         continuation_contract = {}
-        if connection.protocol == 'gemini_interactions':
+        cont_policy_id = None
+        if connection.protocol == 'gemini_interactions' or cont_mode != 'off':
             continuation_contract = {
                 'version': 'relay-continuation-contract/1',
                 'anchor_class': 'immutable_tree_anchor',
@@ -237,18 +254,39 @@ def compile_workbook(content, settings):
                 'requires_upstream_store': True,
                 'forbid_when_zero_retention': True,
                 'mutually_exclusive_cache_mechanisms': ['stateful_resource'],
-                'retention_ttl_seconds': 86400,
+                'retention_ttl_seconds': cont_ttl_seconds,
                 'anchor_safety_margin_seconds': 300,
                 'head_invariants': ['instructions', 'tools', 'account_scope_id', 'model'],
                 're_specify_head_on_delta': True,
                 'requires_thought_signature_on_replay': True,
                 'max_delta_turns': 64,
             }
+            cont_policy_id = 'excel-cont-policy:' + stable_hash([model, env, channel])[:20]
+            continuation_policies[cont_policy_id] = ModelControlPlane._continuation_policy_from_mapping({
+                'policy_id': cont_policy_id,
+                'revision': COMPILER_VERSION,
+                'default_mode': cont_mode,
+                'allow_request_override': False,
+                'allow_stateless_fallback_pre_dispatch': True,
+                'allow_head_mismatch_reopen': True,
+                'invalidate_on_affinity_rotation': False,
+                'max_active_anchors_per_session': 128,
+            })
         contracts[cap_id]=replace(contract,contract_id=cap_id,cache=cache_contract,continuation=continuation_contract)
         profile_id='excel-profile:'+stable_hash([profile.profile_id,connection.connection_id])[:20]
         profiles[profile_id]=replace(profile,profile_id=profile_id,cache={'supported_mechanisms':sorted(RESOURCE_MECHANISMS[connection.protocol]),
             **({'token_count_connection_id':connection.connection_id} if connection.protocol=='gemini_native' else {}),'composite_mode':'mutually_exclusive'},
-            continuation=({'request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if connection.protocol=='gemini_interactions' else {}))
+            continuation=({'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if connection.protocol=='gemini_interactions' else {}))
+        from app.control_plane.continuation_contracts import validate_continuation_cross_contract
+        try:
+            validate_continuation_cross_contract(
+                connection=connection,
+                capability=contracts[cap_id],
+                profile=profiles[profile_id],
+                policy=continuation_policies.get(cont_policy_id),
+            )
+        except ValueError as exc:
+            fail(binding, '续接配置', str(exc))
         policies[policy_id]=ModelControlPlane._cache_policy_from_mapping({'policy_id':policy_id,'revision':COMPILER_VERSION,'scope':'session',
             'mechanism_preference':mechanisms,'auto_prepare_failure':'uncached_same_context' if cache['自动准备失败时']=='原文无缓存继续' else 'fail',
             'metadata':{'default_mode':{'关闭':'off','自动':'auto','强制':'on'}[cache['默认策略']] if mechanisms else 'off','allow_force':cache['可选强制']=='是'}})
@@ -262,6 +300,7 @@ def compile_workbook(content, settings):
         supplies[sid]=ModelControlPlane._offering_from_mapping({'offering_id':sid,'provider':provider,'model_pattern':model,
             'supply_group_id':value(binding,'供应组ID',True),'quota':quota,
             'connection_id':connection.connection_id,'capability_contract_id':cap_id,'protocol_profile_id':profile_id,'cache_policy_id':policy_id,
+            **({'continuation_policy_id':cont_policy_id} if cont_policy_id else {}),
             'deployment_id':deployment,'priority':10000-row['顺位'],'enabled':enabled,
             'requires_file_adapter':'provider_files_api' in contract.metadata['material_transport']['supported_material_transports'],
             'observed_model_policy':'strict','metadata':{'managed_v2':True,'upstream_model':row['渠道侧模型名'],
@@ -308,5 +347,5 @@ def compile_workbook(content, settings):
     metadata={'source':'excel-auto','compiler_version':COMPILER_VERSION,'workbook_sha256':sha256(content).hexdigest(),
         'configuration_hash':stable_hash([sha256(content).hexdigest(),COMPILER_VERSION,settings.deployment_id]),'managed_model_groups':list(groups.values())}
     plane=ModelControlPlane(revision='excel-'+metadata['configuration_hash'][:20],connections=connections.values(),capability_contracts=contracts.values(),
-        protocol_profiles=profiles.values(),cache_policies=policies.values(),offerings=supplies.values(),release_metadata=metadata)
+        protocol_profiles=profiles.values(),cache_policies=policies.values(),continuation_policies=continuation_policies.values(),offerings=supplies.values(),release_metadata=metadata)
     return plane,targets

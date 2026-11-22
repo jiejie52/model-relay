@@ -8,8 +8,10 @@ from app.control_plane.definitions import ModelControlPlane
 from app.core.idempotency import stable_hash
 
 ENTITY_PARSERS = {"connections": "_connection_from_mapping", "capability_contracts": "_contract_from_mapping",
-    "protocol_profiles": "_profile_from_mapping", "cache_policies": "_cache_policy_from_mapping"}
-ID_FIELDS = {"connections": "connection_id", "capability_contracts": "contract_id", "protocol_profiles": "profile_id", "cache_policies": "policy_id"}
+    "protocol_profiles": "_profile_from_mapping", "cache_policies": "_cache_policy_from_mapping",
+    "continuation_policies": "_continuation_policy_from_mapping"}
+ID_FIELDS = {"connections": "connection_id", "capability_contracts": "contract_id", "protocol_profiles": "profile_id",
+    "cache_policies": "policy_id", "continuation_policies": "policy_id"}
 FORBIDDEN = {"api_key", "apikey", "secret", "access_token", "authorization", "python_class", "class_path", "script", "wire_template"}
 
 def safe_declaration(value):
@@ -49,8 +51,10 @@ def certification_identity(plane, supply):
     contract = plane.contract(supply.capability_contract_id)
     profile = plane.protocol_profile(supply.protocol_profile_id)
     policy = plane.cache_policy(supply.cache_policy_id)
+    cont_policy = plane.continuation_policy(supply.continuation_policy_id)
     return {"connection": connection.canonical(), "capability": contract.canonical(),
         "profile": profile.canonical(), "cache_policy": policy.canonical() if policy else None,
+        **({"continuation_policy": cont_policy.canonical()} if cont_policy else {}),
         "provider": supply.provider, "model": supply.model_pattern,
         "upstream_model": supply.metadata.get("upstream_model", supply.model_pattern),
         "execution_authorization": supply.metadata.get("execution_authorization", {})}
@@ -58,11 +62,17 @@ def certification_identity(plane, supply):
 
 def certification_request(declaration, *, settings):
     plane = merge_entities(ModelControlPlane._builtin(settings), declaration, settings)
+    def _caps(row):
+        contract = plane.contract(row["capability_contract_id"])
+        cont = contract.continuation or {}
+        has_cont = cont.get("verification_status") == "verified" and cont.get("anchor_class") not in (None, "", "none")
+        return sorted({"inference", *contract.cache.get("supported_mechanisms", []),
+            *contract.metadata.get("material_transport", {}).get("supported_material_transports", []),
+            *(["file_uri_allowed"] if contract.cache.get("explicit_cache_material_mode") == "file_uri_allowed" else []),
+            *(["stateful_continuation"] if has_cont else [])})
     return {row["offering_id"]: {"status": "draft", "supply_hash": stable_hash(certification_identity(plane, plane.offerings[row["offering_id"]])),
         "evidence_ref": None, "reviewed_by": None, "valid_until": None,
-        "capabilities": sorted({"inference", *plane.contract(row["capability_contract_id"]).cache.get("supported_mechanisms", []),
-            *plane.contract(row["capability_contract_id"]).metadata.get("material_transport", {}).get("supported_material_transports", []),
-            *(["file_uri_allowed"] if plane.contract(row["capability_contract_id"]).cache.get("explicit_cache_material_mode") == "file_uri_allowed" else [])})}
+        "capabilities": _caps(row)}
         for row in declaration.get("offerings", [])}
 
 
@@ -151,7 +161,13 @@ def validate_supply(plane, supply, evidence):
         raise ValueError("External URL transport needs an explicit aggregate threshold")
     file_mode = contract.cache.get("explicit_cache_material_mode", "inline_bytes_only")
     if file_mode not in {"inline_bytes_only", "file_uri_allowed"}: raise ValueError("Unknown cache material mode")
+    cont_policy = plane.continuation_policy(supply.continuation_policy_id)
+    from app.control_plane.continuation_contracts import validate_continuation_cross_contract
+    validate_continuation_cross_contract(connection=connection, capability=contract, profile=profile, policy=cont_policy)
     required = {"inference", *declared, *modes}
+    cont = contract.continuation or {}
+    if cont.get("verification_status") == "verified" and cont.get("anchor_class") not in (None, "", "none"):
+        required.add("stateful_continuation")
     if file_mode == "file_uri_allowed":
         if profile.protocol != "gemini_native" or "provider_files_api" not in modes or "stateful_resource" not in declared:
             raise ValueError("File URI caching needs independently supported file transport and stateful cache")
@@ -164,7 +180,7 @@ def validate_supply(plane, supply, evidence):
     if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc): raise ValueError("Certification is expired")
     authorization = supply.metadata.get("execution_authorization", {})
     headers = profile.metadata.get("response_evidence_headers", {})
-    first_party=(authorization.get('evidence_source_mode')=='first_party_native_payload' and profile.metadata.get('evidence_source_mode')=='first_party_native_payload' and connection.protocol=='gemini_native')
+    first_party=(authorization.get('evidence_source_mode')=='first_party_native_payload' and profile.metadata.get('evidence_source_mode')=='first_party_native_payload' and connection.protocol in {'gemini_native', 'gemini_interactions'})
     if authorization.get("require_native_constraint_evidence") and not first_party and not headers.get("native_constraint_enforced"):
         raise ValueError("Native evidence policy has no certified evidence mapping")
     if authorization.get("on_unknown_billing") == "reject" and authorization.get("expected_billing_tier") is not None and not first_party and not headers.get("billing_tier"):
@@ -197,7 +213,8 @@ def build_declaration_candidate(declaration, *, settings, revision, certificatio
             refs.append(ref)
         supplies.append(value)
     return {"status": "review", "mode": "merge", "revision": revision,
-        **{name: [getattr(plane, name)[x[ID_FIELDS[name]]].canonical() for x in declaration.get(name, [])] for name in ENTITY_PARSERS},
+        **{name: [getattr(plane, name)[x[ID_FIELDS[name]]].canonical() for x in declaration.get(name, [])]
+           for name in ENTITY_PARSERS if name != "continuation_policies" or declaration.get("continuation_policies")},
         "offerings": supplies, "release_metadata": {"source": "supply-declarations", "base_control_plane_hash": base.control_plane_hash,
             "declarations_sha256": digest(declaration), "managed_model_groups": [groups[k] for k in sorted(groups)],
             "approved_supply_evidence_refs": sorted(set(refs)), "certifications_sha256": digest(certs)}}

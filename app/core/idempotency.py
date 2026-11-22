@@ -11,10 +11,24 @@ CANONICAL_REQUEST_VERSIONS = {
     "relay-request/2.4",
     "relay-request/2.5",
 }
+V3_FENCED_REQUEST_VERSIONS = frozenset({
+    "relay-request/2.3",
+    "relay-request/2.4",
+    "relay-request/2.5",
+})
 SUPPORTED_REQUEST_VERSIONS = {
     "relay-request/2.1",
     *CANONICAL_REQUEST_VERSIONS,
 }
+_FORBIDDEN_DYNAMIC_CONTINUATION_KEYS = frozenset({
+    "previous_interaction_id",
+    "previous_response_id",
+    "selected_anchor_id",
+    "active_anchor_id",
+    "parent_anchor_id",
+    "upstream_handle",
+    "_relay_continuation_execution",
+})
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -158,8 +172,18 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     if snapshot.get("placement_contract_version") is not None:
         from app.core.material_placement import material_identity
         identity["material_placement_identity"] = material_identity(snapshot)
-    if version == "relay-request/2.5" or snapshot.get("continuation_intent_plan") is not None:
-        plan = snapshot.get("continuation_intent_plan")
+    plan = snapshot.get("continuation_intent_plan")
+    if isinstance(plan, dict):
+        for forbidden_key in _FORBIDDEN_DYNAMIC_CONTINUATION_KEYS:
+            if plan.get(forbidden_key) is not None:
+                raise ValueError(f"Dynamic continuation handle {forbidden_key!r} must never enter request_identity")
+    plan_enabled = False
+    if plan is not None:
+        res_status = plan.get("resolution_status") if isinstance(plan, dict) else getattr(plan, "resolution_status", None)
+        c_mode = plan.get("continuation_mode") if isinstance(plan, dict) else getattr(plan, "continuation_mode", None)
+        if res_status not in (None, "disabled") or c_mode not in (None, "off", "none", "disabled"):
+            plan_enabled = True
+    if snapshot.get("continuation_mode_explicit") is True or plan_enabled:
         plan_hash = None
         if hasattr(plan, "plan_hash"):
             plan_hash = plan.plan_hash
@@ -168,4 +192,21 @@ def request_identity(snapshot: dict[str, Any]) -> str:
         elif snapshot.get("continuation_plan_hash") is not None:
             plan_hash = snapshot.get("continuation_plan_hash")
         identity["continuation_plan_hash"] = plan_hash
+        if snapshot.get("continuation_contract_hash") is not None:
+            identity["continuation_contract_hash"] = snapshot.get("continuation_contract_hash")
+        if snapshot.get("continuation_policy_hash") is not None:
+            identity["continuation_policy_hash"] = snapshot.get("continuation_policy_hash")
+
+    def _assert_no_forbidden_handles(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key in _FORBIDDEN_DYNAMIC_CONTINUATION_KEYS and val is not None:
+                    raise ValueError(f"Dynamic continuation handle {key!r} must never enter request_identity")
+                _assert_no_forbidden_handles(val)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                _assert_no_forbidden_handles(item)
+
+    _assert_no_forbidden_handles(snapshot)
+    _assert_no_forbidden_handles(identity)
     return stable_hash(identity)

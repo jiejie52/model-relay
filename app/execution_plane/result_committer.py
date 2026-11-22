@@ -6,15 +6,11 @@ import logging
 from typing import Any
 
 from app.core.context_codec import canonical_structure, freeze_history_turn
-from app.core.idempotency import stable_hash
+from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS, stable_hash
 from app.protocol_adapters.base import ProviderRequestError
 from app.observability import elapsed_ms, error as log_error, info as log_info, now_ms
 from app.execution_plane.structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
 from app.utils import json_bytes, truncate_utf8, utcnow
-from uuid import uuid4
-
-from app.core.continuation_fingerprint import build_parent_head_fingerprint
-from app.runtime.continuation_contracts import ContinuationAnchorRecord
 
 
 logger = logging.getLogger("model-relay-runtime")
@@ -74,7 +70,7 @@ class ResultCommitter:
         cumulative_history = snapshot.get("history_mode", session.get("history_mode", "cumulative")) != "ephemeral_turn"
         fence = plan.execution_fence
         lease_owner, lease_epoch = (fence.owner, fence.epoch) if fence else (None, None)
-        is_v3 = snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}
+        is_v3 = snapshot.get("schema_version") in V3_FENCED_REQUEST_VERSIONS
         raw_object_id, output_object_id = fact.provisional_raw_object_id, fact.provisional_output_object_id
         execution_started_ms = now_ms()
         self._check_observed_contract(
@@ -202,72 +198,28 @@ class ResultCommitter:
         effective_policy = snapshot.get("context_policy") or session.get("context_policy")
         topology = (continuation_intent.get("topology") or {}) if isinstance(continuation_intent, dict) else {}
         actual_binding = thaw_json(fact.continuation_binding) or {}
-        is_interactions = snapshot.get("protocol") == "gemini_interactions"
-        if (is_interactions and topology.get("reusable_on_commit") and actual_binding.get("store_upstream_state")
-                and effective_policy == "conversation" and history_object_id is not None):
-            if ((result.observed or {}).get("interaction_stored") is not True
-                    or (result.observed or {}).get("previous_interaction_id") != actual_binding.get("upstream_handle")):
-                raise ExecutionConflictError("Interaction dispatch differs from the archived continuation binding")
+        can_commit_anchor = (
+            isinstance(continuation_intent, dict)
+            and continuation_intent.get("schema_version") == "relay-continuation-plan/2"
+            and topology.get("reusable_on_commit") is True
+            and actual_binding.get("store_upstream_state") is True
+            and effective_policy == "conversation"
+            and history_object_id is not None
+        )
+        if can_commit_anchor:
+            observed = result.observed or {}
+            stored_ok = observed.get("continuation_stored", observed.get("interaction_stored")) is True
+            prev_ref = observed.get("previous_anchor_ref", observed.get("previous_interaction_id"))
+            if not stored_ok or prev_ref != actual_binding.get("upstream_handle"):
+                raise ExecutionConflictError("Continuation dispatch differs from the archived continuation binding")
             if isinstance(result.response_id, str) and result.response_id.strip():
-                continuation_anchor = self._interactions_anchor(
+                continuation_anchor = self._build_committed_anchor(
                     snapshot, topology, actual_binding, new_history, observation, request_row, result.response_id,
                 )
-        elif (not is_interactions and str(c_mode).lower() != "off" and cumulative_history
-              and session.get("context_policy") == "conversation" and effective_policy == "conversation"):
-            parent_aid = None
-            if isinstance(continuation_intent, dict):
-                parent_aid = continuation_intent.get("parent_anchor_id")
-            elif continuation_intent is not None:
-                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
-
-            anchor_id = str(uuid4())
-            new_history_version = int(request_row["expected_history_version"]) + 1
-            instructions = (
-                snapshot.get("instructions")
-                or session.get("instructions")
-                or session.get("system_instructions")
-            )
-            head_fp = build_parent_head_fingerprint(new_history, system_instructions=instructions)
-
-            upstream_h = (
-                (result.observed or {}).get("upstream_handle")
-                or (result.observed or {}).get("continuation_handle")
-                or observation.get("upstream_handle")
-                or (observation.get("continuation_summary") or {}).get("upstream_handle")
-            )
-            mechanism = (
-                (observation.get("continuation_summary") or {}).get("mechanism")
-                or (observation.get("_relay_continuation") or {}).get("mechanism")
-                or c_mode
-                or "auto"
-            )
-            anchor_meta = {
-                **({"parent_anchor_id": parent_aid} if parent_aid else {}),
-                "created_by_request_id": request_id,
-            }
-            anchor_rec = ContinuationAnchorRecord(
-                anchor_id=anchor_id,
-                session_id=session_id,
-                history_version=new_history_version,
-                fingerprint=head_fp,
-                mechanism=str(mechanism),
-                upstream_handle=upstream_h,
-                tenant_id=str(request_row.get("tenant_id") or session.get("tenant_id") or ""),
-                conversation_hash=str(request_row.get("conversation_hash") or session.get("conversation_hash") or ""),
-                turn_index=len(new_history) - 1,
-                metadata=anchor_meta,
-            )
-            continuation_anchor = anchor_rec.to_dict()
-            if parent_aid:
-                continuation_anchor["parent_anchor_id"] = parent_aid
-            continuation_anchor["head_fingerprint"] = head_fp
-            continuation_anchor["provider"] = snapshot.get("provider")
-            continuation_anchor["connection_id"] = snapshot.get("connection_id")
-            continuation_anchor["account_scope_hash"] = snapshot.get("account_scope_hash")
-            continuation_anchor["state"] = "active"
 
         continuation_summary = None
-        if actual_binding.get("schema_version") == "relay-continuation-binding/2":
+        if (actual_binding.get("schema_version") == "relay-continuation-binding/2"
+                and actual_binding.get("effective_mode") not in (None, "disabled")):
             continuation_summary = {
                 "continuation_mode": c_mode,
                 "mechanism": actual_binding["mechanism"],
@@ -277,27 +229,33 @@ class ResultCommitter:
                 "fallback_occurred": actual_binding["fallback_occurred"],
                 "fallback_reason": actual_binding["fallback_reason"],
                 "binding_hash": actual_binding["binding_hash"],
-                "plan_hash": continuation_intent.get("plan_hash"),
+                "plan_hash": (
+                    continuation_intent.get("plan_hash")
+                    if isinstance(continuation_intent, dict)
+                    else getattr(continuation_intent, "plan_hash", None)
+                ),
                 "details": {"effective_mode": actual_binding["effective_mode"]},
             }
         elif observation.get("continuation_summary") is not None:
             continuation_summary = dict(observation["continuation_summary"])
-        elif observation.get("_relay_continuation") is not None:
-            continuation_summary = dict(observation["_relay_continuation"])
-        elif continuation_anchor is not None or str(c_mode).lower() != "off":
-            parent_aid = None
-            if isinstance(continuation_intent, dict):
-                parent_aid = continuation_intent.get("parent_anchor_id")
-            elif continuation_intent is not None:
-                parent_aid = getattr(continuation_intent, "parent_anchor_id", None)
+        elif continuation_anchor is not None:
+            parent_aid = (
+                continuation_intent.get("parent_anchor_id")
+                if isinstance(continuation_intent, dict)
+                else getattr(continuation_intent, "parent_anchor_id", None)
+            )
             continuation_summary = {
                 "continuation_mode": c_mode,
-                "mechanism": str(mechanism) if continuation_anchor else "none",
-                "active_anchor_id": (continuation_anchor.get("anchor_id") if continuation_anchor else None),
-                "parent_anchor_id": parent_aid if continuation_anchor else None,
-                "bound_turns_count": len(new_history) if (continuation_anchor and 'new_history' in locals()) else None,
-                "fallback_occurred": False,
-                "plan_hash": (continuation_intent.get("plan_hash") if isinstance(continuation_intent, dict) else getattr(continuation_intent, "plan_hash", None)),
+                "mechanism": actual_binding.get("mechanism") or "none",
+                "active_anchor_id": continuation_anchor.get("anchor_id"),
+                "parent_anchor_id": continuation_anchor.get("parent_anchor_id") or parent_aid,
+                "bound_turns_count": len(new_history) if "new_history" in locals() else None,
+                "fallback_occurred": bool(actual_binding.get("fallback_occurred", False)),
+                "plan_hash": (
+                    continuation_intent.get("plan_hash")
+                    if isinstance(continuation_intent, dict)
+                    else getattr(continuation_intent, "plan_hash", None)
+                ),
             }
         if continuation_summary is not None:
             compact_result["_relay_continuation"] = continuation_summary
@@ -351,7 +309,7 @@ class ResultCommitter:
         return compact_result
 
     @staticmethod
-    def _interactions_anchor(snapshot, topology, binding, history, observation, request_row, upstream_handle):
+    def _build_committed_anchor(snapshot, topology, binding, history, observation, request_row, upstream_handle):
         from datetime import datetime, timedelta
         from app.core.continuation_fingerprint import continuation_material_references, extend_native_prefix
 
@@ -365,6 +323,11 @@ class ResultCommitter:
                 expiry = min(expiry, datetime.fromisoformat(material_expiry))
         chain = topology["turn_prefix_chain"]
         head = topology["parent_head_fingerprint"]
+        affinity_audit = (
+            observation.get("affinity_audit")
+            or (observation.get("cache_usage") or {}).get("affinity_audit")
+            or {}
+        )
         return {
             "schema_version": "relay-continuation-anchor/2",
             "anchor_id": str(request_row["id"]),
@@ -376,8 +339,14 @@ class ResultCommitter:
             "upstream_handle": upstream_handle,
             "connection_spec_hash": snapshot["connection_spec_hash"],
             "account_scope_hash": snapshot["account_scope_id"],
+            "anchor_class": binding.get("anchor_class") or topology.get("anchor_class") or "immutable_tree_anchor",
+            "affinity_epoch": (affinity_audit.get("affinity_epoch") if affinity_audit.get("affinity_epoch") is not None else observation.get("affinity_epoch")),
+            "protocol": snapshot.get("protocol"),
+            "model": snapshot.get("model"),
             "expires_at": expiry.isoformat(),
         }
+
+    _interactions_anchor = _build_committed_anchor
 
     @staticmethod
     def _check_observed_contract(
@@ -485,8 +454,8 @@ class ResultCommitter:
                     key: value for key, value in binding.items() if key != "binding_hash"
                 })):
                     raise ExecutionConflictError("Archived continuation execution binding is missing or changed")
-                if (plan.snapshot.get("protocol") == "gemini_interactions"
-                        and plan.snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}
+                if (plan.snapshot.get("schema_version") in V3_FENCED_REQUEST_VERSIONS
+                        and binding.get("effective_mode") not in (None, "disabled")
                         and (row.get("sealed_continuation_binding") != binding
                              or row.get("prepared_payload_hash") != archive.get("seal_hash"))):
                     raise ExecutionConflictError("Archived continuation execution differs from the database seal")
@@ -503,7 +472,7 @@ class ResultCommitter:
             history_object_id=row.get("provisional_history_object_id"), result_object_id=row["provisional_result_object_id"],
             output_object_id=row.get("provisional_output_object_id"), compact_result=thaw_json(marker),
             provider_response_id=row.get("provider_response_id"), expected_history_version=int(row["expected_history_version"]))
-        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}:
+        if row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS:
             ok = await self.repo.complete_request_v3(**kwargs, fence_owner=active_fence.owner, fence_epoch=active_fence.epoch)
         else:
             ok = await self.repo.complete_request(**kwargs, lease_owner=active_fence.owner if active_fence else None,
@@ -521,7 +490,7 @@ class ResultCommitter:
             return None
         kwargs = dict(request_id=str(row["id"]), session_id=str(row["session_id"]), error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") in {"relay-request/2.3", "relay-request/2.4", "relay-request/2.5"}:
+        if row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS:
             return await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         return await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None,
                                           lease_epoch=fence.epoch if fence else None)

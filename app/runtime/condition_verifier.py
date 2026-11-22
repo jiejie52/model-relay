@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS
 from app.protocol_adapters.base import ProviderRequestError
 from app.observability import error as log_error
 
@@ -30,7 +31,7 @@ class ConditionVerifier:
             raise ExecutionConflictError("Only an unsent Request may enter the runtime")
         if current.get("status") in {"cancelled", "succeeded", "failed", "indeterminate"}:
             raise ExecutionConflictError("A terminal Request cannot enter the runtime")
-        if snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"} and plan.execution_fence is None:
+        if snapshot.get("schema_version") in V3_FENCED_REQUEST_VERSIONS and plan.execution_fence is None:
             raise ProviderRequestError("CACHE_BINDING_FENCE_REJECTED", "Cache-aware Request has no execution fence")
         if plan.execution_fence is not None:
             from datetime import datetime, timezone
@@ -137,7 +138,7 @@ class ConditionVerifier:
                     "ROUTE_BINDING_MISMATCH",
                     "Request route binding hash does not match the frozen Session route",
                 )
-            if str(snapshot.get("schema_version") or "") in {"relay-request/2.3", "relay-request/2.4"}:
+            if str(snapshot.get("schema_version") or "") in V3_FENCED_REQUEST_VERSIONS:
                 for key, code in (
                     ("protocol_profile_hash", "CACHE_CONTEXT_MISMATCH"),
                     ("cache_policy_hash", "CACHE_CONTEXT_MISMATCH"),

@@ -175,7 +175,8 @@ class PhysicalContextProjector:
         if state.snapshot.get("protocol") == "gemini_interactions":
             self.project_interactions(state)
 
-        state.cache_binding = None
+        if state.cache_binding_obj is None:
+            state.cache_binding = None
         if int(state.upgrade.get("version") or 0) >= 3:
             # Bind native URI/inline representations back to Canonical Material
             # solely for semantic-vs-wire divergence diagnosis.

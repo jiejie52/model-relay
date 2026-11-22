@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS, stable_hash
 from app.immutable import freeze_json, thaw_json
 
 from app.shared_connection_contract import frozen_connection_fields
@@ -11,7 +12,6 @@ def dispatch_input_digest(*, snapshot, session, history, material_ids, material_
                           cache_execution_binding, execution_fence, provider_physical_plan, affinity_headers,
                           connection_spec_hash=None,account_scope_id=None, material_occurrences=None, historical_bindings=None,
                           continuation_execution_binding=None):
-    from app.core.idempotency import stable_hash
     spec,scope=frozen_connection_fields(snapshot,(session.get('metadata') or {}).get('_relay_route'))
     if connection_spec_hash is not None and connection_spec_hash!=spec or account_scope_id is not None and account_scope_id!=scope:
         raise ValueError('Dispatch identity differs from frozen snapshot')
@@ -173,7 +173,7 @@ class RuntimeState:
             "explicit" if context_mode == "explicit" else "conversation")}
         state = cls(plan, row, model_session, snapshot, model_history, str(row["id"]), str(row["session_id"]),
                    list(dict.fromkeys(ids)), snapshot.get("provider")=="gemini" and snapshot.get("protocol", "gemini_native")=="gemini_native",
-                   snapshot.get("schema_version") in {"relay-request/2.3", "relay-request/2.4"}, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)
+                   snapshot.get("schema_version") in V3_FENCED_REQUEST_VERSIONS, plan.execution_fence, snapshot.get("cache_upgrade") or {}, started)
         if getattr(plan, "continuation_intent_plan", None) is not None:
             state.continuation_intent_plan = plan.continuation_intent_plan
         return state
