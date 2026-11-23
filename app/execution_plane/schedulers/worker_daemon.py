@@ -32,7 +32,7 @@ from app.protocol_adapters.factory import register_protocol_adapters
 from app.control_plane.catalog import RouteCatalog
 from app.execution_plane.route_resolver import RouteResolver
 from app.supabase import SupabaseBackend
-from app.v2_repository import RelayV2Repository
+from app.v2_repository import RelayV2Repository, verify_continuation_schema_at_startup
 from app.utils import utcnow
 from app.observability import configure_logging, info as log_info, warning as log_warning, error as log_error, now_ms, elapsed_ms
 
@@ -240,6 +240,7 @@ class RelayWorker:
         await self.backend.close()
 
     async def run_forever(self) -> None:
+        await verify_continuation_schema_at_startup(self.repo, role="worker", logger=logger)
         log_info(
             logger,
             "worker_started",

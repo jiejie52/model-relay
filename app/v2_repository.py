@@ -5,14 +5,153 @@ from uuid import UUID
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 
+from app.observability import error as log_error
 from app.repository import RelayRepository
+
+
+_CONTINUATION_SCHEMA_PROBES: tuple[tuple[str, str], ...] = (
+    (
+        "relay_continuation_anchors",
+        "id,source_request_id,covered_turn_count,covered_material_bindings,"
+        "connection_spec_hash,anchor_class,affinity_epoch,protocol,model,"
+        "invalidated_by_request_id,invalidation_reason,is_root_prefix,"
+        "covered_materials_digest,updated_at",
+    ),
+    (
+        "relay_anchor_pins",
+        "request_id,anchor_id,status,released_at",
+    ),
+    (
+        "relay_requests",
+        "id,sealed_continuation_binding,continuation_plan_object_id,"
+        "continuation_plan_hash,produced_anchor_id,continuation_binding_version,"
+        "continuation_binding_hash,parent_anchor_id",
+    ),
+)
+_CONTINUATION_SCHEMA_MIGRATION = "sql/019_continuation_schema_repair.sql"
+
+
+class ContinuationSchemaError(RuntimeError):
+    """Raised when Postgres/PostgREST lacks required continuation schema objects."""
+
+    def __init__(
+        self,
+        *,
+        table: str,
+        status_code: int,
+        supabase_error: dict[str, Any] | None = None,
+        raw_message: str | None = None,
+    ) -> None:
+        self.table = table
+        self.status_code = status_code
+        self.supabase_error = supabase_error
+        self.migration = _CONTINUATION_SCHEMA_MIGRATION
+        detail = (
+            str(supabase_error.get("message") or "").strip()
+            if isinstance(supabase_error, dict)
+            else str(raw_message or "").strip()
+        )
+        summary = f"Continuation database schema mismatch on table {table!r}"
+        if detail:
+            summary += f": {detail}"
+        summary += f". Apply {_CONTINUATION_SCHEMA_MIGRATION}."
+        super().__init__(summary)
+
+
+def _parse_supabase_schema_mismatch(exc: BaseException) -> tuple[bool, dict[str, Any] | None]:
+    from app.supabase import SupabaseError
+
+    if not isinstance(exc, SupabaseError) or exc.status_code not in {400, 404}:
+        return False, None
+    raw_body = (exc.body or "").strip()
+    parsed_dict: dict[str, Any] | None = None
+    if raw_body:
+        try:
+            parsed = json.loads(raw_body)
+            if isinstance(parsed, dict):
+                parsed_dict = parsed
+        except ValueError:
+            parsed_dict = None
+    code = str(parsed_dict.get("code") or "").upper() if parsed_dict else ""
+    message = str(parsed_dict.get("message") or raw_body).lower() if parsed_dict else raw_body.lower()
+    is_mismatch = (
+        code in {"42703", "42P01", "PGRST204", "PGRST205"}
+        or "does not exist" in message
+        or "could not find" in message
+    )
+    return is_mismatch, parsed_dict
+
+
+def log_continuation_schema_error(
+    logger: logging.Logger,
+    exc: ContinuationSchemaError,
+    **context: Any,
+) -> None:
+    """Emit structured diagnostics when continuation database schema is incomplete."""
+    log_error(
+        logger,
+        "continuation_schema_incompatible",
+        table=exc.table,
+        migration=exc.migration,
+        http_status=exc.status_code,
+        supabase_error=exc.supabase_error,
+        error_message=str(exc),
+        **context,
+    )
+
+
+async def verify_continuation_schema_at_startup(
+    repo: Any,
+    *,
+    role: str,
+    logger: logging.Logger,
+) -> bool:
+    """Probe continuation schema compatibility once at startup, logging only failures."""
+    if not hasattr(repo, "verify_continuation_schema"):
+        return True
+    try:
+        return bool(await repo.verify_continuation_schema())
+    except ContinuationSchemaError as exc:
+        log_continuation_schema_error(logger, exc, role=role)
+        return False
 
 
 class AdmissionUnavailable(RuntimeError):
     def __init__(self,reason): self.reason=reason;super().__init__(reason)
 
 class RelayV2Repository(RelayRepository):
+    _continuation_schema_verified: bool = False
+
+    async def verify_continuation_schema(self, *, force: bool = False) -> bool:
+        """Verify 016/017/018 continuation columns exist and cache positive confirmation."""
+        if getattr(self, "_continuation_schema_verified", False) and not force:
+            return True
+        from app.supabase import SupabaseError
+
+        for table, columns in _CONTINUATION_SCHEMA_PROBES:
+            try:
+                await self.backend.select(table, select=columns, limit=0)
+            except SupabaseError as exc:
+                is_mismatch, parsed_err = _parse_supabase_schema_mismatch(exc)
+                if is_mismatch:
+                    self._continuation_schema_verified = False
+                    raise ContinuationSchemaError(
+                        table=table,
+                        status_code=exc.status_code,
+                        supabase_error=parsed_err,
+                        raw_message=exc.body,
+                    ) from exc
+                # Transient Supabase errors (5xx/rate limit) must not poison
+                # startup or cache an unverified schema state.
+                return False
+            except Exception:
+                # Non-Supabase errors (e.g. partial test mocks or transient network
+                # glitches) leave verification pending rather than breaking boot.
+                return False
+        self._continuation_schema_verified = True
+        return True
     async def create_session(self,row):
         from app.supabase import SupabaseError
         quota=(row.get('metadata',{}).get('_relay_route') or {}).get('quota') or {}

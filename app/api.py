@@ -15,7 +15,7 @@ from app.config import get_settings
 from app.control_plane.definitions import ModelControlPlane
 from app.control_plane.snapshot import get_active_config_snapshot, verify_node_snapshot_compatibility
 from app.models import CancelResponse, JobStatusResponse, JobSubmitRequest, JobSubmitResponse
-from app.v2_repository import RelayV2Repository
+from app.v2_repository import RelayV2Repository, verify_continuation_schema_at_startup
 from app.security import require_owner_headers, require_relay_auth
 from app.storage_paths import job_object_path, session_material_prefix_path
 from app.supabase import SupabaseBackend, SupabaseError
@@ -200,6 +200,7 @@ async def lifespan(_: FastAPI):
     app.state.raw_error_recorder = raw_errors
     app.state.inline_executor = inline_executor
     app.state.worker_wake_notifier = WorkerWakeNotifier()
+    await verify_continuation_schema_at_startup(repo, role="api", logger=logger)
     log_info(
         logger,
         "api_started",

@@ -25,6 +25,7 @@ from app.persistence.object_storage import ObjectLocation
 from app.execution_plane.route_resolver import RouteBinding, RouteResolutionError
 from app.supabase import SupabaseError
 from app.v2_models import SessionRequestCreate
+from app.v2_repository import ContinuationSchemaError, log_continuation_schema_error
 
 
 from app.execution_plane.services import ExecutionRequestError
@@ -270,6 +271,21 @@ class RequestAcceptor:
             if existing.get("execution_mode") == "sync" and existing.get("provider_dispatch_state") in {"not_sent", "result_stored"}:
                 return await services.inline_scheduler.execute(existing)
             return existing
+
+        if not getattr(repo, "_continuation_schema_verified", True) and hasattr(repo, "verify_continuation_schema"):
+            try:
+                await repo.verify_continuation_schema()
+            except ContinuationSchemaError as exc:
+                log_continuation_schema_error(logger, exc, session_id=str(session_id))
+                raise ExecutionRequestError(
+                    status_code=503,
+                    detail={
+                        "code": "CONTINUATION_SCHEMA_NOT_INSTALLED",
+                        "migration": exc.migration,
+                        "table": exc.table,
+                        "message": str(exc),
+                    },
+                ) from exc
 
         pending_pin = None
         session_metadata = session.get("metadata") or {}
