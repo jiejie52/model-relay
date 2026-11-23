@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+import json
 import logging
+import httpx
 from app.execution_plane.plan_loader import ExecutionPlanLoader
 from app.execution_plane.result_committer import ResultCommitter
 from app.shared_contracts import ExecutionConflictError
@@ -10,12 +12,47 @@ from app.core.error_classification import error_source
 from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS
 from app.observability import error as log_error, exception_failure_class
 from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, execution_guard
+from app.supabase import SupabaseError
+from app.utils import compact_error_excerpt
 
 logger = logging.getLogger("model-relay-runtime")
 
 
-def _log_failure_observed(row, *, dispatch_state, exc, handling):
-    """Emit structured error diagnostics before any failure branch returns or persists."""
+def _supabase_error_fields(exc: BaseException) -> dict[str, object]:
+    """Extract structured Supabase/PostgREST error details without truncating JSON payloads."""
+    target = exc if isinstance(exc, SupabaseError) else exc.__cause__
+    if not isinstance(target, SupabaseError):
+        return {}
+    raw_body = (target.body or "").strip()
+    if not raw_body:
+        return {}
+    try:
+        parsed = json.loads(raw_body)
+    except ValueError:
+        return {"supabase_error_body": compact_error_excerpt(raw_body, 2048)}
+    if isinstance(parsed, (dict, list)):
+        return {"supabase_error": parsed}
+    return {"supabase_error_body": compact_error_excerpt(raw_body, 2048)}
+
+
+def is_transient_commit_failure(exc: BaseException) -> bool:
+    """Return True only for transient commit failures eligible for commit-only retry."""
+    if isinstance(exc, ExecutionLeaseLost):
+        return True
+    if isinstance(exc, (StructuredOutputError, ProviderRequestError, ExecutionConflictError)):
+        return False
+    if isinstance(exc, SupabaseError):
+        return exc.status_code in {408, 429} or exc.status_code >= 500
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.TransportError, ConnectionError)):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return is_transient_commit_failure(cause)
+    return False
+
+
+def log_failure_observed(row, *, dispatch_state, exc, handling):
+    """Emit structured error diagnostics when a request execution failure occurs."""
     log_error(
         logger,
         "request_execution_failure_observed",
@@ -30,6 +67,7 @@ def _log_failure_observed(row, *, dispatch_state, exc, handling):
         http_status=getattr(exc, "status_code", None),
         handling=handling,
         error_message=str(exc) or None,
+        **_supabase_error_fields(exc),
     )
 
 class RequestExecutionService:
@@ -73,9 +111,9 @@ class RequestExecutionService:
             heartbeat.cancel()
             await asyncio.gather(execution, heartbeat, return_exceptions=True)
 
-    async def record_failure(self, row, fence, exc):
-        if isinstance(exc, ExecutionLeaseLost):
-            _log_failure_observed(
+    async def record_failure(self, row, fence, exc, *, force_terminal_sync: bool = False):
+        if isinstance(exc, ExecutionLeaseLost) and not force_terminal_sync:
+            log_failure_observed(
                 row,
                 dispatch_state=row.get("provider_dispatch_state"),
                 exc=exc,
@@ -89,8 +127,8 @@ class RequestExecutionService:
             except Exception:
                 pass  # durable state remains recoverable after connectivity returns
             return
-        if isinstance(exc, ExecutionConflictError):
-            _log_failure_observed(
+        if isinstance(exc, ExecutionConflictError) and not force_terminal_sync:
+            log_failure_observed(
                 row,
                 dispatch_state=row.get("provider_dispatch_state"),
                 exc=exc,
@@ -102,28 +140,47 @@ class RequestExecutionService:
         current = await self.repo.get_request(row["id"]) or row
         state = current.get("provider_dispatch_state", "not_sent")
         contract_failure = isinstance(exc, (StructuredOutputError, ProviderRequestError))
-        if state == "result_stored" and not contract_failure:
-            _log_failure_observed(
+        if (
+            state == "result_stored"
+            and not contract_failure
+            and not force_terminal_sync
+            and is_transient_commit_failure(exc)
+        ):
+            log_failure_observed(
                 current,
                 dispatch_state=state,
                 exc=exc,
                 handling="preserved_result_stored_for_commit_recovery",
             )
-            # Raw facts are durable. Preserve commit-only recovery on timeouts
-            # or transient storage/database failures during finalization.
+            # Raw facts are durable. Preserve commit-only recovery on transient
+            # timeouts or 5xx/network failures during finalization.
             return
-        _log_failure_observed(
+        is_v3 = current.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS
+        if is_v3 and fence is None:
+            log_failure_observed(
+                current,
+                dispatch_state=state,
+                exc=exc,
+                handling="missing_fence_for_terminal_failure",
+            )
+            return
+        log_failure_observed(
             current,
             dispatch_state=state,
             exc=exc,
             handling="persist_terminal_failure",
         )
-        error = await self.errors.record(exc=exc, source=error_source(exc), tenant_id=row["tenant_id"],
-            conversation_hash=row["conversation_hash"], session_id=row["session_id"], request_id=row["id"])
+        error = await self.errors.record(exc=exc, source=error_source(exc), tenant_id=current["tenant_id"],
+            conversation_hash=current["conversation_hash"], session_id=current["session_id"], request_id=current["id"])
+        if state == "result_stored":
+            if current.get("provisional_result_object_id") and not error.get("provider_success_object_id"):
+                error["provider_success_object_id"] = current["provisional_result_object_id"]
+            if current.get("provisional_output_object_id") and not error.get("provider_output_object_id"):
+                error["provider_output_object_id"] = current["provisional_output_object_id"]
         unknown = state == "dispatch_started" and not contract_failure
-        kwargs = dict(request_id=row["id"], session_id=row["session_id"], error=error,
+        kwargs = dict(request_id=current["id"], session_id=current["session_id"], error=error,
                       status="indeterminate" if unknown else "failed", release_session=not unknown)
-        if row.get("request_identity_version") in V3_FENCED_REQUEST_VERSIONS:
+        if is_v3:
             await self.repo.fail_request_v3(**kwargs, fence_owner=fence.owner, fence_epoch=fence.epoch)
         else:
             await self.repo.fail_request(**kwargs, lease_owner=fence.owner if fence else None, lease_epoch=fence.epoch if fence else None)
