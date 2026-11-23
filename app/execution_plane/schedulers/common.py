@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import logging
 from app.execution_plane.plan_loader import ExecutionPlanLoader
 from app.execution_plane.result_committer import ResultCommitter
 from app.shared_contracts import ExecutionConflictError
@@ -7,7 +8,29 @@ from app.execution_plane.structured_output import StructuredOutputError
 from app.protocol_adapters.base import ProviderRequestError
 from app.core.error_classification import error_source
 from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS
+from app.observability import error as log_error, exception_failure_class
 from app.runtime.execution_guard import ExecutionGuard, ExecutionLeaseLost, execution_guard
+
+logger = logging.getLogger("model-relay-runtime")
+
+
+def _log_failure_observed(row, *, dispatch_state, exc, handling):
+    """Emit structured error diagnostics before any failure branch returns or persists."""
+    log_error(
+        logger,
+        "request_execution_failure_observed",
+        exc_info=exc,
+        request_id=row.get("id"),
+        session_id=row.get("session_id"),
+        execution_mode=row.get("execution_mode"),
+        provider_dispatch_state=dispatch_state,
+        exception_type=type(exc).__name__,
+        failure_class=exception_failure_class(exc),
+        failure_code=getattr(exc, "code", None),
+        http_status=getattr(exc, "status_code", None),
+        handling=handling,
+        error_message=str(exc) or None,
+    )
 
 class RequestExecutionService:
     def __init__(self, runtime, errors, repo, settings):
@@ -52,6 +75,12 @@ class RequestExecutionService:
 
     async def record_failure(self, row, fence, exc):
         if isinstance(exc, ExecutionLeaseLost):
+            _log_failure_observed(
+                row,
+                dispatch_state=row.get("provider_dispatch_state"),
+                exc=exc,
+                handling="reconcile_lease_lost",
+            )
             # Only authoritative reconciliation may resolve an expired lease;
             # this executor cannot use its stale fence to publish a terminal fact.
             try:
@@ -61,6 +90,12 @@ class RequestExecutionService:
                 pass  # durable state remains recoverable after connectivity returns
             return
         if isinstance(exc, ExecutionConflictError):
+            _log_failure_observed(
+                row,
+                dispatch_state=row.get("provider_dispatch_state"),
+                exc=exc,
+                handling="ignored_execution_conflict",
+            )
             # The execution right may have changed. Stale executors cannot
             # manufacture another right or overwrite another executor's facts.
             return
@@ -68,9 +103,21 @@ class RequestExecutionService:
         state = current.get("provider_dispatch_state", "not_sent")
         contract_failure = isinstance(exc, (StructuredOutputError, ProviderRequestError))
         if state == "result_stored" and not contract_failure:
+            _log_failure_observed(
+                current,
+                dispatch_state=state,
+                exc=exc,
+                handling="preserved_result_stored_for_commit_recovery",
+            )
             # Raw facts are durable. Preserve commit-only recovery on timeouts
             # or transient storage/database failures during finalization.
             return
+        _log_failure_observed(
+            current,
+            dispatch_state=state,
+            exc=exc,
+            handling="persist_terminal_failure",
+        )
         error = await self.errors.record(exc=exc, source=error_source(exc), tenant_id=row["tenant_id"],
             conversation_hash=row["conversation_hash"], session_id=row["session_id"], request_id=row["id"])
         unknown = state == "dispatch_started" and not contract_failure
