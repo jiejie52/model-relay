@@ -1261,6 +1261,51 @@ class RelayV2Repository(RelayRepository):
             order="covered_turn_count.desc,created_at.desc,id.asc",
         )
 
+    async def has_tainted_mutable_container(
+        self,
+        *,
+        session_id: str | UUID,
+        tenant_id: str | None = None,
+        conversation_hash: str | None = None,
+        exclude_request_id: str | UUID | None = None,
+    ) -> bool:
+        """Return whether any prior post-dispatch outcome tainted this session's mutable container."""
+        base_filters: dict[str, str] = {"session_id": f"eq.{session_id}"}
+        if tenant_id is not None:
+            base_filters["tenant_id"] = f"eq.{tenant_id}"
+        if conversation_hash is not None:
+            base_filters["conversation_hash"] = f"eq.{conversation_hash}"
+        if exclude_request_id is not None:
+            base_filters["id"] = f"neq.{exclude_request_id}"
+        indeterminate_rows = await self.backend.select(
+            "relay_requests",
+            select="id",
+            filters={**base_filters, "status": "eq.indeterminate"},
+            limit=1,
+        )
+        if indeterminate_rows:
+            return True
+        dispatch_rows = await self.backend.select(
+            "relay_requests",
+            select="id,sealed_continuation_binding",
+            filters={
+                **base_filters,
+                "status": "in.(failed,cancelled)",
+                "provider_dispatch_state": "in.(dispatch_started,result_stored)",
+            },
+            order="created_at.desc",
+            limit=50,
+        )
+        for row in dispatch_rows:
+            binding = row.get("sealed_continuation_binding") or {}
+            if (
+                isinstance(binding, dict)
+                and binding.get("anchor_class") == "mutable_session_container"
+                and binding.get("store_upstream_state") is True
+            ):
+                return True
+        return False
+
     async def seal_continuation_context_v91(self, *, continuation_binding, anchor_safety_seconds,
                                             material_occurrences=None, historical_bindings=None, safety_seconds=None, **kwargs):
         return bool(await self.backend.rpc("seal_continuation_context_v91", {

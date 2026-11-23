@@ -1,3 +1,7 @@
+# Model Relay 10.6.0
+
+完善 `mutable_session_container` 在 `indeterminate`、`result_stored` 后置校验失败、派发后取消及交错非累计/无状态轮次下的账本失效闭环与无状态全量重放回退；新增向前迁移 `sql/018_mutable_container_taint_closure.sql`，升级与约束说明见 [UPGRADE_10.6.0.md](UPGRADE_10.6.0.md)。
+
 # Model Relay 10.2.1
 
 Gemini Interactions 按已提交的会话历史续接，支持首轮提交长资料、后续发送新问题。升级和两轮请求示例见 [UPGRADE_10.2.1.md](UPGRADE_10.2.1.md)。

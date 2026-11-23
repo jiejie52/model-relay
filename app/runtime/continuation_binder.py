@@ -152,8 +152,27 @@ class ContinuationBinder:
         )
         rejections: list[dict[str, Any]] = []
         matched_binding: ContinuationExecutionBinding | None = None
+        is_mutable_container = anchor_class == "mutable_session_container"
+        mutable_container_tainted = False
+        if (
+            is_mutable_container
+            and can_store
+            and state.session_id
+            and hasattr(self.repo, "has_tainted_mutable_container")
+        ):
+            req_row = state.request_row if isinstance(state.request_row, dict) else {}
+            mutable_container_tainted = bool(
+                await self.repo.has_tainted_mutable_container(
+                    session_id=state.session_id,
+                    tenant_id=req_row.get("tenant_id"),
+                    conversation_hash=req_row.get("conversation_hash"),
+                    exclude_request_id=state.request_id,
+                )
+            )
+            if mutable_container_tainted:
+                rejections.append({"reason": "mutable_container_tainted"})
 
-        if can_store and history and not reopen:
+        if can_store and history and not reopen and not mutable_container_tainted:
             refs = continuation_material_references((placement or {}).get("verified_history_occurrences") or [])
             live = {
                 (b["material_id"], b["binding_generation"], b.get("provider_binding_id"), b.get("external_uri"))
@@ -175,9 +194,13 @@ class ContinuationBinder:
             for candidate in candidates:
                 aid = _anchor_field(candidate, "id") or _anchor_field(candidate, "anchor_id") or ""
 
-                # Gate 1: State, root prefix, scope, and TTL safety margin
+                # Gate 1: State, root prefix, scope, anchor class, and TTL safety margin
                 if _anchor_field(candidate, "is_root_prefix") is False:
                     rejections.append({"anchor_id": str(aid), "reason": "not_active_root_prefix"})
+                    continue
+                cand_class = str(_anchor_field(candidate, "anchor_class") or "")
+                if anchor_class != "none" and cand_class and cand_class != anchor_class:
+                    rejections.append({"anchor_id": str(aid), "reason": "anchor_class_mismatch"})
                     continue
                 validity_reason = self._anchor_validity_reason(candidate, state, safety_seconds)
                 if validity_reason is not None:
@@ -269,6 +292,7 @@ class ContinuationBinder:
                     rejected_candidates_audit=tuple(rejections[:20]),
                 )
 
+        if rejections or (can_store and history and not reopen and not mutable_container_tainted):
             if not isinstance(state.wire, dict):
                 state.wire = {}
             state.wire["continuation_rejected_candidates"] = rejections[:20]
@@ -276,21 +300,58 @@ class ContinuationBinder:
         if matched_binding is not None:
             binding = matched_binding
         else:
-            if reopen:
+            allow_stateless_fallback = intent.get("allow_fallback_to_full", True)
+            can_init_stateful_root = can_store
+            if is_mutable_container:
+                # mutable_session_container mutates server state in place and forbids
+                # multi-turn root seeding or branching; when history exists without a
+                # valid linear head anchor, or on taint/pre-dispatch reopen, fall back
+                # to stateless_full_replay instead of opening a fresh stateful container.
+                can_init_stateful_root = bool(
+                    can_store
+                    and not mutable_container_tainted
+                    and not history
+                    and not reopen
+                )
+                if can_store and not can_init_stateful_root and not allow_stateless_fallback:
+                    if mutable_container_tainted:
+                        raise ProviderRequestError(
+                            "MUTABLE_CONTAINER_TAINTED",
+                            "Mutable session container is tainted and stateless fallback is disallowed",
+                        )
+                    raise ProviderRequestError(
+                        "CONTINUATION_PARENT_NO_LONGER_USABLE",
+                        "No valid mutable session container parent anchor and stateless fallback is disallowed",
+                    )
+
+            effective_mode = "stateful_root_init" if can_init_stateful_root else "stateless_full_replay"
+            if mutable_container_tainted and can_store:
+                decision_reason = "mutable_container_tainted"
+                fallback_occurred = True
+                fallback_reason = "MUTABLE_CONTAINER_TAINTED"
+            elif reopen:
                 decision_reason = "reopen_stateless"
+                fallback_occurred = bool(can_store and (history or is_mutable_container))
+                fallback_reason = "NO_VALID_PARENT_ANCHOR" if fallback_occurred else None
             elif not history:
                 decision_reason = "genesis_turn"
+                fallback_occurred = False
+                fallback_reason = None
             elif can_store:
                 decision_reason = "no_valid_parent_fallback"
+                fallback_occurred = True
+                fallback_reason = "NO_VALID_PARENT_ANCHOR"
             else:
                 decision_reason = str(intent.get("decision_reason") or "no_valid_parent_fallback")
+                fallback_occurred = False
+                fallback_reason = None
             binding = ContinuationExecutionBinding(
                 schema_version="relay-continuation-binding/2",
-                effective_mode="stateful_root_init" if can_store else "stateless_full_replay",
-                store_upstream_state=can_store,
+                effective_mode=effective_mode,
+                store_upstream_state=can_init_stateful_root,
                 parent_head_fingerprint=head,
-                fallback_occurred=bool(can_store and history),
-                fallback_reason="NO_VALID_PARENT_ANCHOR" if can_store and history else None,
+                fallback_occurred=fallback_occurred,
+                fallback_reason=fallback_reason,
                 anchor_class=anchor_class,
                 delta_start_turn_index=0,
                 delta_end_turn_index=len(history),
