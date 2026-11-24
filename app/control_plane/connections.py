@@ -42,6 +42,7 @@ class ConnectionRuntime:
     secret: str = field(repr=False, compare=False)
     profile: dict = field(default_factory=dict)
     pool: object = field(default=None, repr=False, compare=False)
+    active_metadata: dict | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         import httpx

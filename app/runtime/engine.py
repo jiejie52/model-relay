@@ -53,6 +53,18 @@ class RelayRuntimeEngine:
             await self.verifier.verify(plan)
             await ensure_execution_allowed(states=("not_sent",))
             await self.projector.prepare_scope(state)
+            if state.snapshot.get("protocol") in {"responses", "gemini_interactions"}:
+                from app.control_plane.upstream_retention import resolve_upstream_retention
+
+                active = getattr(self.providers, "active_connection_metadata", None)
+                decision = resolve_upstream_retention(
+                    active.get(state.snapshot["connection_id"], {}) if active is not None else None,
+                    state.snapshot.get("capability_contract"), state.snapshot.get("continuation_policy"),
+                    tenant_zdr=(state.request_row["tenant_id"] in getattr(self.settings, "zero_data_retention_tenants", ())
+                                or (state.session.get("metadata") or {}).get("zero_data_retention") is True),
+                )
+                if active is not None or decision["reason"] == "zdr_forbidden":
+                    state.wire["upstream_retention"] = decision
             state.failure_stage = "material_bind"
             await self.bindings.bind_for_plan(state)
             await ensure_execution_allowed(states=("not_sent",))

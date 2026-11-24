@@ -97,6 +97,8 @@ class RelayWorker:
         self._quiescent = False
         self._busy = False
         self._control_server: uvicorn.Server | None = None
+        self._last_anchor_reap_monotonic: float | None = None
+        self._anchor_reap_schema_warned = False
 
     @classmethod
     async def create(cls):
@@ -281,6 +283,7 @@ class RelayWorker:
                             continue
                         await self._wait_quiescent()
                         continue
+                    await self._maybe_reap_continuation_anchors()
                     timeout = settings.worker_poll_seconds
                     if self._follow_api_enabled:
                         remaining = max(0.0, self._active_until - time.monotonic())
@@ -300,6 +303,7 @@ class RelayWorker:
                         await self._process_legacy(job)
                 finally:
                     self._busy = False
+                await self._maybe_reap_continuation_anchors()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -391,6 +395,45 @@ class RelayWorker:
                 "worker_resumed",
                 worker_id=self.worker_id,
                 reason="api_activity",
+            )
+
+    async def _maybe_reap_continuation_anchors(self) -> None:
+        now = time.monotonic()
+        interval = float(getattr(settings, "continuation_anchor_reap_interval_seconds", 300.0) or 300.0)
+        if self._last_anchor_reap_monotonic is not None and (now - self._last_anchor_reap_monotonic) < interval:
+            return
+        self._last_anchor_reap_monotonic = now
+        try:
+            summary = await self.repo.reap_continuation_anchors(
+                delete_grace_seconds=int(getattr(settings, "continuation_anchor_delete_grace_seconds", 86400)),
+                batch_limit=int(getattr(settings, "continuation_anchor_reap_batch_limit", 500)),
+            )
+            if summary["expired_count"] > 0 or summary["deleted_count"] > 0:
+                log_info(
+                    logger,
+                    "continuation_anchors_reaped",
+                    worker_id=self.worker_id,
+                    expired_count=summary["expired_count"],
+                    deleted_count=summary["deleted_count"],
+                )
+        except Exception as exc:
+            body_text = str(getattr(exc, "body", "") or str(exc))
+            if ("reap_continuation_anchors_v1" in body_text or "PGRST202" in body_text) and not self._anchor_reap_schema_warned:
+                self._anchor_reap_schema_warned = True
+                log_warning(
+                    logger,
+                    "continuation_anchor_reap_rpc_unavailable",
+                    worker_id=self.worker_id,
+                    migration="sql/020_continuation_anchor_lifecycle.sql",
+                    exception_type=type(exc).__name__,
+                )
+                return
+            log_warning(
+                logger,
+                "continuation_anchor_reap_failed",
+                worker_id=self.worker_id,
+                exception_type=type(exc).__name__,
+                error_message=str(exc),
             )
 
     async def _process_v2(self, job: dict) -> None:

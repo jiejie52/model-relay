@@ -10,9 +10,11 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/8.9.0'
-SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算','续接模式','锚点保留时长秒数')
+COMPILER_VERSION = 'relay-excel/10.8.0'
+SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
+CONTINUATION_OPTIONAL = ('续接模式','锚点保留时长秒数','验证多轮补发')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
+HEAD_OPTIONAL = ('续接指令布局','托管工具')
 from app.control_plane.governance.thinking_mappings import FIELDS as THINKING_FIELDS, CONTRACT_OPTIONAL, compile_thinking_mappings
 
 SCHEMAS = {
@@ -34,21 +36,29 @@ def extension_rows(wb):
         ws = wb[name]
         if tuple(ws.cell(5,i).value for i in range(1,len(fields)+1)) != fields:
             raise DeclarationError(name+'!第5行: 表头与配置格式不符')
+        if name == '连接配置':
+            optional_name = ws.cell(5,len(fields)+1).value
+            if optional_name not in (None, '上游续接留存'):
+                raise DeclarationError('连接配置: 无效的上游续接留存列')
+            if optional_name:
+                fields = fields + (optional_name,)
         if name == '能力合同':
             extras=tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(CONTRACT_OPTIONAL)+1))
             while extras and extras[-1] is None: extras=extras[:-1]
             if extras!=CONTRACT_OPTIONAL[:len(extras)]: raise DeclarationError('能力合同: 可选思考约束表头顺序错误')
             fields=fields+extras
-        if name == '供应配置':
-            extras = tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(SUPPLY_OPTIONAL)+1))
-            while extras and extras[-1] is None: extras=extras[:-1]
-            if extras != SUPPLY_OPTIONAL[:len(extras)]: raise DeclarationError('供应配置: 可选表头顺序错误')
-            fields=fields+extras
-        if name == '协议配置':
-            extras=tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(PROFILE_OPTIONAL)+1))
-            while extras and extras[-1] is None:extras=extras[:-1]
-            if extras!=PROFILE_OPTIONAL[:len(extras)]:raise DeclarationError('协议配置: 可选证据表头顺序错误')
-            fields=fields+extras
+        if name in ('供应配置', '协议配置'):
+            legacy, current = ((SUPPLY_OPTIONAL, CONTINUATION_OPTIONAL) if name == '供应配置'
+                               else (PROFILE_OPTIONAL, HEAD_OPTIONAL))
+            extras = tuple(ws.cell(5,i).value for i in range(len(fields)+1,len(fields)+len(legacy)+len(current)+1))
+            while extras and extras[-1] is None:
+                extras = extras[:-1]
+            legacy_count = next((i for i, field in enumerate(extras) if field in current), len(extras))
+            trailing = extras[legacy_count:]
+            if (extras[:legacy_count] != legacy[:legacy_count] or not set(trailing) <= set(current)
+                    or len(trailing) != len(set(trailing))):
+                raise DeclarationError(name + ': 可选表头错误')
+            fields = fields + extras
         ws.reset_dimensions()
         rows=[]
         for row, values in enumerate(ws.iter_rows(min_row=6,max_col=len(fields),values_only=True),6):
@@ -116,8 +126,15 @@ def compile_workbook(content, settings):
                 url=urlsplit(endpoint)
                 if url.scheme!='https' or not url.hostname or url.username or url.password or url.query or url.fragment:
                     fail(row,'端点','必须使用不含凭据和查询参数的 HTTPS 地址')
+        retention_mode = value(row,'上游续接留存',True)
+        if retention_mode not in (None, '允许', '禁止', 'ZDR'):
+            fail(row,'上游续接留存','仅支持 允许 / 禁止 / ZDR')
+        retention_metadata = (
+            {'allow_upstream_store': retention_mode == '允许', 'zero_data_retention': retention_mode == 'ZDR'}
+            if retention_mode is not None else {}
+        )
         connections[cid]=ModelControlPlane._connection_from_mapping({**values,'connection_id':cid,'channel_id':value(row,'渠道ID'),
-            'protocol':protocol,'auth_type':auth,'credential_ref':credential,'sdk_endpoint_options':{'base_url':value(row,'SDK端点',True) or values['base_url']}})
+            'protocol':protocol,'auth_type':auth,'credential_ref':credential,'metadata':retention_metadata,'sdk_endpoint_options':{'base_url':value(row,'SDK端点',True) or values['base_url']}})
     for pid,row in unique(ext['协议配置'],'协议ID').items():
         hosts=parts(value(row,'允许主机'))
         if any('/' in x or '*' in x or ':' in x for x in hosts): fail(row,'允许主机','必须为精确主机名')
@@ -137,10 +154,17 @@ def compile_workbook(content, settings):
         required=value(row,'要求原生约束证据',True) or '否'
         if required not in ('是','否'):fail(row,'要求原生约束证据','只能填写是或否')
         if source=='first_party_native_payload' and (value(row,'协议族') not in ('gemini_native', 'gemini_interactions') or policy['enabled']):fail(row,'证据来源','需原生协议且不能启用网关亲和')
+        instruction_layout = value(row,'续接指令布局',True)
+        if instruction_layout not in (None,'per_request','root_system_message'):
+            fail(row,'续接指令布局','无效的固定指令布局')
+        hosted_tools = parts(value(row,'托管工具',True))
+        allowed_tools = {'responses': {'web_search'}, 'gemini_interactions': {'google_search'}}
+        if set(hosted_tools) - allowed_tools.get(value(row,'协议族'), set()):
+            fail(row,'托管工具','协议不支持所声明的托管工具')
         profiles[pid]=ModelControlPlane._profile_from_mapping({'profile_id':pid,'revision':COMPILER_VERSION,'protocol':value(row,'协议族'),
             **history_material_capability(value(row,'协议族')),
             'cache':{},'continuation':({'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'} if value(row,'协议族')=='gemini_interactions' else {}),'metadata':{'allowed_hosts':hosts,'affinity_policy':policy,'response_evidence_headers':evidence,
-                'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
+                'hosted_tools':hosted_tools,'instructions_layout':instruction_layout,'evidence_source_mode':source,'expected_billing_tier':value(row,'预期计费层级',True),'require_native_constraint_evidence':required=='是'}})
     cap_rows=unique(ext['能力合同'],'合同ID')
     extra_thinking=unique(ext['思考合同配置'],'合同ID')
     if set(extra_thinking) & set(cap_rows): raise DeclarationError('思考合同配置与能力合同重复登记')
@@ -239,6 +263,9 @@ def compile_workbook(content, settings):
             cont_mode = cont_mode_map[raw_cont_mode]
         else:
             cont_mode = 'prefer_stateful_anchor' if connection.protocol == 'gemini_interactions' else 'off'
+        probe_delta = value(binding,'验证多轮补发',True)
+        if probe_delta not in (None,'是','否'):
+            fail(binding,'验证多轮补发','只能填写是或否')
         cont_ttl_seconds = number(binding, '锚点保留时长秒数', optional=True, minimum=60)
         if cont_ttl_seconds is None:
             cont_ttl_seconds = 86400
@@ -248,7 +275,7 @@ def compile_workbook(content, settings):
             continuation_contract = {
                 'version': 'relay-continuation-contract/1',
                 'anchor_class': 'immutable_tree_anchor',
-                'verification_status': 'verified',
+                'verification_status': 'unverified',
                 'supports_branching': True,
                 'supports_multiturn_delta': True,
                 'requires_upstream_store': True,
@@ -271,13 +298,23 @@ def compile_workbook(content, settings):
                 'allow_head_mismatch_reopen': True,
                 'invalidate_on_affinity_rotation': False,
                 'max_active_anchors_per_session': 128,
+                'metadata': {'verify_multiturn_delta': probe_delta == '是'},
             })
         contracts[cap_id]=replace(contract,contract_id=cap_id,cache=cache_contract,continuation=continuation_contract)
-        profile_id='excel-profile:'+stable_hash([profile.profile_id,connection.connection_id])[:20]
+        profile_identity = [profile.profile_id, connection.connection_id]
+        if connection.protocol == 'responses' and cont_mode != 'off':
+            profile_identity.append('stateful')
+        profile_id='excel-profile:'+stable_hash(profile_identity)[:20]
         if connection.protocol=='gemini_interactions':
             profile_continuation={'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_interaction_id','response_anchor_field':'id','wire_endpoint':'/v1beta/interactions'}
-        elif connection.protocol=='responses' and cont_mode!='off':
-            profile_continuation={'anchor_class':'immutable_tree_anchor','request_anchor_field':'previous_response_id','response_anchor_field':'id','wire_endpoint':'/responses'}
+        elif connection.protocol=='responses':
+            head_layout = (profile.metadata.get("instructions_layout")
+                           or ("root_system_message" if urlsplit(connection.rest_base_url).hostname == "api.x.ai"
+                               else "per_request"))
+            profile_continuation = {'instructions_layout': head_layout}
+            if cont_mode != 'off':
+                profile_continuation.update(anchor_class='immutable_tree_anchor', request_anchor_field='previous_response_id',
+                                            response_anchor_field='id', wire_endpoint='/responses')
         else:
             profile_continuation={}
         profiles[profile_id]=replace(profile,profile_id=profile_id,cache={'supported_mechanisms':sorted(RESOURCE_MECHANISMS[connection.protocol]),

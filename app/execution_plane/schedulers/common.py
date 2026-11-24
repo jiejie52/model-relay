@@ -74,7 +74,10 @@ class RequestExecutionService:
     def __init__(self, runtime, errors, repo, settings):
         self.runtime, self.errors, self.repo, self.settings = runtime, errors, repo, settings
         self.loader = ExecutionPlanLoader(repo, runtime.storage, settings)
-        self.committer = ResultCommitter(repo, runtime.storage, settings, errors)
+        self.committer = ResultCommitter(
+            repo, runtime.storage, settings, errors,
+            active_connections=getattr(getattr(runtime, "providers", None), "active_connection_metadata", None),
+        )
 
     async def execute_row(self, row, fence):
         plan = await self.loader.load(row, fence)

@@ -36,7 +36,8 @@ def build_context_plan(
     segments: list[dict[str, Any]] = []
     ordinal = 0
 
-    instructions = snapshot.get("instructions")
+    head = snapshot.get("normalized_head")
+    instructions = head["instructions"] if head is not None else snapshot.get("instructions")
     if instructions:
         segments.append(
             {
@@ -56,9 +57,9 @@ def build_context_plan(
 
     if upgraded:
         native = snapshot.get("provider_payload") or {}
-        tools = native.get("tools", snapshot.get("tools"))
+        tools = head["tools"] if head is not None else native.get("tools", snapshot.get("tools"))
         if tools:
-            value = normalize_native_payload({"tools": tools}, response_schemas=True, unordered_tools=(
+            value = {"tools": tools} if head is not None else normalize_native_payload({"tools": tools}, response_schemas=True, unordered_tools=(
                 ((snapshot.get("protocol_profile") or {}).get("cache") or {}).get("unordered_tools") is True))
             segments.append({"segment_id": f"seg-{ordinal}", "domain": "tools", "role": "tool_schema",
                              "source_ref": "request.tools", "canonical_content_hash": stable_hash(value),

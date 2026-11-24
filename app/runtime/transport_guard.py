@@ -33,6 +33,28 @@ class ExecutionFencedAsyncTransport(httpx.AsyncBaseTransport):
             if request.url.scheme != "https" or request.url.host not in self.connection.allowed_hosts():
                 raise ValueError("CONNECTION_HOST_FORBIDDEN")
         path = request.url.path
+        if (self.connection is not None and request.method == "POST"
+                and path.rstrip("/").endswith(("/responses", "/interactions"))):
+            import json
+            from app.control_plane.upstream_retention import resolve_upstream_retention
+            from app.protocol_adapters.base import ProviderRequestError
+
+            guard = current_execution_guard()
+            metadata = self.connection.active_metadata
+            if metadata is None:
+                metadata = self.connection.spec.metadata
+            decision = resolve_upstream_retention(
+                metadata,
+                tenant_zdr=(guard is not None and guard.row.get("tenant_id")
+                            in getattr(self.connection.settings, "zero_data_retention_tenants", ())),
+            )
+            if self.connection.spec.metadata.get("zero_data_retention") is True or not decision["allow_store"]:
+                payload = json.loads(request.content)
+                if (payload.get("store") is not False or payload.get("previous_response_id")
+                        or payload.get("previous_interaction_id") or payload.get("conversation")
+                        or payload.get("background")):
+                    raise ProviderRequestError("CONTINUATION_STORAGE_NOT_AUTHORIZED",
+                                               "Upstream retention gate denied the outgoing inference")
         is_inference_or_continuation = (
             wire_phase() in ("inference", "continuation", "interaction")
             or any(seg in path for seg in ("/interactions", "/v1beta/interactions", "/v1/interactions", "continuation"))

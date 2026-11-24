@@ -69,6 +69,8 @@ def caller_intent_hash(value: dict[str, Any]) -> str:
         "requested_cache_mode": value.get("requested_cache_mode"),
         "metadata": value.get("metadata") or {},
     }
+    if "tools" in value:
+        identity["tools"] = value["tools"]
     if value.get("context_policy") is not None:
         identity["context_policy"] = value["context_policy"]
     if value.get("requested_cache_mechanism_explicit"):
@@ -172,6 +174,9 @@ def request_identity(snapshot: dict[str, Any]) -> str:
     if snapshot.get("placement_contract_version") is not None:
         from app.core.material_placement import material_identity
         identity["material_placement_identity"] = material_identity(snapshot)
+    for field in ("upstream_retention", "normalized_head", "head_format", "response_completion_contract"):
+        if field in snapshot:
+            identity[field] = snapshot[field]
     plan = snapshot.get("continuation_intent_plan")
     if isinstance(plan, dict):
         for forbidden_key in _FORBIDDEN_DYNAMIC_CONTINUATION_KEYS:
@@ -207,6 +212,10 @@ def request_identity(snapshot: dict[str, Any]) -> str:
             for item in obj:
                 _assert_no_forbidden_handles(item)
 
-    _assert_no_forbidden_handles(snapshot)
-    _assert_no_forbidden_handles(identity)
+    # Business JSON and JSON Schema may contain these literal property names.
+    for key in _FORBIDDEN_DYNAMIC_CONTINUATION_KEYS:
+        if snapshot.get(key) is not None:
+            raise ValueError(f"Runtime field {key!r} is forbidden in an accepted Request snapshot")
+    if isinstance(plan, dict):
+        _assert_no_forbidden_handles(plan)
     return stable_hash(identity)

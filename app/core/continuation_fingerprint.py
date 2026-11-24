@@ -9,6 +9,7 @@ CONTINUATION_CHAIN_FORMAT = "relay-continuation-chain/1"
 LEGACY_CONTINUATION_HEAD = "relay-continuation-head/2"
 INTERACTIONS_HISTORY_HEAD = "relay-continuation-head/3"
 CONTRACT_DRIVEN_HEAD = "relay-continuation-head/4"
+HEAD_PROJECTION_VERSION = "relay-continuation-head/5"
 DEFAULT_HEAD_INVARIANTS = ("instructions", "tools", "account_scope_id", "model")
 
 
@@ -135,6 +136,15 @@ def verify_anchor_fingerprint(anchor_record: dict[str, Any] | Any, current_finge
     return anchor_fp == current_fingerprint
 
 
+def normalize_context_head(instructions, tools, profile):
+    cache = (profile or {}).get("cache") or {}
+    from app.core.context_codec import normalize_native_payload
+    normalized = normalize_native_payload({"tools": tools or []}, response_schemas=True,
+                                          unordered_tools=cache.get("unordered_tools") is True)
+    return {"instructions": instructions, "tools": normalized["tools"],
+            "instructions_layout": ((profile or {}).get("continuation") or {}).get("instructions_layout", "per_request")}
+
+
 def compute_parent_head_fingerprint(
     snapshot: dict[str, Any],
     *,
@@ -152,6 +162,12 @@ def compute_parent_head_fingerprint(
         "account_scope_id", "connection_spec_hash", "protocol_profile_hash",
         "model", "upstream_model", "protocol",
     )
+    if head_format == HEAD_PROJECTION_VERSION:
+        head = snapshot.get("normalized_head")
+        if not isinstance(head, dict):
+            raise ValueError("Frozen normalized head is required")
+        return stable_hash({"format": head_format, "head": head,
+                            **{key: snapshot.get(key) for key in scope_keys}})
     if head_invariants is None:
         contract = (
             snapshot.get("continuation_contract")
@@ -191,7 +207,7 @@ def continuation_head(
         return compute_parent_head_fingerprint(
             snapshot, head_invariants=head_invariants, head_format=head_format
         )
-    if head_format == CONTRACT_DRIVEN_HEAD:
+    if head_format in {CONTRACT_DRIVEN_HEAD, HEAD_PROJECTION_VERSION}:
         return compute_parent_head_fingerprint(
             snapshot, head_invariants=head_invariants, head_format=head_format
         )

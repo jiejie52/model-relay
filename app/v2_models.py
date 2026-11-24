@@ -85,6 +85,11 @@ class ExecutionSpec(BaseModel):
     mode: ExecutionMode
 
 
+class HostedTool(BaseModel):
+    model_config = {"extra": "forbid"}
+    type: Literal["web_search", "google_search"]
+
+
 class SessionRequestCreate(BaseModel):
     input: Any
     # Per-Request context view; omitted retains the Session default. Does not
@@ -92,6 +97,7 @@ class SessionRequestCreate(BaseModel):
     context_policy: RequestContextPolicy | None = None
     instructions: str | None = None
     material_ids: list[str] = Field(default_factory=list)
+    tools: list[HostedTool] | None = Field(default=None, max_length=2)
     # Contract 2.1 callers omit these. They remain optional during the Relay-first
     # compatibility window and are treated only as assertions/hints.
     provider: str | None = Field(default=None, max_length=80)

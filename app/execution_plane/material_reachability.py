@@ -15,5 +15,13 @@ def binding_reachable(binding, *, connection_id, account_scope_hash, transports)
         except (ValueError,TypeError): return False
     representation=binding.get('representation')
     if not transports: return True  # Historical contracts did not declare transport modes.
-    required={'gemini_file_uri':'provider_files_api','gemini_external_url':'external_signed_url','gemini_inline_data':'inline_data'}.get(representation)
+    required = {
+        'gemini_file_uri': 'provider_files_api',
+        'gemini_external_url': 'external_signed_url',
+        'gemini_inline_data': 'inline_data',
+        'responses_external_url': 'external_signed_url',
+        'responses_inline_data': 'inline_data',
+        'responses_inline_text': 'inline_data',
+        'relay_structured_text': 'inline_data',
+    }.get(representation)
     return required in transports

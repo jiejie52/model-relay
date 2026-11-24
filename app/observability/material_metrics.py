@@ -23,6 +23,24 @@ def material_metrics(snapshot, physical, historical_bindings, result=None, cache
         projected_bytes = len(canonical_json_bytes(projected.schema))
     raw = (result.raw_json or {}) if result else {}
     usage = raw.get("usageMetadata") or raw.get("usage_metadata") or {}
+    resp_usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+    wire_metrics = (physical or {}).get("wire_metrics") if isinstance((physical or {}).get("wire_metrics"), dict) else None
+    if (physical or {}).get("protocol") == "responses" and wire_metrics is not None:
+        return {**placement_summary(placement),
+            "logical_total_file_part_count": wire_metrics.get("logical_total_file_part_count", 0),
+            "historical_pinned_material_count": len({b["material_id"] for b in historical_bindings}),
+            "wire_total_file_part_count": wire_metrics.get("wire_total_file_part_count", 0),
+            "wire_current_turn_file_part_count": wire_metrics.get("wire_current_turn_file_part_count", 0),
+            "history_content_count": wire_metrics.get("history_content_count", 0),
+            "history_text_bytes": wire_metrics.get("history_text_bytes", 0),
+            "current_text_bytes": wire_metrics.get("current_text_bytes", 0),
+            "canonical_schema_bytes": len(canonical_json_bytes(schema)) if schema else 0,
+            "projected_schema_bytes": projected_bytes,
+            "cache_action": (physical or {}).get("cache_action"),
+            "provider_prompt_tokens": resp_usage.get("input_tokens", resp_usage.get("prompt_tokens")),
+            "provider_cached_tokens": ((resp_usage.get("input_tokens_details") or {}).get("cached_tokens")
+                                       or resp_usage.get("cached_tokens")),
+            "provider_prompt_tokens_details": resp_usage.get("input_tokens_details")}
     wire_contents = contents
     if (cache_binding or {}).get("mechanism") == "stateful_resource":
         version = ((cache_binding or {}).get("metadata") or {}).get("cached_history_version")

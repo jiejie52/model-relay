@@ -173,16 +173,30 @@ def verify_pre_seal_material_invariants(state):
     if [b["material_id"] for b in state.material_bindings] != placement["current_effective_material_ids"]:
         raise ProviderRequestError("CURRENT_TURN_MATERIAL_BINDING_MISMATCH", "Current bindings differ from the frozen placement")
     physical = state.provider_physical_plan or {}
-    from app.protocol_adapters.wire_projection.gemini_wire import project_history_contents, project_current_user_content
-    current = project_current_user_content(state.snapshot, material_ids=state.material_ids,
-        material_bindings=state.material_bindings)
-    if state.snapshot.get("protocol") == "gemini_interactions":
-        matches = (physical.get("protocol") == "gemini_interactions"
-                   and physical.get("current_user_hash") == stable_hash(current)
-                   and physical.get("visible_history_hash") == stable_hash(state.history))
+    protocol = state.snapshot.get("protocol")
+    if protocol == "responses":
+        current = getattr(state, "_responses_current_user_item", None)
+        current_parts = current.get("content") if isinstance(current, dict) else None
+        matches = (
+            isinstance(current, dict)
+            and isinstance(current_parts, list)
+            and len(current_parts) >= len(state.projected_material_occurrences) + 1
+            and physical.get("protocol") == "responses"
+            and physical.get("current_user_hash") == stable_hash(current)
+            and physical.get("visible_history_hash") == stable_hash(state.history)
+        )
     else:
-        full = physical.get("full_uncached_payload") or {}
-        matches = full.get("contents") == project_history_contents(state.history) + [current]
+        from app.protocol_adapters.wire_projection.gemini_wire import project_history_contents, project_current_user_content
+        current = project_current_user_content(state.snapshot, material_ids=state.material_ids,
+            material_bindings=state.material_bindings)
+        current_parts = current.get("parts") or []
+        if protocol == "gemini_interactions":
+            matches = (physical.get("protocol") == "gemini_interactions"
+                       and physical.get("current_user_hash") == stable_hash(current)
+                       and physical.get("visible_history_hash") == stable_hash(state.history))
+        else:
+            full = physical.get("full_uncached_payload") or {}
+            matches = full.get("contents") == project_history_contents(state.history) + [current]
     if not matches:
         raise ProviderRequestError("WIRE_HISTORY_DIGEST_MISMATCH", "Native history or current material placement changed")
     verified = placement["verified_history_occurrences"] if state.snapshot.get("model_history_visible") is not False else []
@@ -199,7 +213,7 @@ def verify_pre_seal_material_invariants(state):
             "material_id": binding["material_id"], "content_sha256": binding["content_sha256"],
             "binding_generation": binding["binding_generation"], "representation_kind": binding["representation"],
             "history_entry_index": placement["history_version"], "user_content_index": 2 * placement["history_version"],
-            "part_index": index, "part_digest": stable_hash(current["parts"][index]),
+            "part_index": index, "part_digest": stable_hash(current_parts[index]),
             "origin": "request_explicit" if binding["material_id"] in explicit else "session_manifest_auto",
             "binding": {k: v for k, v in binding.items() if k != "inline_data"}})
     state.projected_material_occurrences = occurrences

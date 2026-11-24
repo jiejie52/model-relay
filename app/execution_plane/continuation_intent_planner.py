@@ -91,16 +91,18 @@ class ContinuationIntentPlanner:
             or policy_meta.get("zero_data_retention")
             or snapshot.get("zero_data_retention")
         )
-        if zdr and contract.get("requires_upstream_store", True):
+        retention = snapshot.get("upstream_retention") or {}
+        zdr = zdr or retention.get("reason") == "zdr_forbidden"
+        if (zdr or retention and retention.get("allow_store") is not True) and contract.get("requires_upstream_store", True):
             if requested_mode == "require_stateful_anchor":
                 raise ContinuationDecisionError(
-                    "CONTINUATION_FORBIDDEN_BY_ZDR_POLICY",
-                    "ZDR policy forbids server-side stateful continuation",
+                    "CONTINUATION_FORBIDDEN_BY_ZDR_POLICY" if zdr else "CONTINUATION_STORAGE_POLICY_UNVERIFIED",
+                    "Continuation storage is not authorized for this scope",
                 )
             return ContinuationIntentPlan(
                 continuation_mode="off",
                 resolution_status="disabled",
-                decision_reason="zdr_forbidden",
+                decision_reason="zdr_forbidden" if zdr else "storage_not_authorized",
                 requested_mode=requested_mode,
                 schema_version="relay-continuation-plan/2",
             )
@@ -180,9 +182,10 @@ class ContinuationIntentPlanner:
             "supports_multiturn_delta": contract.get("supports_multiturn_delta") is True,
             "retention_ttl_seconds": int(contract.get("retention_ttl_seconds") or 86400),
             "anchor_safety_margin_seconds": int(contract.get("anchor_safety_margin_seconds") or 30),
-            "max_delta_turns": int(contract.get("max_delta_turns") or 64),
+            "max_delta_turns": int(contract.get("max_delta_turns", 64)),
             "invalidate_on_affinity_rotation": bool(policy.get("invalidate_on_affinity_rotation", False)),
             "allow_head_mismatch_reopen": bool(policy.get("allow_head_mismatch_reopen", True)),
+            "max_active_anchors_per_session": max(1, int(policy.get("max_active_anchors_per_session") or 128)),
         }
         return ContinuationIntentPlan(
             continuation_mode="auto" if reusable else "off",

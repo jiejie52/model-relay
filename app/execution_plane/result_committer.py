@@ -25,10 +25,11 @@ from app.runtime.execution_guard import ensure_execution_allowed
 from app.execution_plane.result_contract import validate_execution_observations
 
 class ResultCommitter:
-    def __init__(self, repo, storage, settings, errors=None):
+    def __init__(self, repo, storage, settings, errors=None, *, active_connections=None):
         self.repo, self.settings = repo, settings
         self.artifacts = ExecutionArtifacts(repo, storage, settings)
         self.errors = errors
+        self.active_connections = active_connections
 
     async def finalize(self, plan, fact):
         await ensure_execution_allowed()
@@ -47,6 +48,20 @@ class ResultCommitter:
         request_row, session, snapshot = map(thaw_json, (plan.request_record, plan.session_record, plan.snapshot))
         request_id, session_id = str(request_row["id"]), str(request_row["session_id"])
         result = fact.standardized_result
+        if snapshot.get("protocol") == "responses":
+            from app.protocol_adapters.wire_projection.responses_wire import observe_responses_outcome
+
+            outcome = observe_responses_outcome(result.raw_json)
+            strict_completion = (snapshot.get("response_completion_contract") is not None
+                                 or (fact.continuation_binding or {}).get("store_upstream_state") is True)
+            if (outcome["completion"] == "failed"
+                    or (strict_completion and outcome["completion"] != "completed")
+                    or (strict_completion and outcome["pending_client_tool"])):
+                exc = ProviderRequestError("RESPONSES_COMPLETION_CONTRACT_VIOLATION",
+                                           "Archived Responses result is not a completed business turn")
+                exc.provider_success_object_id = fact.provisional_raw_object_id
+                exc.provider_output_object_id = fact.provisional_output_object_id
+                raise exc
         contract_observation = None
         if snapshot.get("schema_version") in {"relay-request/2.4", "relay-request/2.5"} or snapshot.get("thinking") is not None:
             try:
@@ -150,19 +165,22 @@ class ResultCommitter:
 
         committed_occurrences = []
         if snapshot.get("placement_contract_version") is not None:
-            from app.core.material_placement import route_identity
+            from app.core.material_placement import route_identity, transport_user_parts
             transport = result.history_entry.get("transport_history") or {}
+            parts, _ = transport_user_parts(transport)
             placement = snapshot["material_placement_plan"]
             for raw_occ in thaw_json(fact.projected_material_occurrences):
                 occ = {**raw_occ, "history_version": int(request_row["expected_history_version"]) + 1,
                     "transport_history_hash": stable_hash(transport)}
                 if (any(occ.get(k) != v for k, v in route_identity(session).items())
                         or occ["source_request_id"] != request_id
-                        or occ["part_digest"] != stable_hash(transport["user_content"]["parts"][occ["part_index"]])):
+                        or occ["part_digest"] != stable_hash(parts[occ["part_index"]])):
                     raise ExecutionConflictError("Projected occurrence does not match committed native history")
                 committed_occurrences.append(occ)
             if [o["material_id"] for o in committed_occurrences] != placement["current_effective_material_ids"]:
                 raise ExecutionConflictError("Archived material occurrences are missing or reordered")
+        continuation_intent = snapshot.get("continuation_intent_plan") or getattr(plan, "continuation_intent_plan", None)
+        topology = (continuation_intent.get("topology") or {}) if isinstance(continuation_intent, dict) else {}
         history_object_id = None
         if cumulative_history and session.get("context_policy") == "conversation":
             new_history = list(history)
@@ -178,6 +196,9 @@ class ResultCommitter:
             if snapshot.get("placement_contract_version") is not None:
                 entry = freeze_history_turn(entry)
                 entry["material_occurrences"] = committed_occurrences
+            if (snapshot.get("normalized_head") is not None and topology.get("reusable_on_commit") is True
+                    and topology.get("model_history_visible") is True):
+                entry["continuation_head_fingerprint"] = topology["parent_head_fingerprint"]
             new_history.append(entry)
             history_object_id = await self.artifacts.store_history(
                 request_row,
@@ -186,7 +207,6 @@ class ResultCommitter:
             )
 
         continuation_anchor = None
-        continuation_intent = snapshot.get("continuation_intent_plan") or getattr(plan, "continuation_intent_plan", None)
         c_mode = None
         if isinstance(continuation_intent, dict):
             c_mode = continuation_intent.get("continuation_mode")
@@ -196,7 +216,6 @@ class ResultCommitter:
             c_mode = session.get("continuation_mode") or "auto"
 
         effective_policy = snapshot.get("context_policy") or session.get("context_policy")
-        topology = (continuation_intent.get("topology") or {}) if isinstance(continuation_intent, dict) else {}
         actual_binding = thaw_json(fact.continuation_binding) or {}
         can_commit_anchor = (
             isinstance(continuation_intent, dict)
@@ -206,13 +225,43 @@ class ResultCommitter:
             and effective_policy == "conversation"
             and history_object_id is not None
         )
+        frozen_retention = snapshot.get("upstream_retention")
+        if frozen_retention is not None and frozen_retention.get("allow_store") is not True:
+            can_commit_anchor = False
+        if can_commit_anchor:
+            from app.control_plane.upstream_retention import resolve_upstream_retention
+
+            active = self.active_connections
+            live_retention = resolve_upstream_retention(
+                active.get(snapshot["connection_id"], {}) if active is not None else None,
+                snapshot.get("capability_contract"), snapshot.get("continuation_policy"),
+                tenant_zdr=(request_row.get("tenant_id") in getattr(self.settings, "zero_data_retention_tenants", ())
+                            or (session.get("metadata") or {}).get("zero_data_retention") is True),
+            )
+            if live_retention["reason"] == "zdr_forbidden" or (active is not None and not live_retention["allow_store"]):
+                can_commit_anchor = False
         if can_commit_anchor:
             observed = result.observed or {}
             stored_ok = observed.get("continuation_stored", observed.get("interaction_stored")) is True
             prev_ref = observed.get("previous_anchor_ref", observed.get("previous_interaction_id"))
             if not stored_ok or prev_ref != actual_binding.get("upstream_handle"):
                 raise ExecutionConflictError("Continuation dispatch differs from the archived continuation binding")
-            if isinstance(result.response_id, str) and result.response_id.strip():
+            provider_store = result.raw_json.get("store")
+            if "previous_response_id" in result.raw_json and snapshot.get("protocol") == "responses":
+                if result.raw_json["previous_response_id"] != actual_binding.get("upstream_handle"):
+                    raise ProviderRequestError("CONTINUATION_PARENT_EVIDENCE_MISMATCH",
+                                               "Response lineage differs from the sealed parent")
+            prior_handles = {(turn.get("transport_history") or {}).get("upstream_handle")
+                             for turn in history if isinstance((turn.get("transport_history") or {}).get("upstream_handle"), str)}
+            eligible_id = (isinstance(result.response_id, str) and bool(result.response_id.strip())
+                           and result.response_id.strip() not in {".", ".."}
+                           and result.response_id != actual_binding.get("upstream_handle")
+                           and result.response_id not in prior_handles and provider_store is not False)
+            if not eligible_id and (continuation_intent.get("requested_mode") == "require_stateful_anchor"
+                                    or not continuation_intent.get("allow_fallback_to_full", True)):
+                raise ProviderRequestError("CONTINUATION_ANCHOR_EVIDENCE_MISSING",
+                                           "The stored response did not produce a usable continuation ID")
+            if eligible_id:
                 continuation_anchor = self._build_committed_anchor(
                     snapshot, topology, actual_binding, new_history, observation, request_row, result.response_id,
                 )
@@ -346,6 +395,7 @@ class ResultCommitter:
             "affinity_epoch": (affinity_audit.get("affinity_epoch") if affinity_audit.get("affinity_epoch") is not None else observation.get("affinity_epoch")),
             "protocol": snapshot.get("protocol"),
             "model": snapshot.get("model"),
+            "max_active_anchors_per_session": max(1, int(topology.get("max_active_anchors_per_session") or 128)),
             "expires_at": expiry.isoformat(),
         }
 

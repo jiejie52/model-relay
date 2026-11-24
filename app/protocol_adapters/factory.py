@@ -32,6 +32,7 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
                                file_adapters=None, cache_resources=None, storage=None, retained_control_planes=None):
     from app.control_plane.definitions import ModelControlPlane
     assembly = ConnectionAssembly()
+    providers.active_connection_metadata = {key: spec.metadata for key, spec in control_plane.connections.items()}
     planes = [ModelControlPlane._builtin(settings), *(retained_control_planes or [])] if retained_control_planes is not None else []
     # Retained releases are read-only, pinned, and never become routing catalogs.
     retained_releases = json.loads(getattr(settings, "retained_control_plane_files", "[]"))
@@ -65,7 +66,8 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
             runtime_key = (cid, spec.identity_hash, stable_hash(profile))
             runtime = seen.get(runtime_key)
             if runtime is None:
-                runtime = ConnectionRuntime(spec, settings, secret, profile)
+                runtime = ConnectionRuntime(spec, settings, secret, profile,
+                    active_metadata=providers.active_connection_metadata.get(cid, {}))
                 seen[runtime_key] = runtime
                 assembly.connections.append(runtime)
             kwargs = dict(base_url=runtime.rest_base, api_key=secret, connection_id=cid, channel_id=spec.channel_id)

@@ -48,6 +48,9 @@ class MaterialBinder:
         existing_snapshot: list[dict[str, Any]] | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
+        account_scope_id: str | None = None,
+        provider: str | None = None,
+        protocol: str | None = None,
         gemini_inline_cache_strategy: bool = False,
         gemini_session_material_ids: list[str] | None = None,
         document_projection_contract: dict[str, Any] | None = None,
@@ -76,9 +79,10 @@ class MaterialBinder:
                         "ROUTE_BINDING_MISMATCH",
                         "Frozen material binding does not match the Session route",
                     )
-                if adapter is not None:
+                expected_scope = adapter.account_scope_hash if adapter is not None else account_scope_id
+                if expected_scope:
                     frozen_scope = str(item.get("account_scope_hash") or "")
-                    if frozen_scope != adapter.account_scope_hash:
+                    if frozen_scope != expected_scope:
                         log_error(
                             logger,
                             "route_binding_mismatch",
@@ -86,7 +90,7 @@ class MaterialBinder:
                             session_id=session_id,
                             material_id=item.get("material_id"),
                             connection_id=connection_id,
-                            expected_account_scope_hash=adapter.account_scope_hash,
+                            expected_account_scope_hash=expected_scope,
                             frozen_account_scope_hash=frozen_scope,
                             failure_class="relay_validation",
                         )
@@ -184,7 +188,8 @@ class MaterialBinder:
                 try:
                     projected = await prepare_document_binding(
                         repo=self.repo, fallback_store=self.fallback, material=material, fallback=fallback,
-                        connection_id=connection_id, account_scope_hash=(adapter.account_scope_hash if adapter else "relay-fallback"),
+                        connection_id=connection_id,
+                        account_scope_hash=(adapter.account_scope_hash if adapter else (account_scope_id or "relay-fallback")),
                         tenant_id=tenant_id, conversation_hash=conversation_hash, session_id=session_id,
                     )
                 except ProviderRequestError as exc:
@@ -216,6 +221,19 @@ class MaterialBinder:
                         projected.update(representation=GEMINI_INLINE_CACHE_REPRESENTATION,
                                          binding_kind=GEMINI_INLINE_CACHE_REPRESENTATION,
                                          inline_data=base64.b64encode(data).decode("ascii"))
+                    elif adapter is None and account_scope_id:
+                        bound = await self._ensure_responses_fallback_binding(
+                            material=material,
+                            fallback=fallback,
+                            connection_id=connection_id,
+                            account_scope_hash=account_scope_id,
+                            provider=provider,
+                            protocol=protocol,
+                            transport_policy=transport_policy,
+                            projected=projected,
+                        )
+                        snapshots.append(self._snapshot(material, bound))
+                        continue
                     snapshots.append(projected)
                     continue
 
@@ -226,6 +244,18 @@ class MaterialBinder:
                         "MATERIAL_REUPLOAD_REQUIRED",
                         f"Connection {connection_id} requires Relay fallback bytes but material {material_id} has none",
                     )
+                if account_scope_id:
+                    bound = await self._ensure_responses_fallback_binding(
+                        material=material,
+                        fallback=fallback,
+                        connection_id=connection_id,
+                        account_scope_hash=account_scope_id,
+                        provider=provider,
+                        protocol=protocol,
+                        transport_policy=transport_policy,
+                    )
+                    snapshots.append(self._snapshot(material, bound))
+                    continue
                 snapshots.append(
                     {
                         "material_id": material_id,
@@ -1326,8 +1356,159 @@ class MaterialBinder:
         except Exception:
             return False
 
+    async def _ensure_responses_fallback_binding(
+        self,
+        *,
+        material: dict[str, Any],
+        fallback: dict[str, Any],
+        connection_id: str,
+        account_scope_hash: str,
+        provider: str | None,
+        protocol: str | None,
+        transport_policy: dict[str, Any] | None,
+        projected: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from datetime import timedelta
+        from app.protocol_adapters.wire_projection.responses_wire import (
+            RESPONSES_FALLBACK_ADAPTER_VERSION,
+            RESPONSES_TEXT_MIMES,
+        )
+
+        material_id = str(material["id"])
+        mime = str(material.get("content_type") or "application/octet-stream").split(";", 1)[0].strip().lower()
+        transports = set((transport_policy or {}).get("supported_material_transports") or ())
+        if projected is not None:
+            representation = "relay_structured_text"
+            expected_file_id = str(projected.get("projection_object_id") or fallback.get("object_id") or "")
+        elif mime.startswith("text/") or mime in RESPONSES_TEXT_MIMES:
+            representation = "responses_inline_text"
+            expected_file_id = str(fallback.get("object_id") or "")
+        elif "external_signed_url" in transports and "inline_data" not in transports:
+            representation = "responses_external_url"
+            expected_file_id = str(fallback.get("object_id") or "")
+        elif "external_signed_url" in transports and str(protocol or "") == "responses" and str(provider or "").lower() in {"grok", "xai"} and not mime.startswith("image/"):
+            # Official xAI Grok input_file docs prefer file_url when external signed URLs are authorized.
+            representation = "responses_external_url"
+            expected_file_id = str(fallback.get("object_id") or "")
+        else:
+            representation = "responses_inline_data"
+            expected_file_id = str(fallback.get("object_id") or "")
+
+        existing = await self.repo.get_provider_binding(
+            material_id=material_id,
+            connection_id=connection_id,
+            account_scope_hash=account_scope_hash,
+            purpose="inference_input",
+            representation=representation,
+            adapter_version=RESPONSES_FALLBACK_ADAPTER_VERSION,
+        )
+        safety_margin = max(
+            300,
+            int(getattr(self.fallback.settings, "historical_material_safety_seconds", 120) or 120) * 2,
+        )
+        if existing and self._binding_usable(existing):
+            exp_raw = existing.get("expires_at")
+            exp_dt = None
+            if exp_raw:
+                try:
+                    exp_dt = datetime.fromisoformat(str(exp_raw).replace("Z", "+00:00"))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                except Exception:
+                    exp_dt = None
+            existing_meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            if (
+                exp_dt is not None
+                and exp_dt > utcnow() + timedelta(seconds=safety_margin)
+                and str(existing.get("external_file_id") or "") == expected_file_id
+                and existing_meta.get("sha256") == material.get("sha256")
+            ):
+                reused = dict(existing)
+                reused["object_id"] = fallback.get("object_id")
+                if projected:
+                    for key in ("projection_object_id", "projection_sha256", "projection_size_bytes", "projected_content_type"):
+                        if key in projected:
+                            reused[key] = projected[key]
+                return reused
+
+        generation = max(int((existing or {}).get("generation") or 0), int(material.get("binding_generation") or 0)) + 1
+        if representation == "responses_external_url":
+            ttl_seconds = max(300, min(int(self.fallback.settings.supabase_signed_url_ttl), 604800))
+            uri_val = await self.fallback.sign_read_url(fallback, expires_in=ttl_seconds)
+            expiry = utcnow() + timedelta(seconds=ttl_seconds)
+        else:
+            uri_val = f"relay-fallback://{expected_file_id}"
+            expiry = utcnow() + timedelta(days=90)
+
+        now_iso = utcnow().isoformat()
+        meta: dict[str, Any] = {
+            "object_id": fallback.get("object_id"),
+            "storage_id": fallback.get("storage_id"),
+            "mime_type": material.get("content_type"),
+            "size_bytes": fallback.get("size_bytes"),
+            "sha256": material.get("sha256"),
+        }
+        if projected:
+            meta.update({
+                "is_docx_text_projection": True,
+                "projection_object_id": projected.get("projection_object_id"),
+                "projection_sha256": projected.get("projection_sha256"),
+                "projection_size_bytes": projected.get("projection_size_bytes"),
+                "projected_content_type": projected.get("projected_content_type"),
+            })
+
+        row = {
+            "material_id": material_id,
+            "provider": str(provider or "responses"),
+            "connection_id": connection_id,
+            "account_scope_hash": account_scope_hash,
+            "purpose": "inference_input",
+            "representation": representation,
+            "adapter_version": RESPONSES_FALLBACK_ADAPTER_VERSION,
+            "external_file_id": expected_file_id,
+            "provider_file_id": expected_file_id,
+            "external_uri": uri_val,
+            "file_uri": uri_val,
+            "state": "active",
+            "processing_state": "active",
+            "generation": generation,
+            "expires_at": expiry.isoformat(),
+            "last_verified_at": now_iso,
+            "last_used_at": now_iso,
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "metadata": meta,
+        }
+        persisted = dict(await self.repo.upsert_provider_binding(row) or row)
+        persisted["object_id"] = fallback.get("object_id")
+        if projected:
+            for key in ("projection_object_id", "projection_sha256", "projection_size_bytes", "projected_content_type"):
+                if key in projected:
+                    persisted[key] = projected[key]
+        await self.repo.update_material(
+            material_id,
+            {
+                "status": "ready_provider",
+                "binding_generation": generation,
+                "durability": "relay_backed",
+            },
+        )
+        return persisted
+
     @staticmethod
     def _snapshot(material: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
+        metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}
+        object_id = binding.get("object_id") or metadata.get("object_id")
+        projection_object_id = binding.get("projection_object_id") or metadata.get("projection_object_id")
+        extra: dict[str, Any] = {}
+        if object_id:
+            extra["object_id"] = object_id
+        if projection_object_id:
+            extra["projection_object_id"] = projection_object_id
+            for key in ("projection_sha256", "projection_size_bytes", "projected_content_type"):
+                val = binding.get(key) if key in binding else metadata.get(key)
+                if val is not None:
+                    extra[key] = val
         return {
             "material_id": material["id"],
             "binding_generation": int(binding.get("generation") or 1),
@@ -1346,7 +1527,8 @@ class MaterialBinder:
                 else material.get("content_type")
             ),
             "filename": material.get("filename"),
-            "metadata": binding.get("metadata") or {},
+            **extra,
+            "metadata": metadata,
         }
 
     async def bind_for_plan(self, state):
@@ -1381,6 +1563,16 @@ class MaterialBinder:
             existing_snapshot=existing_binding_snapshot,
             request_id=state.request_id,
             session_id=state.session_id,
+            account_scope_id=(
+                (
+                    ((state.session.get("metadata") or {}).get("_relay_route") or {}).get("account_scope_id")
+                    or state.snapshot.get("account_scope_id")
+                )
+                if state.snapshot.get("placement_contract_version") is not None
+                else None
+            ),
+            provider=state.snapshot.get("provider"),
+            protocol=state.snapshot.get("protocol"),
             gemini_inline_cache_strategy=(
                 state.native_gemini
                 and (state.snapshot.get("placement_contract_version") is None or not state.snapshot["material_placement_plan"].get("deduplicate_auto", True))

@@ -74,6 +74,62 @@ class PhysicalContextProjector:
         }
         state.provider_physical_plan = {**plan, "physical_plan_hash": stable_hash(plan)}
 
+    async def project_responses(self, state):
+        from app.materials.resolver import MaterialResolver
+        from app.core.material_placement import is_material_part, transport_user_parts
+        from app.protocol_adapters.wire_projection.responses_wire import project_responses_current_user_item
+
+        resolver = MaterialResolver(self.repo, self.bindings.fallback.storage, self.settings)
+        current = await project_responses_current_user_item(
+            state.snapshot,
+            material_ids=state.material_ids,
+            material_bindings=state.material_bindings,
+            materials=resolver,
+            tenant_id=state.request_row["tenant_id"],
+            conversation_hash=state.request_row["conversation_hash"],
+        )
+        state._responses_current_user_item = current
+
+        history_turns = [t for t in state.history if isinstance(t, dict) and (t.get("transport_history") or {}).get("kind") == "responses"]
+        cb = state.continuation_binding
+        cb_dict = cb.to_dict() if hasattr(cb, "to_dict") else (cb if isinstance(cb, dict) else {})
+        covered = int(cb_dict.get("covered_turn_count") or 0) if cb_dict.get("effective_mode") == "stateful_anchor_delta" else 0
+        delta_turns = history_turns[covered:] if 0 <= covered <= len(history_turns) else history_turns
+
+        kinds = ("input_file", "input_image", "input_text")
+        def _count_files(turns):
+            total = 0
+            text_bytes = 0
+            for turn in turns:
+                parts, _ = transport_user_parts(turn.get("transport_history"))
+                for idx, part in enumerate(parts):
+                    if is_material_part(part, kinds, is_responses=True, index=idx, total_parts=len(parts)) and part.get("type") in {"input_file", "input_image"}:
+                        total += 1
+                    if part.get("type") == "input_text":
+                        text_bytes += len(str(part.get("text") or "").encode("utf-8"))
+            return total, text_bytes
+
+        hist_files, hist_text_bytes = _count_files(history_turns)
+        delta_files, delta_text_bytes = _count_files(delta_turns)
+        cur_parts = current.get("content") or []
+        cur_files = sum(1 for p in cur_parts if isinstance(p, dict) and p.get("type") in {"input_file", "input_image"})
+        cur_text_bytes = sum(len(str(p.get("text") or "").encode("utf-8")) for p in cur_parts if isinstance(p, dict) and p.get("type") == "input_text")
+
+        plan = {
+            "protocol": "responses",
+            "current_user_hash": stable_hash(current),
+            "visible_history_hash": stable_hash(state.history),
+            "wire_metrics": {
+                "logical_total_file_part_count": hist_files + cur_files,
+                "wire_total_file_part_count": delta_files + cur_files,
+                "wire_current_turn_file_part_count": cur_files,
+                "history_content_count": len(history_turns),
+                "history_text_bytes": delta_text_bytes if covered else hist_text_bytes,
+                "current_text_bytes": cur_text_bytes,
+            },
+        }
+        state.provider_physical_plan = {**plan, "physical_plan_hash": stable_hash(plan)}
+
     async def project(self, state):
         state.context_plan = state.snapshot.get("context_plan") if isinstance(state.snapshot.get("context_plan"), dict) else None
         if (int(state.upgrade.get("version") or 0) >= 3 and state.upgrade.get("grok_mode") != "legacy_v1"
@@ -174,6 +230,8 @@ class PhysicalContextProjector:
 
         if state.snapshot.get("protocol") == "gemini_interactions":
             self.project_interactions(state)
+        elif state.snapshot.get("protocol") == "responses" and state.snapshot.get("placement_contract_version") is not None:
+            await self.project_responses(state)
 
         if state.cache_binding_obj is None:
             state.cache_binding = None

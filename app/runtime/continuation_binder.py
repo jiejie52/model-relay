@@ -146,12 +146,22 @@ class ContinuationBinder:
         ):
             raise ProviderRequestError("HISTORICAL_MATERIAL_UNPINNED", "Interactions replay requires a verified ledger for historical file references")
 
+        active_retention = (state.wire or {}).get("upstream_retention")
+        frozen_retention = state.snapshot.get("upstream_retention")
+        storage_denied = any(record is not None and record.get("allow_store") is not True
+                             for record in (active_retention, frozen_retention))
+        if storage_denied and topology.get("reusable_on_commit"):
+            if (intent.get("requested_mode") == "require_stateful_anchor"
+                    or not intent.get("allow_fallback_to_full", True)):
+                raise ProviderRequestError("CONTINUATION_STORAGE_NOT_AUTHORIZED", "Current retention policy forbids a stored response")
         can_store = (
-            topology.get("reusable_on_commit") is True
+            not storage_denied
+            and topology.get("reusable_on_commit") is True
             and (placement is not None or not state.material_bindings)
         )
         rejections: list[dict[str, Any]] = []
         matched_binding: ContinuationExecutionBinding | None = None
+        head_diverged = False
         is_mutable_container = anchor_class == "mutable_session_container"
         mutable_container_tainted = False
         if (
@@ -190,6 +200,7 @@ class ContinuationBinder:
             supports_multiturn = bool(topology.get("supports_multiturn_delta"))
             current_epoch = (state.wire or {}).get("affinity_epoch")
 
+            head_diverged = False
             valid_matches: list[tuple[int, int, dict[str, Any]]] = []
             for candidate in candidates:
                 aid = _anchor_field(candidate, "id") or _anchor_field(candidate, "anchor_id") or ""
@@ -205,6 +216,13 @@ class ContinuationBinder:
                 validity_reason = self._anchor_validity_reason(candidate, state, safety_seconds)
                 if validity_reason is not None:
                     rejections.append({"anchor_id": str(aid), "reason": validity_reason})
+                    continue
+
+                # Gate 1b: Parent head fingerprint match (instructions / tools / scope / model)
+                cand_head = _anchor_field(candidate, "head_fingerprint") or _anchor_field(candidate, "parent_head_fingerprint")
+                if cand_head != head:
+                    head_diverged = True
+                    rejections.append({"anchor_id": str(aid), "reason": "head_fingerprint_mismatch"})
                     continue
 
                 # Gate 2: Affinity epoch check
@@ -300,6 +318,14 @@ class ContinuationBinder:
         if matched_binding is not None:
             binding = matched_binding
         else:
+            if can_store and not topology.get("allow_head_mismatch_reopen", True):
+                last_head = next((turn["continuation_head_fingerprint"] for turn in reversed(history)
+                                  if turn.get("continuation_head_fingerprint")), None)
+                if head_diverged or (last_head is not None and last_head != head):
+                    raise ProviderRequestError(
+                        "CONTINUATION_HEAD_MISMATCH_REOPEN_FORBIDDEN",
+                        "Committed continuation head fingerprint diverged and reopen is forbidden by policy",
+                    )
             allow_stateless_fallback = intent.get("allow_fallback_to_full", True)
             can_init_stateful_root = can_store
             if is_mutable_container:
@@ -325,7 +351,10 @@ class ContinuationBinder:
                     )
 
             effective_mode = "stateful_root_init" if can_init_stateful_root else "stateless_full_replay"
-            if mutable_container_tainted and can_store:
+            if storage_denied:
+                decision_reason = fallback_reason = "CONTINUATION_STORAGE_NOT_AUTHORIZED"
+                fallback_occurred = bool(topology.get("reusable_on_commit"))
+            elif mutable_container_tainted and can_store:
                 decision_reason = "mutable_container_tainted"
                 fallback_occurred = True
                 fallback_reason = "MUTABLE_CONTAINER_TAINTED"
@@ -337,6 +366,10 @@ class ContinuationBinder:
                 decision_reason = "genesis_turn"
                 fallback_occurred = False
                 fallback_reason = None
+            elif head_diverged:
+                decision_reason = "head_fingerprint_diverged_reopen"
+                fallback_occurred = True
+                fallback_reason = "HEAD_FINGERPRINT_MISMATCH"
             elif can_store:
                 decision_reason = "no_valid_parent_fallback"
                 fallback_occurred = True

@@ -1003,6 +1003,8 @@ def _builtin_protocol_profiles() -> list[ProtocolProfileSpec]:
             profile_id="responses-official-v1",
             revision="relay-protocol-profile/responses-official/2026-11-22.1",
             protocol="responses",
+            supports_native_history_material_reuse=True,
+            history_material_part_kinds=("input_file", "input_image", "input_text"),
             continuation={
                 "anchor_class": "immutable_tree_anchor",
                 "request_anchor_field": "previous_response_id",

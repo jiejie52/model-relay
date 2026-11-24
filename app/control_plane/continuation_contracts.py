@@ -79,7 +79,7 @@ class ContinuationPolicySpec:
     allow_stateless_fallback_pre_dispatch: bool = True
     allow_head_mismatch_reopen: bool = True
     invalidate_on_affinity_rotation: bool = False
-    max_active_anchors_per_session: int = 10
+    max_active_anchors_per_session: int = 128
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def canonical(self) -> dict[str, Any]:
@@ -110,7 +110,7 @@ class ContinuationPolicySpec:
             allow_stateless_fallback_pre_dispatch=bool(data.get("allow_stateless_fallback_pre_dispatch", True)),
             allow_head_mismatch_reopen=bool(data.get("allow_head_mismatch_reopen", True)),
             invalidate_on_affinity_rotation=bool(data.get("invalidate_on_affinity_rotation", False)),
-            max_active_anchors_per_session=int(data.get("max_active_anchors_per_session") or 10),
+            max_active_anchors_per_session=int(data.get("max_active_anchors_per_session") or 128),
             metadata=dict(data.get("metadata") or {}),
         )
 
@@ -139,12 +139,18 @@ def validate_continuation_cross_contract(
     if isinstance(policy, dict):
         default_mode = str(policy.get("default_mode") or "off")
         policy_meta = policy.get("metadata") or {}
+        max_anchors = int(policy.get("max_active_anchors_per_session") or 128)
     elif policy is not None:
         default_mode = str(getattr(policy, "default_mode", "off") or "off")
         policy_meta = getattr(policy, "metadata", {}) or {}
+        max_anchors = int(getattr(policy, "max_active_anchors_per_session", 128) or 0)
     else:
         default_mode = "off"
         policy_meta = {}
+        max_anchors = 128
+
+    if max_anchors < 1:
+        raise ValueError("max_active_anchors_per_session must be >= 1")
 
     if default_mode not in {"off", "prefer_stateful_anchor", "require_stateful_anchor"}:
         raise ValueError(f"Unknown continuation policy default_mode: {default_mode!r}")
@@ -170,6 +176,9 @@ def validate_continuation_cross_contract(
     if conflicts:
         raise ValueError(f"Continuation mutually exclusive cache mechanisms enabled: {sorted(conflicts)}")
 
+    if prof_layout := ((getattr(profile, "continuation", None) or {}).get("instructions_layout")):
+        if prof_layout not in {"per_request", "root_system_message"}:
+            raise ValueError("Invalid Responses instructions_layout")
     # Zero Data Retention static gate
     conn_meta = getattr(connection, "metadata", {}) or {}
     cap_meta = getattr(capability, "metadata", {}) or {}

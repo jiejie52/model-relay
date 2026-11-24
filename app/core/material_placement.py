@@ -55,6 +55,43 @@ def route_identity(session):
             "connection_spec_hash": str(route.get("connection_spec_hash") or "")}
 
 
+def transport_user_parts(transport: dict[str, Any] | None) -> tuple[list[dict[str, Any]], bool]:
+    """Return user content part list and whether transport uses Responses layout."""
+    if not isinstance(transport, dict):
+        return [], False
+    if transport.get("kind") == "responses":
+        user_item = transport.get("user_item")
+        content = user_item.get("content") if isinstance(user_item, dict) else None
+        return (list(content) if isinstance(content, (list, tuple)) else []), True
+    user_content = transport.get("user_content")
+    parts = user_content.get("parts") if isinstance(user_content, dict) else None
+    return (list(parts) if isinstance(parts, (list, tuple)) else []), False
+
+
+def is_material_part(
+    part: Any,
+    kinds: list[str] | tuple[str, ...],
+    *,
+    is_responses: bool = False,
+    index: int = 0,
+    total_parts: int = 0,
+) -> bool:
+    """Return whether a native user content part represents an attached Material."""
+    if not isinstance(part, dict):
+        return False
+    if is_responses:
+        ptype = part.get("type")
+        if ptype not in kinds:
+            return False
+        if ptype in {"input_file", "input_image"}:
+            return True
+        if ptype == "input_text":
+            # In material-placement/2 Responses layout, material items precede the trailing user prompt.
+            return index < max(0, total_parts - 1)
+        return False
+    return any(k in part for k in kinds)
+
+
 def checked_history(history, kinds, transport_kind):
     """Validate native history before it reaches any dispatch boundary."""
     if not isinstance(history, (list, tuple)):
@@ -67,6 +104,14 @@ def checked_history(history, kinds, transport_kind):
             u = transport.get("interaction_user_input") or transport.get("user_content")
             m = transport.get("interaction_model_steps") or transport.get("steps") or transport.get("model_content")
             if not u or not m:
+                raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
+        elif transport_kind == "responses":
+            u = transport.get("user_item")
+            m = transport.get("response_output")
+            if (not isinstance(u, dict) or u.get("role") != "user"
+                    or not isinstance(u.get("content"), (list, tuple)) or not u["content"]
+                    or any(not isinstance(p, dict) or not p for p in u["content"])
+                    or not isinstance(m, (list, tuple))):
                 raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
         else:
             for field, role in (("user_content", "user"), ("model_content", "model")):
@@ -112,8 +157,9 @@ def verify_occurrences(*, session, history, ledger, kinds):
                     or binding.get("connection_id") != identity["connection_id"]
                     or binding.get("account_scope_hash") != identity["account_scope_id"]):
                 raise ValueError("binding identity")
-            part = history[index]["transport_history"]["user_content"]["parts"][part_index]
-            if not any(k in part for k in kinds) or stable_hash(part) != occ["part_digest"]:
+            parts, is_resp = transport_user_parts(history[index]["transport_history"])
+            part = parts[part_index]
+            if not is_material_part(part, kinds, is_responses=is_resp, index=part_index, total_parts=len(parts)) or stable_hash(part) != occ["part_digest"]:
                 raise ValueError("part")
             position = (index, part_index)
             if position in occupied:
@@ -124,9 +170,13 @@ def verify_occurrences(*, session, history, ledger, kinds):
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED") from exc
     # All user attachment occurrences must be accounted for, including prior
     # explicit re-submissions and materials outside the Session manifest.
-    expected = {(i, j) for i, turn in enumerate(history)
-                for j, part in enumerate(turn["transport_history"]["user_content"]["parts"])
-                if any(k in part for k in kinds)}
+    expected = set()
+    for i, turn in enumerate(history):
+        parts, is_resp = transport_user_parts(turn["transport_history"])
+        total = len(parts)
+        for j, part in enumerate(parts):
+            if is_material_part(part, kinds, is_responses=is_resp, index=j, total_parts=total):
+                expected.add((i, j))
     if occupied != expected:
         raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
     return verified

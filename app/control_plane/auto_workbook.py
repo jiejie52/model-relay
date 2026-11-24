@@ -12,6 +12,7 @@ from app.control_plane.definitions import ModelControlPlane
 from app.control_plane.governance.workbook import compile_workbook,COMPILER_VERSION
 from app.control_plane.governance.deployment_validation import verify_supply,validation_version,ProbeFailure
 from app.core.idempotency import stable_hash
+from app.control_plane.upstream_retention import resolve_upstream_retention
 
 def encode(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 
@@ -66,10 +67,16 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
         secret=plane.credential(supply.connection_id,settings)
         if not secret: return supply.offering_id,{'status':'pending','reason':'credential_missing',**location}
         if not archive_ok: return supply.offering_id,{'status':'pending','reason':'snapshot_history_unavailable',**location}
-        target={'connection':plane.connection(supply.connection_id).canonical(),'contract':plane.contract(supply.capability_contract_id).canonical(),
+        connection = plane.connection(supply.connection_id)
+        contract = plane.contract(supply.capability_contract_id)
+        policy = plane.continuation_policy(supply.continuation_policy_id)
+        policy_data = policy.canonical() if policy else {}
+        retention = resolve_upstream_retention(connection.metadata, contract.canonical(), policy_data)
+        target={'offering_id':supply.offering_id,'connection':connection.canonical(),'contract':contract.canonical(),
+            'continuation_policy':policy_data,'upstream_retention':retention,
             'profile':plane.protocol_profile(supply.protocol_profile_id).canonical(),
             'provider':supply.provider,'model':supply.model_pattern,'upstream_model':supply.metadata.get('upstream_model',supply.model_pattern),
-            'execution_authorization':supply.metadata.get('execution_authorization',{}),'validator':validation_version(plane.connection(supply.connection_id).protocol)}
+            'execution_authorization':supply.metadata.get('execution_authorization',{}),'validator':validation_version(connection.protocol)}
         fingerprint=hmac.new(secret.encode(),encode(target),'sha256').hexdigest()
         path=prefix+'validation/'+fingerprint+'.json'
         result=None
@@ -83,25 +90,33 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
         if result is None:
             async with semaphore:
                 operation_path=prefix+'validation-operations/'+fingerprint+'.json'
-                needs_operation='stateful_resource' in plane.contract(supply.capability_contract_id).cache.get('supported_mechanisms',[])
-                claimed=False
+                needs_operation = 'stateful_resource' in contract.cache.get('supported_mechanisms', []) or (
+                    retention['allow_store'] and policy_data.get('default_mode') in
+                    {'prefer_stateful_anchor', 'require_stateful_anchor'})
+                claimed = False
+                handles = []
                 async def journal(record):
                     nonlocal claimed
-                    if record.get('phase')=='cache_create_started':
+                    phase = record.get('phase')
+                    if phase in {'cache_create_started', 'anchor_probe_started'}:
                         try:
                             await asyncio.wait_for(backend.storage_put(operation_path,encode({**record,'target':stable_hash(target)}),upsert=False),settings.configuration_io_timeout_seconds)
                         except Exception:
-                            raise ProbeFailure('cache_validation_operation_busy_or_unknown') from None
+                            raise ProbeFailure('validation_operation_busy_or_unknown') from None
                         claimed=True
                     else:
-                        if not claimed: raise ProbeFailure('cache_validation_operation_not_claimed')
-                        await asyncio.wait_for(backend.storage_put(operation_path,encode(record)),settings.configuration_io_timeout_seconds)
+                        if not claimed: raise ProbeFailure('validation_operation_not_claimed')
+                        if record.get('handle'):
+                            handles.append(record['handle'])
+                        await asyncio.wait_for(backend.storage_put(operation_path, encode({
+                            **record, 'handles': handles, 'target': stable_hash(target)
+                        })), settings.configuration_io_timeout_seconds)
                 try:
                     args={'journal':journal} if verifier is verify_supply and needs_operation else {}
                     result=await asyncio.wait_for(verifier(settings,plane,supply,**args),settings.configuration_probe_timeout_seconds)
                 except asyncio.TimeoutError: result={'status':'pending','reason':'validation_timeout'}
                 except Exception as exc: result={'status':'pending','reason':'validation_'+type(exc).__name__}
-                if claimed and result.get('status')=='ready':
+                if claimed and result.get('probe_operation_closed') is True:
                     try: await asyncio.wait_for(backend.storage_delete(operation_path),settings.configuration_io_timeout_seconds)
                     except Exception: pass
             if result.get('status')=='ready':
@@ -128,7 +143,13 @@ async def prepare_configuration(settings, backend, *, verifier=verify_supply):
                 contract=contracts[supply.capability_contract_id]
                 cache={**contract.cache,'verification_status':'verified','mechanism_profiles':{
                     k:{**v,'verification_status':'verified'} for k,v in contract.cache.get('mechanism_profiles',{}).items()}}
-                contracts[contract.contract_id]=replace(contract,cache=cache)
+                continuation=dict(contract.continuation or {})
+                if continuation.get('anchor_class') not in (None,'','none'):
+                    facets=set(results[supply.offering_id].get('facets') or ())
+                    continuation['verification_status']='verified' if 'stateful_continuation' in facets else 'unverified'
+                    continuation['supports_multiturn_delta'] = bool(continuation.get('supports_multiturn_delta') and 'multiturn_delta' in facets)
+                    continuation['supports_branching'] = bool(continuation.get('supports_branching') and 'branching' in facets)
+                contracts[contract.contract_id]=replace(contract,cache=cache,continuation=continuation)
             supply=replace(supply,metadata={**supply.metadata,
                 'deployment_validation_state':results[supply.offering_id]['status'],
                 'deployment_validation_reason':results[supply.offering_id].get('reason')})

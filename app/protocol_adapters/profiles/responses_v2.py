@@ -39,7 +39,28 @@ class ResponsesV2Adapter:
         snapshot["current_query"] = self._input_text(snapshot.get("input"))
         snapshot["mode"] = "continue_session"
         snapshot["material_prefix_includes_current_query"] = False
-        material_prefix = await self._material_prefix(context)
+        placement_v2 = snapshot.get("placement_contract_version") is not None
+        current_user_item: dict[str, Any] | None = None
+        if placement_v2:
+            from app.core.idempotency import stable_hash
+            from app.protocol_adapters.base import ProviderRequestError
+            from app.protocol_adapters.wire_projection.responses_wire import project_responses_current_user_item
+
+            current_user_item = await project_responses_current_user_item(
+                snapshot,
+                material_ids=context.material_ids,
+                material_bindings=context.material_bindings,
+                materials=self.materials,
+                tenant_id=context.tenant_id,
+                conversation_hash=context.conversation_hash,
+            )
+            physical = context.provider_physical_plan if isinstance(context.provider_physical_plan, dict) else {}
+            if physical.get("current_user_hash") and stable_hash(current_user_item) != physical["current_user_hash"]:
+                raise ProviderRequestError("WIRE_HISTORY_DIGEST_MISMATCH", "Responses physical material projection mismatch")
+            snapshot["_relay_responses_current_user_item"] = current_user_item
+            material_prefix = []
+        else:
+            material_prefix = await self._material_prefix(context)
 
         legacy_history = []
         for turn in (context.history if snapshot.get("history_mode", "cumulative") != "ephemeral_turn" else []):
@@ -143,7 +164,7 @@ class ResponsesV2Adapter:
             material_prefix=material_prefix,
             history=legacy_history,
         )
-        user_item = self.legacy.make_user_item(snapshot["current_query"])
+        user_item = current_user_item if isinstance(current_user_item, dict) else self.legacy.make_user_item(snapshot["current_query"])
 
         observed = observed_response_facts(
             result.response_headers,
@@ -159,6 +180,9 @@ class ResponsesV2Adapter:
         if not new_handle and result.response_id:
             new_handle = result.response_id
 
+        from app.protocol_adapters.wire_projection.responses_wire import observe_responses_outcome
+        observed["responses_outcome"] = observe_responses_outcome(result.raw_json)
+        observed["store_observed"] = result.raw_json.get("store") if type(result.raw_json.get("store")) is bool else None
         if effective_mode in {"stateful_root_init", "stateful_anchor_delta", "stateless_full_replay"}:
             observed["continuation_stored"] = store_state
             observed["previous_anchor_ref"] = upstream_handle if active_continuation else None

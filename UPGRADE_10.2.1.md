@@ -1,6 +1,6 @@
 # Model Relay 10.2.1
 
-Gemini Interactions 的续接以已提交的原生历史为准。兼容的父锚点覆盖全部历史时，Relay 给 Google 发送上一轮 Interaction ID 和本轮输入。系统指令、工具声明和生成配置按本轮请求投影。因此，在同一会话更新这些参数时，Relay 可以继续引用包含相同历史的父锚点。会话、租户、上游账号与路由、已提交步骤及材料绑定仍参与续接校验。[Google Interactions API 文档](https://ai.google.dev/gemini-api/docs/interactions-overview#server-side-state)
+Gemini Interactions 的续接以已提交的原生历史及头部参数指纹为准。当 `parent_head_fingerprint`（覆盖规范化后的 `instructions`、`tools`、账号作用域及模型）与已提交父锚点一致且兼容锚点覆盖全部可见历史时，Relay 给上游发送上一轮 ID 和本轮输入；若 `instructions` 或 `tools` 变更导致头部指纹分叉，按策略 `allow_head_mismatch_reopen` 触发断链重开或 Fail-Closed 拦截（详见 10.7.0 说明）。会话、租户、上游账号与路由、已提交步骤及材料绑定仍参与续接校验。[Google Interactions API 文档](https://ai.google.dev/gemini-api/docs/interactions-overview#server-side-state)
 
 ## 两轮请求
 

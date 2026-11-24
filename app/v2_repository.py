@@ -1390,13 +1390,29 @@ class RelayV2Repository(RelayRepository):
                 continue
         return None
 
-    async def list_continuation_prefixes(self, *, session_id, tenant_id, conversation_hash, head, max_turns):
+    async def list_continuation_prefixes(
+        self,
+        *,
+        session_id,
+        tenant_id,
+        conversation_hash,
+        head: str | None = None,
+        max_turns: int | None = None,
+    ):
+        del head  # Binder evaluates head_fingerprint divergence to audit and enforce reopen policy.
+        filters: dict[str, str] = {
+            "session_id": f"eq.{session_id}",
+            "tenant_id": f"eq.{tenant_id}",
+            "conversation_hash": f"eq.{conversation_hash}",
+            "state": "eq.active",
+            "source_request_id": "not.is.null",
+            "expires_at": f"gt.{datetime.now(timezone.utc).isoformat()}",
+        }
+        if max_turns is not None:
+            filters["covered_turn_count"] = f"lte.{max_turns}"
         return await self.backend.select(
             "relay_continuation_anchors",
-            filters={"session_id": f"eq.{session_id}", "tenant_id": f"eq.{tenant_id}",
-                     "conversation_hash": f"eq.{conversation_hash}", "head_fingerprint": f"eq.{head}",
-                     "covered_turn_count": f"lte.{max_turns}", "state": "eq.active",
-                     "source_request_id": "not.is.null", "expires_at": f"gt.{datetime.now(timezone.utc).isoformat()}"},
+            filters=filters,
             order="covered_turn_count.desc,created_at.desc,id.asc",
         )
 
@@ -1605,3 +1621,22 @@ class RelayV2Repository(RelayRepository):
             "p_args": {"p_" + key: value for key, value in kwargs.items()},
             "p_material_occurrences": material_occurrences,
             "p_historical_bindings": historical_bindings, "p_safety_seconds": safety_seconds}))
+
+    async def reap_continuation_anchors(
+        self,
+        *,
+        delete_grace_seconds: int = 86400,
+        batch_limit: int = 500,
+    ) -> dict[str, int]:
+        raw = await self.backend.rpc(
+            "reap_continuation_anchors_v1",
+            {
+                "p_delete_grace_seconds": max(0, int(delete_grace_seconds)),
+                "p_batch_limit": min(5000, max(1, int(batch_limit))),
+            },
+        )
+        data = raw if isinstance(raw, dict) else {}
+        return {
+            "expired_count": int(data.get("expired_count") or 0),
+            "deleted_count": int(data.get("deleted_count") or 0),
+        }

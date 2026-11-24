@@ -158,11 +158,19 @@ def project_gemini_interactions_payload(
 
     payload["store"] = store
 
+    head = snapshot.get("normalized_head")
+    if head is not None and (store or previous_interaction_id):
+        if (snapshot.get("upstream_retention") or {}).get("allow_store") is not True:
+            raise ProviderRequestError("CONTINUATION_STORAGE_NOT_AUTHORIZED", "Interaction storage is not authorized")
+
     # 6. Interaction-scoped system instruction
     instructions = snapshot.get("instructions")
     if not versioned_proof and not instructions:
         instructions = session.get("instructions") or session.get("system_instructions")
-    if instructions:
+    if head is not None:
+        if head["instructions"]:
+            payload["system_instruction"] = head["instructions"]
+    elif instructions:
         if isinstance(instructions, str):
             inst_text = instructions.strip()
         elif isinstance(instructions, dict):
@@ -180,10 +188,19 @@ def project_gemini_interactions_payload(
         if inst_text:
             payload["system_instruction"] = inst_text
 
-    # 7. Interaction-scoped tools
+    # 7. Interaction-scoped tools (normalized symmetrically with parent_head_fingerprint)
     tools = snapshot.get("tools")
-    if tools and isinstance(tools, list):
-        payload["tools"] = copy.deepcopy(tools)
+    if head is not None:
+        if head["tools"]:
+            payload["tools"] = head["tools"]
+    elif tools and isinstance(tools, list):
+        from app.core.context_codec import normalize_native_payload
+        unordered = (((snapshot.get("protocol_profile") or {}).get("cache") or {}).get("unordered_tools") is True)
+        payload["tools"] = normalize_native_payload(
+            {"tools": copy.deepcopy(tools)},
+            response_schemas=True,
+            unordered_tools=unordered,
+        )["tools"]
 
     # 8. Single-turn generation config
     generation_config: dict[str, Any] = {}

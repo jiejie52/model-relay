@@ -47,14 +47,14 @@ class OpenAICompatibleResponsesProvider:
         self.connection_id = connection_id
         self.channel_id = channel_id
 
-    async def execute(
+    def project_payload(
         self,
         request_snapshot: dict[str, Any],
         *,
         session: dict[str, Any] | None,
         material_prefix: Any,
         history: list[dict[str, Any]],
-    ) -> ProviderResult:
+    ) -> dict[str, Any]:
         provider = str(request_snapshot.get("provider", "")).lower()
         model = str(request_snapshot["model"])
         think_level = str(request_snapshot.get("think_level") or "auto").lower()
@@ -70,12 +70,17 @@ class OpenAICompatibleResponsesProvider:
             if isinstance(previous_output, list):
                 input_items.extend(previous_output)
 
-        current_user_item = self.make_user_item(str(request_snapshot["current_query"]))
+        override_user_item = request_snapshot.get("_relay_responses_current_user_item")
+        current_user_item = (
+            override_user_item
+            if isinstance(override_user_item, dict)
+            else self.make_user_item(str(request_snapshot["current_query"]))
+        )
         prefix_has_query = bool(request_snapshot.get("material_prefix_includes_current_query"))
         if not (request_snapshot.get("mode") == "new_session" and prefix_has_query):
             input_items.append(current_user_item)
 
-        store_upstream, _ = self._resolve_continuation_control(request_snapshot)
+        store_upstream, parent_id = self._resolve_continuation_control(request_snapshot)
         payload: dict[str, Any] = {
             "model": model,
             "input": input_items,
@@ -83,11 +88,20 @@ class OpenAICompatibleResponsesProvider:
         }
 
         instructions = request_snapshot.get("instructions")
-        if instructions:
+        if instructions and request_snapshot.get("normalized_head") is None:
             payload["instructions"] = instructions
         tools = request_snapshot.get("tools")
-        if isinstance(tools, list) and tools:
-            payload["tools"] = json.loads(json.dumps(tools))
+        if request_snapshot.get("normalized_head") is None and isinstance(tools, list) and tools:
+            if str(request_snapshot.get("schema_version") or "") in V3_FENCED_REQUEST_VERSIONS:
+                from app.core.context_codec import normalize_native_payload
+                unordered = (((request_snapshot.get("protocol_profile") or {}).get("cache") or {}).get("unordered_tools") is True)
+                payload["tools"] = normalize_native_payload(
+                    {"tools": json.loads(json.dumps(tools))},
+                    response_schemas=True,
+                    unordered_tools=unordered,
+                )["tools"]
+            else:
+                payload["tools"] = json.loads(json.dumps(tools))
 
         self._apply_reasoning(
             payload,
@@ -103,7 +117,18 @@ class OpenAICompatibleResponsesProvider:
             provider=provider,
             model=model,
         )
-        self._apply_continuation(payload, request_snapshot)
+        from app.protocol_adapters.wire_projection.responses_wire import project_responses_head
+        project_responses_head(payload, request_snapshot, parent_id)
+        if parent_id:
+            payload["previous_response_id"] = parent_id
+        if store_upstream and request_snapshot.get("normalized_head") is not None:
+            # Stateful rehydration uses the provider's stored reasoning. In
+            # particular xAI's explicit encrypted include can disable that.
+            payload.pop("include", None)
+        if request_snapshot.get("normalized_head") is not None:
+            retention = request_snapshot.get("upstream_retention") or {}
+            if (store_upstream or parent_id) and retention.get("allow_store") is not True:
+                raise ProviderRequestError("CONTINUATION_STORAGE_NOT_AUTHORIZED", "Upstream response storage is not authorized")
 
         self._apply_model_options(payload, request_snapshot)
 
@@ -121,6 +146,18 @@ class OpenAICompatibleResponsesProvider:
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
 
+        return payload
+
+    async def execute(
+        self,
+        request_snapshot: dict[str, Any],
+        *,
+        session: dict[str, Any] | None,
+        material_prefix: Any,
+        history: list[dict[str, Any]],
+    ) -> ProviderResult:
+        payload = self.project_payload(request_snapshot, session=session,
+                                       material_prefix=material_prefix, history=history)
         base_url = (
             ((request_snapshot.get("upstream") or {}).get("base_url"))
             or self.base_url
@@ -174,15 +211,35 @@ class OpenAICompatibleResponsesProvider:
         try:
             decoded = decode_entity(raw, response_headers.get("content-encoding"))
             data = json.loads(decoded.decode("utf-8"))
-        except Exception as exc:
-            raise ProviderHTTPError(
-                response_status,
-                raw,
-                "Upstream response was not valid JSON",
+        except (ValueError, OSError) as cause:
+            exc = ProviderHTTPError(
+                response_status, raw, "Upstream response was not valid JSON",
                 content_type=response_headers.get("content-type"),
                 content_encoding=response_headers.get("content-encoding"),
-                request_id=(response_headers.get("x-request-id") or response_headers.get("request-id")),
-            ) from exc
+                request_id=response_headers.get("x-request-id") or response_headers.get("request-id"),
+                response_headers=response_headers, phase="responses_completion",
+            )
+            exc.code = "RESPONSES_GENERATION_UNKNOWN"
+            exc.unknown_completion = True
+            raise exc from cause
+
+        from app.protocol_adapters.wire_projection.responses_wire import observe_responses_outcome
+
+        outcome = observe_responses_outcome(data)
+        legacy_missing_status = (
+            isinstance(data, dict) and ("status" not in data or data["status"] is None)
+            and not data.get("error") and not payload["store"]
+            and not request_snapshot.get("response_completion_contract")
+        )
+        if outcome["completion"] != "completed" and not legacy_missing_status:
+            exc = ProviderHTTPError(response_status, raw, "Responses generation did not complete",
+                content_type=response_headers.get("content-type"),
+                content_encoding=response_headers.get("content-encoding"),
+                request_id=response_headers.get("x-request-id"), response_headers=response_headers,
+                phase="responses_completion")
+            exc.code = "RESPONSES_GENERATION_" + outcome["completion"].upper()
+            exc.unknown_completion = outcome["completion"] == "unknown"
+            raise exc
 
         text = self.extract_visible_text(data)
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
@@ -320,19 +377,12 @@ class OpenAICompatibleResponsesProvider:
                     )
                     return True, (str(prev_id) if prev_id else None)
 
+        if snapshot.get("normalized_head") is not None:
+            return False, None
         prev_id = snapshot.get("previous_response_id")
         if isinstance(prev_id, str) and prev_id.strip():
             return False, prev_id
         return False, None
-
-    @classmethod
-    def _apply_continuation(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
-        """Inject OpenAI/Grok Responses previous_response_id safely into payload."""
-        store_flag, prev_id = cls._resolve_continuation_control(snapshot)
-        if store_flag:
-            payload["store"] = True
-        if prev_id:
-            payload["previous_response_id"] = str(prev_id)
 
     @classmethod
     def _apply_model_options(cls, payload: dict[str, Any], snapshot: dict[str, Any]) -> None:

@@ -190,6 +190,8 @@ class RequestAcceptor:
             or (body.metadata or {}).get("continuation_mode")
             or (body.metadata or {}).get("requested_continuation_mode")
         )
+        if body.tools is not None:
+            public_intent["tools"] = [tool.model_dump(mode="json") for tool in body.tools]
         if body_continuation_mode is not None:
             public_intent["continuation_mode"] = body_continuation_mode
         if body.context_policy is not None:
@@ -533,6 +535,20 @@ class RequestAcceptor:
                 capability_revision=resolved_options.capability_revision,
             )
 
+        from app.core.continuation_fingerprint import HEAD_PROJECTION_VERSION, normalize_context_head
+        retention = frozen_route.get("upstream_retention")
+        if (tenant_id in getattr(settings, "zero_data_retention_tenants", ())
+                or session_metadata.get("zero_data_retention") is True):
+            from app.control_plane.upstream_retention import resolve_upstream_retention
+            retention = resolve_upstream_retention(tenant_zdr=True)
+        versioned_head = frozen_route.get("upstream_retention") is not None
+        tools = public_intent.get("tools")
+        if tools is not None:
+            allowed_tools = ((frozen_route.get("protocol_profile") or {}).get("metadata") or {}).get("hosted_tools") or []
+            if (not versioned_head or not cache_contract_session
+                    or any(tool["type"] not in allowed_tools for tool in tools)
+                    or len({tool["type"] for tool in tools}) != len(tools)):
+                raise ExecutionRequestError(422, {"code": "TOOLS_NOT_AUTHORIZED"})
         base_snapshot = {
             "audit_context": {"entry_point": services.entry_point},
             "protocol_profile": frozen_route.get("protocol_profile"),
@@ -549,7 +565,12 @@ class RequestAcceptor:
             **({"request_context_policy": body.context_policy} if body.context_policy is not None else {}),
             "context_policy": request_policy,
             "model_history_visible": model_history_visible,
-            "tools": (body.provider_payload or {}).get("tools"),
+            "tools": tools if tools is not None else (body.provider_payload or {}).get("tools"),
+            **({"upstream_retention": retention} if retention is not None else {}),
+            **({"head_format": HEAD_PROJECTION_VERSION,
+                "normalized_head": normalize_context_head(effective_instructions, tools, frozen_route.get("protocol_profile")),
+                "response_completion_contract": "responses-completion/1"}
+               if versioned_head else {}),
             "effective_material_ids": effective_material_ids,
             "material_hashes": material_hashes,
             "material_total_bytes": material_total_bytes,

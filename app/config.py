@@ -7,7 +7,7 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-RELAY_VERSION = "10.6.2"
+RELAY_VERSION = "10.8.0"
 BUILD_GIT_SHA = os.getenv("BUILD_GIT_SHA", "unknown")
 
 
@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # capability contracts and per-model channel priority. Configuration may
     # reference credential *environment variable names* but never secret values.
     model_control_plane_revision: str = "relay-model-control-plane/2026-10-02.1"
+    zero_data_retention_tenants: list[str] = Field(default_factory=list)
     model_workbook_file: str = "config/model_management_v2.xlsx"
     credential_env_file: str | None = ".env"
     configuration_io_timeout_seconds: float = Field(5,gt=0,le=30)
@@ -104,6 +105,9 @@ class Settings(BaseSettings):
 
     worker_max_runtime_seconds: int = 2400
     worker_poll_seconds: float = 2.0
+    continuation_anchor_reap_interval_seconds: float = Field(300.0, ge=10.0, le=86400.0)
+    continuation_anchor_delete_grace_seconds: int = Field(86400, ge=0, le=2592000)
+    continuation_anchor_reap_batch_limit: int = Field(500, ge=1, le=5000)
 
     # Railway Serverless lifecycle coupling. The API sends a short private-network
     # wake signal when it receives application traffic; the Worker keeps polling

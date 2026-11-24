@@ -95,6 +95,14 @@ class SessionManager:
                 },
             )
 
+        retention = route.upstream_retention
+        tenant_zdr = (body.tenant_id in getattr(settings, "zero_data_retention_tenants", ())
+                      or (body.metadata or {}).get("zero_data_retention") is True)
+        if retention is not None and (tenant_zdr or retention["reason"] == "zdr_forbidden"):
+            if ((route.continuation_policy or {}).get("default_mode") == "require_stateful_anchor"
+                    or "stateful_continuation" in body.capability_requirements.required_features):
+                raise ExecutionRequestError(409, {"code": "CONTINUATION_FORBIDDEN_BY_ZDR_POLICY"})
+
         await _validate_materials_for_route(
             services,
             material_ids=body.material_ids,

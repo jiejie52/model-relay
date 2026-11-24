@@ -67,6 +67,7 @@ class RouteBinding:
     continuation_policy_id: str | None = None
     continuation_policy_hash: str | None = None
     continuation_policy: dict[str, Any] | None = None
+    upstream_retention: dict[str, Any] | None = None
     control_plane_hash: str | None = None
     capability_requirements: dict[str, Any] = field(default_factory=dict)
     observed_model_policy: str = "audit"
@@ -117,6 +118,7 @@ class RouteBinding:
                 "continuation_policy": self.continuation_policy,
             } if self.continuation_policy or self.continuation_policy_id else {}),
             "control_plane_hash": self.control_plane_hash,
+            **({"upstream_retention": self.upstream_retention} if self.upstream_retention is not None else {}),
             "capability_requirements": self.capability_requirements,
             "observed_model_policy": self.observed_model_policy,
             "quota": self.quota,
@@ -524,6 +526,10 @@ class RouteResolver:
             connection_spec = self.config_snapshot.connection(selected.connection_id) if self.config_snapshot else None
             from app.core.idempotency import stable_hash
             connection_identity = stable_hash({"connection": connection_spec.identity_hash, "protocol_profile": protocol_profile or {}}) if connection_spec else None
+            from app.control_plane.upstream_retention import resolve_upstream_retention
+            upstream_retention = resolve_upstream_retention(
+                connection_spec.metadata if connection_spec else None, capability_contract, continuation_policy,
+            ) if selected.protocol in {"responses", "gemini_interactions"} else None
             supply_metadata = (self.config_snapshot.supplies.get(selected.offering_id, {}).get("metadata") or {}) if self.config_snapshot else {}
             canonical = {
                 **({'connection_contract_version':2,'connection_spec_hash':connection_spec.identity_hash,'account_scope_id':scope_hash} if connection_spec else {}),
@@ -553,6 +559,7 @@ class RouteResolver:
                 **({"continuation_contract_hash": continuation_contract_hash} if continuation_contract_hash else {}),
                 **({"continuation_policy_id": continuation_policy_id} if continuation_policy_id else {}),
                 **({"continuation_policy_hash": continuation_policy_hash} if continuation_policy_hash else {}),
+                **({"upstream_retention": upstream_retention} if upstream_retention is not None else {}),
                 "capability_requirements": req,
                 "observed_model_policy": selected.observed_model_policy,
                 **({"execution_authorization": selected.execution_authorization} if selected.execution_authorization else {}),
@@ -598,6 +605,7 @@ class RouteResolver:
                 continuation_policy_id=continuation_policy_id,
                 continuation_policy_hash=continuation_policy_hash,
                 continuation_policy=continuation_policy,
+                upstream_retention=upstream_retention,
                 control_plane_hash=self.catalog.control_plane_hash,
                 capability_requirements=req,
                 observed_model_policy=selected.observed_model_policy,
