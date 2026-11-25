@@ -1120,7 +1120,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["stateful_resource", "implicit_prefix"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
                 "mechanism_profiles": {
                     "implicit_prefix": {
                         "verification_status": "trial",
@@ -1271,7 +1271,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["implicit_prefix"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
                 "mechanism_profiles": {"implicit_prefix": {"threshold_mode": "unknown"}},
             },
             structured_mode="native_json_schema",
@@ -1290,7 +1290,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["implicit_prefix"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
                 "mechanism_profiles": {"implicit_prefix": {"threshold_mode": "unknown"}},
             },
             structured_mode="native_json_schema",
@@ -1309,7 +1309,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["breakpoint"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
                 "mechanism_profiles": {
                     "breakpoint": {"threshold_mode": "unknown", "max_breakpoints": 1}
                 },
@@ -1331,7 +1331,7 @@ def _builtin_contracts() -> list[CapabilityContract]:
             cache={
                 "version": "relay-cache-contract/1",
                 "supported_mechanisms": ["breakpoint"],
-                "verification_status": "candidate",
+                "verification_status": "verified",
                 "mechanism_profiles": {
                     "breakpoint": {"threshold_mode": "unknown", "max_breakpoints": 1}
                 },

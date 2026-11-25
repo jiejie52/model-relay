@@ -1,3 +1,7 @@
+# Model Relay 10.9.1
+
+移除全部模型的启动期上游网络探针（`deployment_validation`），改为**编译期静态契约校验 + 本地凭据存在性检查**秒级完成就绪准入，彻底消除启动探针误报 `stateful_continuation_recall_failed`（`interaction_stored: false`）、推理模型探针超时 `pending`、`claude_messages` / 通配符路由误阻断以及 API 与 Worker 并发抢锁问题。无需新增 SQL 迁移；升级配置与变更明细见 [UPGRADE_10.9.1.md](UPGRADE_10.9.1.md)。
+
 # Model Relay 10.9.0
 
 优化上下文续接与前缀缓存命中率，并在 `context_policy=explicit` 辅助轮次消除不必要协议与文件上传往返：无状态 `store=false` 路径首轮即保持 `user_input[]` 顶层结构一致；`context_policy=conversation` 默认开启状态续接与 `requested_cache_mode="auto"`；`explicit` 单轮在执行层按请求动态分流至 `gemini_native` 并对 Gemini / Kimi 小材料（`<= 4 MiB`）单次请求直读内联，同时自动抑制 Claude `breakpoint` / Gemini `stateful_resource` 写入溢价。无新增 SQL 迁移；升级配置与兼容边界见 [UPGRADE_10.9.0.md](UPGRADE_10.9.0.md)。

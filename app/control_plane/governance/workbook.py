@@ -10,7 +10,7 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/10.9.0'
+COMPILER_VERSION = 'relay-excel/10.9.1'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
 CONTINUATION_OPTIONAL = ('续接模式','锚点保留时长秒数','验证多轮补发')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
@@ -253,9 +253,10 @@ def compile_workbook(content, settings):
         if mechanisms in (['implicit_prefix'], ['breakpoint']): file_mode='inline_bytes_only'
         if mechanisms and file_mode=='file_uri_allowed' and ('provider_files_api' not in contract.metadata['material_transport']['supported_material_transports'] or 'stateful_resource' not in mechanisms):
             fail(row,'缓存设置','file_uri_allowed 必须同时具备 Files 和显式资源能力')
-        cache_contract={'version':'relay-cache-contract/1','supported_mechanisms':mechanisms,'verification_status':'unverified',
+        cache_contract={'version':'relay-cache-contract/1','supported_mechanisms':mechanisms,
+            'verification_status':('verified' if mechanisms else 'disabled'),
             'explicit_cache_material_mode':file_mode,'composite_mode':'mutually_exclusive',
-            'mechanism_profiles':{mech:{'verification_status':'unverified','minimum_cacheable_tokens':cache['计划门槛 Token'] or 1024,
+            'mechanism_profiles':{mech:{'verification_status':'verified','minimum_cacheable_tokens':cache['计划门槛 Token'] or 1024,
                 'threshold_mode':'count_tokens' if mech=='stateful_resource' else 'provider_enforced','final_threshold_guard':True,
                 'ttl_seconds':(cache['资源有效期 分钟'] or 60)*60} for mech in mechanisms}}
         raw_cont_mode = value(binding, '续接模式', True)
@@ -279,10 +280,21 @@ def compile_workbook(content, settings):
         continuation_contract = {}
         cont_policy_id = None
         if connection.protocol == 'gemini_interactions' or cont_mode != 'off':
+            from app.control_plane.upstream_retention import resolve_upstream_retention
+            retention = resolve_upstream_retention(
+                connection.metadata,
+                contract.canonical(),
+                {'default_mode': cont_mode},
+            )
+            cont_verified = (
+                'verified'
+                if (connection.protocol in ('gemini_interactions', 'responses') and cont_mode != 'off' and retention['allow_store'])
+                else 'unverified'
+            )
             continuation_contract = {
                 'version': 'relay-continuation-contract/1',
                 'anchor_class': 'immutable_tree_anchor',
-                'verification_status': 'unverified',
+                'verification_status': cont_verified,
                 'supports_branching': True,
                 'supports_multiturn_delta': True,
                 'requires_upstream_store': True,
