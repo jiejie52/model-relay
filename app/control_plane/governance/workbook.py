@@ -10,7 +10,7 @@ from app.control_plane.governance.v2_import import DeclarationError, parse_v2_de
 from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/10.8.0'
+COMPILER_VERSION = 'relay-excel/10.9.0'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
 CONTINUATION_OPTIONAL = ('续接模式','锚点保留时长秒数','验证多轮补发')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
@@ -129,10 +129,17 @@ def compile_workbook(content, settings):
         retention_mode = value(row,'上游续接留存',True)
         if retention_mode not in (None, '允许', '禁止', 'ZDR'):
             fail(row,'上游续接留存','仅支持 允许 / 禁止 / ZDR')
-        retention_metadata = (
-            {'allow_upstream_store': retention_mode == '允许', 'zero_data_retention': retention_mode == 'ZDR'}
-            if retention_mode is not None else {}
-        )
+        if retention_mode is None:
+            retention_metadata = (
+                {'allow_upstream_store': True, 'zero_data_retention': False}
+                if protocol in ('gemini_interactions', 'responses')
+                else {}
+            )
+        else:
+            retention_metadata = {
+                'allow_upstream_store': retention_mode == '允许',
+                'zero_data_retention': retention_mode == 'ZDR',
+            }
         connections[cid]=ModelControlPlane._connection_from_mapping({**values,'connection_id':cid,'channel_id':value(row,'渠道ID'),
             'protocol':protocol,'auth_type':auth,'credential_ref':credential,'metadata':retention_metadata,'sdk_endpoint_options':{'base_url':value(row,'SDK端点',True) or values['base_url']}})
     for pid,row in unique(ext['协议配置'],'协议ID').items():
@@ -237,13 +244,13 @@ def compile_workbook(content, settings):
         cache=cache_rows.get((model,channel))
         if not cache: fail(row,'缓存设置','缺少缓存行')
         mechanisms=[]
-        if cache['启用意向']=='启用' and cache['缓存机制']!='不使用': mechanisms=[{'显式资源':'stateful_resource','隐式前缀':'implicit_prefix'}[cache['缓存机制']]]
+        if cache['启用意向']=='启用' and cache['缓存机制']!='不使用': mechanisms=[{'显式资源':'stateful_resource','隐式前缀':'implicit_prefix','断点':'breakpoint'}[cache['缓存机制']]]
         from app.protocol_adapters.factory import RESOURCE_MECHANISMS
         if not set(mechanisms)<=RESOURCE_MECHANISMS[connection.protocol]: fail(row,'缓存机制','协议实现不支持')
         cap_id='excel-cap:'+stable_hash([model,env,channel])[:20]; policy_id='excel-policy:'+stable_hash([model,env,channel])[:20]
         source_cap=cap_rows[value(binding,'合同ID')]; file_mode=value(source_cap,'显式缓存材料模式')
         if file_mode not in ('inline_bytes_only','file_uri_allowed'): fail(source_cap,'显式缓存材料模式','未知模式')
-        if mechanisms==['implicit_prefix']: file_mode='inline_bytes_only'
+        if mechanisms in (['implicit_prefix'], ['breakpoint']): file_mode='inline_bytes_only'
         if mechanisms and file_mode=='file_uri_allowed' and ('provider_files_api' not in contract.metadata['material_transport']['supported_material_transports'] or 'stateful_resource' not in mechanisms):
             fail(row,'缓存设置','file_uri_allowed 必须同时具备 Files 和显式资源能力')
         cache_contract={'version':'relay-cache-contract/1','supported_mechanisms':mechanisms,'verification_status':'unverified',
@@ -262,7 +269,7 @@ def compile_workbook(content, settings):
                 fail(binding, '续接模式', '仅支持 关闭 / 优先锚点 / 强制锚点')
             cont_mode = cont_mode_map[raw_cont_mode]
         else:
-            cont_mode = 'prefer_stateful_anchor' if connection.protocol == 'gemini_interactions' else 'off'
+            cont_mode = 'prefer_stateful_anchor' if connection.protocol in ('gemini_interactions', 'responses') else 'off'
         probe_delta = value(binding,'验证多轮补发',True)
         if probe_delta not in (None,'是','否'):
             fail(binding,'验证多轮补发','只能填写是或否')
@@ -332,7 +339,7 @@ def compile_workbook(content, settings):
             fail(binding, '续接配置', str(exc))
         policies[policy_id]=ModelControlPlane._cache_policy_from_mapping({'policy_id':policy_id,'revision':COMPILER_VERSION,'scope':'session',
             'mechanism_preference':mechanisms,'auto_prepare_failure':'uncached_same_context' if cache['自动准备失败时']=='原文无缓存继续' else 'fail',
-            'metadata':{'default_mode':{'关闭':'off','自动':'auto','强制':'on'}[cache['默认策略']] if mechanisms else 'off','allow_force':cache['可选强制']=='是'}})
+            'metadata':{'default_mode':('on' if cache['默认策略']=='强制' and mechanisms else 'auto'),'allow_force':cache['可选强制']=='是'}})
         sid='excel:'+stable_hash([model,env,channel])[:24]
         quota={}
         for field,key in [('最大活跃会话','max_active_sessions'),('预留预算上限','budget_limit_units'),('每会话预留预算','reserve_units')]:

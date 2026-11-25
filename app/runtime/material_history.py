@@ -173,7 +173,7 @@ def verify_pre_seal_material_invariants(state):
     if [b["material_id"] for b in state.material_bindings] != placement["current_effective_material_ids"]:
         raise ProviderRequestError("CURRENT_TURN_MATERIAL_BINDING_MISMATCH", "Current bindings differ from the frozen placement")
     physical = state.provider_physical_plan or {}
-    protocol = state.snapshot.get("protocol")
+    protocol = state.snapshot.get("effective_wire_protocol") or state.snapshot.get("protocol")
     if protocol == "responses":
         current = getattr(state, "_responses_current_user_item", None)
         current_parts = current.get("content") if isinstance(current, dict) else None

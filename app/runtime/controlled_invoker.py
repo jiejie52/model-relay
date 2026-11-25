@@ -55,7 +55,8 @@ class ControlledInvoker:
         state.wire.setdefault("model", state.snapshot.get("model"))
         state.wire.setdefault("request_id", state.request_id)
         state.wire.setdefault("session_id", state.session_id)
-        adapter = self.providers.get_v2(str(state.snapshot["connection_id"]))
+        effective_protocol = state.snapshot.get("effective_wire_protocol") or state.snapshot.get("protocol")
+        adapter = self.providers.get_v2(str(state.snapshot["connection_id"]), protocol=effective_protocol)
         provider_started_ms = now_ms()
         metadata = state.snapshot.get("metadata") if isinstance(state.snapshot.get("metadata"), dict) else {}
         input_value = state.snapshot.get("input") if isinstance(state.snapshot.get("input"), dict) else {}
@@ -249,7 +250,7 @@ class ControlledInvoker:
         if state.is_v3:
             plan = state.snapshot.get("cache_plan") if isinstance(state.snapshot.get("cache_plan"), dict) else {}
             usage_observation = normalize_cache_usage(
-                protocol=(str(state.snapshot.get("protocol")) if state.snapshot.get("protocol") else None),
+                protocol=(str(effective_protocol) if effective_protocol else None),
                 usage=result.usage,
                 effective_mechanism=(state.cache_binding or {}).get("mechanism"),
                 requested_mode=str(state.snapshot.get("requested_cache_mode") or "auto"),

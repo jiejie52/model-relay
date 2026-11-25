@@ -55,6 +55,32 @@ class PhysicalContextProjector:
                     state.wire["compared_request_id"] = str(affinity_rows[0]["id"])
 
 
+    def project_auxiliary_gemini_native(self, state):
+        from app.protocol_adapters.wire_projection.gemini_wire import (
+            project_current_user_content,
+            project_history_contents,
+            project_system_instruction,
+        )
+
+        current = project_current_user_content(
+            state.snapshot,
+            material_ids=state.material_ids,
+            material_bindings=state.material_bindings,
+        )
+        contents = project_history_contents(state.history) + [current]
+        full_payload: dict[str, Any] = {"contents": contents}
+        instruction = project_system_instruction(state.snapshot)
+        if instruction is not None:
+            full_payload["systemInstruction"] = instruction
+        plan = {
+            "protocol": "gemini_native",
+            "payload_hash": stable_hash(full_payload),
+            "current_user_hash": stable_hash(current),
+            "visible_history_hash": stable_hash(state.history),
+            "full_uncached_payload": full_payload,
+        }
+        state.provider_physical_plan = {**plan, "physical_plan_hash": stable_hash(plan)}
+
     def project_interactions(self, state):
         from app.observability.http_wire_logger import wire_context
         from app.protocol_adapters.wire_projection.gemini_interactions_wire import project_gemini_interactions_payload
@@ -228,8 +254,11 @@ class PhysicalContextProjector:
                 ),
             )
 
-        if state.snapshot.get("protocol") == "gemini_interactions":
+        effective_protocol = state.snapshot.get("effective_wire_protocol") or state.snapshot.get("protocol")
+        if effective_protocol == "gemini_interactions":
             self.project_interactions(state)
+        elif effective_protocol == "gemini_native" and state.snapshot.get("protocol") == "gemini_interactions":
+            self.project_auxiliary_gemini_native(state)
         elif state.snapshot.get("protocol") == "responses" and state.snapshot.get("placement_contract_version") is not None:
             await self.project_responses(state)
 

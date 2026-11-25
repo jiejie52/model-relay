@@ -53,7 +53,14 @@ class MoonshotChatAdapter:
             )
 
         messages: list[dict[str, Any]] = []
-        if (context.session.get("context_policy") == "conversation"
+        request_policy = (
+            context.snapshot.get("request_context_policy")
+            or context.snapshot.get("context_policy")
+            or context.session.get("context_policy")
+        )
+        if (request_policy == "conversation"
+                and context.session.get("context_policy") == "conversation"
+                and context.snapshot.get("model_history_visible") is not False
                 and context.snapshot.get("history_mode", context.session.get("history_mode", "cumulative")) != "ephemeral_turn"):
             for turn in context.history:
                 transport = turn.get("transport_history") if isinstance(turn, dict) else None
@@ -199,6 +206,17 @@ class MoonshotChatAdapter:
                                                           conversation_hash=context.conversation_hash)
                 begin, end = source_markers(material_id, filename, upgraded=True)
                 system_messages.append({"role": "system", "content": f"{begin}\n{raw.decode('utf-8')}\n{end}"})
+                continue
+            if purpose == "inline-text" or binding.get("representation") == "kimi_inline_text":
+                resolved = await self.materials.resolve_frozen(
+                    binding,
+                    tenant_id=context.tenant_id,
+                    conversation_hash=context.conversation_hash,
+                    with_bytes=True,
+                )
+                text = (resolved.data or b"").decode("utf-8", errors="replace")
+                begin, end = source_markers(material_id, filename, upgraded=normalization_active())
+                system_messages.append({"role": "system", "content": f"{begin}\n{text}\n{end}"})
                 continue
             if purpose == "file-extract":
                 metadata = binding.get("metadata") if isinstance(binding.get("metadata"), dict) else {}

@@ -56,13 +56,20 @@ class GeminiNativeAdapter:
             if spec.mode == "json_object":
                 generation["responseMimeType"] = "application/json"
             elif spec.mode == "json_schema" and spec.schema is not None:
-                projection = project_schema_for_provider(
-                    spec.schema,
-                    provider="gemini",
-                    model=context.snapshot.get("model"),
-                )
-                generation["responseMimeType"] = "application/json"
-                generation["responseSchema"] = projection.schema
+                guarantee = str(context.snapshot.get("structured_output_guarantee") or "native_constrained")
+                try:
+                    projection = project_schema_for_provider(
+                        spec.schema,
+                        provider="gemini",
+                        model=context.snapshot.get("model"),
+                    )
+                    generation["responseMimeType"] = "application/json"
+                    generation["responseSchema"] = projection.schema
+                except Exception:
+                    if guarantee in {"post_validate", "relay_result_object"}:
+                        generation["responseMimeType"] = "application/json"
+                    else:
+                        raise
 
         # AIHubMix follows the Gemini CachedContent contract here: once a
         # cachedContent reference is present, systemInstruction/tools/toolConfig
@@ -147,7 +154,7 @@ class GeminiNativeAdapter:
             )
         text_parts: list[str] = []
         for part in model_content.get("parts") or []:
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
+            if isinstance(part, dict) and not part.get("thought") and isinstance(part.get("text"), str):
                 text_parts.append(part["text"])
         text = "\n".join(text_parts)
         usage_meta = data.get("usageMetadata") or data.get("usage_metadata")
@@ -188,7 +195,7 @@ class GeminiNativeAdapter:
             provider_request_id=self._request_id(response_headers),
             observed=native_response_facts(data,payload,context,self.connection,observed_response_facts(
                 response_headers,
-                body_model=(str(data.get("modelVersion")) if data.get("modelVersion") else None),
+                body_model=(str(data.get("modelVersion")).removeprefix("models/") if data.get("modelVersion") else None),
                 protocol="gemini_native",
                 channel_id=str(context.snapshot.get("channel_id") or self.connection.spec.channel_id),
             evidence_headers=(((context.snapshot.get("protocol_profile") or {}).get("metadata") or {}).get("response_evidence_headers")),

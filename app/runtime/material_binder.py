@@ -55,12 +55,23 @@ class MaterialBinder:
         gemini_session_material_ids: list[str] | None = None,
         document_projection_contract: dict[str, Any] | None = None,
         transport_policy: dict[str, Any] | None = None,
+        context_policy: str | None = None,
+        effective_wire_protocol: str | None = None,
     ) -> list[dict[str, Any]]:
         # Once a Request has frozen bindings, retries reuse those exact provider
         # identities instead of silently switching generations. The frozen
         # snapshot must still belong to the Session's private route.
         adapter = self.file_adapters.maybe_get(connection_id)
-        files_only = (transport_policy or {}).get("supported_material_transports") == ["provider_files_api"]
+        is_explicit_turn = str(context_policy or "").strip().lower() == "explicit"
+        effective_proto = str(effective_wire_protocol or protocol or "").strip().lower()
+        aux_inline_max = int(
+            getattr(self.fallback.settings, "auxiliary_inline_max_bytes", 4 * 1024 * 1024)
+            or 4 * 1024 * 1024
+        )
+        files_only = (
+            (transport_policy or {}).get("supported_material_transports") == ["provider_files_api"]
+            and not (is_explicit_turn and effective_proto == "gemini_native")
+        )
         if existing_snapshot:
             for item in existing_snapshot:
                 frozen_connection = str(item.get("connection_id") or "")
@@ -131,13 +142,26 @@ class MaterialBinder:
                     )
                 sizes.append(int(raw_size))
             configured_transport = (transport_policy or {}).get("supported_material_transports")
-            gemini_decision = decide_gemini_request_transport(
-                material_sizes=sizes,
-                threshold_bytes=int((transport_policy or {}).get("external_url_max_total_bytes", (transport_policy or {}).get("threshold_bytes")) or
-                    getattr(self.fallback.settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)),
-                threshold_inclusive=bool((transport_policy or {}).get("threshold_inclusive", False)),
-                supported_material_transports=configured_transport,
-            )
+            if (
+                is_explicit_turn
+                and effective_proto == "gemini_native"
+                and materials
+                and sum(sizes) <= aux_inline_max
+            ):
+                gemini_decision = GeminiTransportDecision(
+                    mode="inline_cache_no_files",
+                    total_bytes=sum(sizes),
+                    threshold_bytes=aux_inline_max,
+                    source="explicit_auxiliary_inline_direct",
+                )
+            else:
+                gemini_decision = decide_gemini_request_transport(
+                    material_sizes=sizes,
+                    threshold_bytes=int((transport_policy or {}).get("external_url_max_total_bytes", (transport_policy or {}).get("threshold_bytes")) or
+                        getattr(self.fallback.settings, "gemini_cache_inline_fallback_limit_bytes", 70 * 1024 * 1024)),
+                    threshold_inclusive=bool((transport_policy or {}).get("threshold_inclusive", False)),
+                    supported_material_transports=configured_transport,
+                )
             if gemini_inline_cache_strategy and not configured_transport:
                 gemini_inline_cache_ids = set(
                     select_gemini_inline_cache_material_ids(
@@ -270,6 +294,89 @@ class MaterialBinder:
                     }
                 )
                 continue
+
+            if (
+                gemini_decision is not None
+                and gemini_decision.source == "explicit_auxiliary_inline_direct"
+            ):
+                fallback = await self.repo.get_material_fallback(material_id)
+                if fallback:
+                    data = await self.fallback.read(fallback)
+                    actual_sha = hashlib.sha256(data).hexdigest()
+                    if material.get("sha256") and actual_sha != material["sha256"]:
+                        raise ProviderRequestError(
+                            "MATERIAL_INTEGRITY_MISMATCH",
+                            f"Relay fallback bytes do not match canonical Material {material_id}",
+                        )
+                    expected_scope = adapter.account_scope_hash if adapter is not None else account_scope_id
+                    snapshots.append(
+                        {
+                            "material_id": material_id,
+                            "binding_generation": max(1, int(material.get("binding_generation") or 1)),
+                            "binding_kind": GEMINI_INLINE_CACHE_REPRESENTATION,
+                            "representation": GEMINI_INLINE_CACHE_REPRESENTATION,
+                            "connection_id": connection_id,
+                            "account_scope_hash": expected_scope,
+                            "provider": "gemini",
+                            "purpose": "inference_input",
+                            "content_sha256": material.get("sha256") or actual_sha,
+                            "content_type": project_gemini_input_content_type(material.get("content_type")),
+                            "filename": material.get("filename"),
+                            "inline_data": base64.b64encode(data).decode("ascii"),
+                            "metadata": {
+                                "transport": "explicit_auxiliary_inline",
+                                "files_api_skipped": True,
+                                "size_bytes": len(data),
+                                "object_id": fallback.get("object_id"),
+                            },
+                        }
+                    )
+                    continue
+
+            if (
+                is_explicit_turn
+                and (str(provider or "").lower() == "kimi" or effective_proto == "moonshot_chat")
+            ):
+                mime = str(material.get("content_type") or "").split(";", 1)[0].strip().lower()
+                raw_size = int(
+                    material.get("actual_size")
+                    if material.get("actual_size") is not None
+                    else (material.get("size_bytes") or 0)
+                )
+                if (
+                    (mime.startswith("text/") or mime in {"application/json", "application/xml"})
+                    and 0 <= raw_size <= aux_inline_max
+                ):
+                    fallback = await self.repo.get_material_fallback(material_id)
+                    if fallback:
+                        expected_scope = (
+                            adapter.account_scope_hash
+                            if adapter is not None
+                            else (account_scope_id or "relay-fallback")
+                        )
+                        snapshots.append(
+                            {
+                                "material_id": material_id,
+                                "binding_generation": max(1, int(material.get("binding_generation") or 1)),
+                                "binding_kind": "kimi_inline_text",
+                                "representation": "kimi_inline_text",
+                                "purpose": "inline-text",
+                                "connection_id": connection_id,
+                                "account_scope_hash": expected_scope,
+                                "provider": "kimi",
+                                "content_sha256": material.get("sha256"),
+                                "content_type": material.get("content_type"),
+                                "filename": material.get("filename"),
+                                "object_id": fallback.get("object_id"),
+                                "metadata": {
+                                    "transport": "explicit_auxiliary_inline",
+                                    "files_api_skipped": True,
+                                    "size_bytes": raw_size,
+                                    "object_id": fallback.get("object_id"),
+                                },
+                            }
+                        )
+                        continue
 
             binding = await self.repo.get_provider_binding(
                 material_id=material_id,
@@ -1588,6 +1695,8 @@ class MaterialBinder:
             document_projection_contract=(state.snapshot.get("capability_contract") if
                 int(state.upgrade.get("version") or 0) >= 3 and state.upgrade.get("grok_mode") != "legacy_v1" else None),
             transport_policy=(state.session.get("metadata") or {}).get("_relay_material_transport"),
+            context_policy=state.snapshot.get("context_policy", state.session.get("context_policy", "conversation")),
+            effective_wire_protocol=state.snapshot.get("effective_wire_protocol") or state.snapshot.get("protocol"),
         )
         log_info(
             logger,

@@ -163,7 +163,10 @@ class RequestAcceptor:
         policy = ((session.get("metadata") or {}).get("_relay_route") or {}).get("cache_policy") or {}
         governed = policy.get("metadata") or {}
         if cache_contract_session and "requested_cache_mode" not in body.model_fields_set and governed.get("default_mode"):
-            body = body.model_copy(update={"requested_cache_mode": governed["default_mode"]})
+            default_cache_mode = governed["default_mode"]
+            if request_policy == "conversation" and default_cache_mode == "off":
+                default_cache_mode = "auto"
+            body = body.model_copy(update={"requested_cache_mode": default_cache_mode})
         if cache_contract_session and body.requested_cache_mode == "on" and governed.get("allow_force") is False:
             raise ExecutionRequestError(422, {"code": "CACHE_FORCE_NOT_AUTHORIZED"})
         requested_cache_mode = body.requested_cache_mode if cache_contract_session else None
@@ -583,6 +586,9 @@ class RequestAcceptor:
             "offering_id": frozen_route.get("offering_id") if frozen_route else None,
             "channel_id": frozen_route.get("channel_id") if frozen_route else None,
             "protocol": frozen_route.get("protocol") if frozen_route else None,
+            **({"effective_wire_protocol": "gemini_native"}
+               if request_policy == "explicit" and (frozen_route or {}).get("protocol") == "gemini_interactions"
+               else {}),
             "control_plane_hash": frozen_route.get("control_plane_hash") if frozen_route else None,
             "route_revision": frozen_route.get("route_revision") if frozen_route else None,
             "route_binding_hash": frozen_route.get("route_binding_hash") if frozen_route else None,
@@ -625,7 +631,7 @@ class RequestAcceptor:
             output_spec = resolve_structured_output(base_snapshot, fallback_name="structured_output")
         except StructuredOutputError as exc:
             raise ExecutionRequestError(status_code=422, detail={"code": exc.code, "message": exc.message}) from exc
-        if (base_snapshot.get("protocol") == "gemini_interactions"
+        if (base_snapshot.get("effective_wire_protocol", base_snapshot.get("protocol")) == "gemini_interactions"
                 and output_spec is not None and output_spec.mode == "json_object"):
             # Relay wraps the result; model text has no JSON constraint.
             base_snapshot["structured_output_guarantee"] = "relay_result_object"
@@ -690,7 +696,7 @@ class RequestAcceptor:
                 "material_budget": settings.relay_inline_cache_budget_bytes,
                 "roll_alpha": settings.relay_cache_roll_alpha,
             }
-            if body.requested_cache_mode != "off" and grok_mode != "legacy_v1":
+            if (body.requested_cache_mode != "off" or request_policy == "conversation") and grok_mode != "legacy_v1":
                 base_snapshot["input"] = canonical_structure(base_snapshot["input"])
                 base_snapshot["structured_output"] = normalize_structured_output(base_snapshot["structured_output"])
                 plan_seed.update(base_snapshot)

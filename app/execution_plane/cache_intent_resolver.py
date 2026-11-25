@@ -60,6 +60,18 @@ class CacheIntentResolver:
                              else profile_cache.get("supported_mechanisms") or declared)
         }
         candidates = [m for m in declared if m in supported_by_profile]
+        effective_context_policy = str(
+            (attachment_evidence or {}).get("context_policy")
+            or (context_plan or {}).get("context_policy")
+            or "conversation"
+        ).strip().lower()
+        if effective_context_policy == "explicit" and mode == "auto":
+            candidates = [m for m in candidates if m not in {"breakpoint", "stateful_resource"}]
+            if not candidates:
+                return self._none(
+                    mode, preference, context_plan, policy_hash, profile_hash,
+                    cache_contract_hash, scope, "non_cumulative_explicit_turn",
+                )
         verified = str(contract.get("verification_status") or "unverified").lower() in {
             "verified", "published", "legacy_verified"
         }

@@ -98,14 +98,22 @@ def checked_history(history, kinds, transport_kind):
         raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
     for turn in history:
         transport = turn.get("transport_history") if isinstance(turn, dict) else None
-        if not isinstance(transport, dict) or transport.get("kind") != transport_kind:
+        if not isinstance(transport, dict):
             raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
-        if transport_kind == "gemini_interactions":
+        actual_kind = transport.get("kind")
+        allowed_kinds = (
+            {"gemini_interactions", "gemini_native"}
+            if transport_kind == "gemini_interactions"
+            else {transport_kind}
+        )
+        if actual_kind not in allowed_kinds:
+            raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
+        if actual_kind == "gemini_interactions":
             u = transport.get("interaction_user_input") or transport.get("user_content")
             m = transport.get("interaction_model_steps") or transport.get("steps") or transport.get("model_content")
             if not u or not m:
                 raise MaterialPlacementError("HISTORY_MATERIAL_OCCURRENCE_CORRUPTED")
-        elif transport_kind == "responses":
+        elif actual_kind == "responses":
             u = transport.get("user_item")
             m = transport.get("response_output")
             if (not isinstance(u, dict) or u.get("role") != "user"

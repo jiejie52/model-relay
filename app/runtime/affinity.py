@@ -52,9 +52,13 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
         from app.compatibility.affinity_config import legacy_affinity
         header, hosts = legacy_affinity(settings, channel, profile, header)
     policy = snapshot.get("cache_policy") or {}
+    effective_policy = snapshot.get("context_policy", session.get("context_policy", "conversation"))
+    is_conversation = effective_policy == "conversation"
+    is_explicit = effective_policy == "explicit"
     managed = bool(upgrade and upgrade.get("grok_mode") != "legacy_v1"
-                   and snapshot.get("requested_cache_mode") != "off" and not policy.get("deny")
+                   and (snapshot.get("requested_cache_mode") != "off" or is_conversation) and not policy.get("deny")
                    and not (snapshot.get("requested_cache_mode") == "auto" and policy.get("auto_disabled")))
+    affinity_active = bool(managed and snapshot.get("requested_cache_mode") != "off" and not is_explicit)
     route = (session.get("metadata") or {}).get("_relay_route") or {}
     return {
         "request_id": request_id, "session_id": str(session["id"]),
@@ -73,7 +77,7 @@ def build_wire_context(settings: Any, snapshot: dict[str, Any], session: dict[st
         "semantic_fingerprint": (snapshot.get("context_plan") or {}).get("semantic_fingerprint"),
         "fingerprint_version": int(upgrade.get("fingerprint_version") or 1),
         "previous_chain": previous_chain, "affinity_epoch": epoch,
-        "affinity_token": token if managed and header and hosts else None,
+        "affinity_token": token if affinity_active and header and hosts else None,
         "affinity_hosts": tuple(hosts or ()), "affinity_header": header,
         "secondary_affinity_header": (
             "x-session-affinity" if profile.get("send_generic_affinity_header") is True else None

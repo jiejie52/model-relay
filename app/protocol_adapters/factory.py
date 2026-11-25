@@ -89,6 +89,13 @@ def register_protocol_adapters(*, settings, control_plane, providers, materials,
             else: raise ValueError("Unregistered protocol implementation")
             providers.register_v2(cid, ScopedAdapter(adapter, runtime), provider=None,
                 protocol=spec.protocol, channel_id=spec.channel_id)
+            if spec.protocol == "gemini_interactions":
+                companion_native = GeminiNativeAdapter(runtime.settings, connection=runtime)
+                providers.register_companion_v2(
+                    cid,
+                    ScopedAdapter(companion_native, runtime),
+                    protocol="gemini_native",
+                )
             contracts = [plane.contract(s.capability_contract_id) for s in supplies]
             need_files = any(s.requires_file_adapter for s in supplies) or any(
                 "provider_files_api" in c.metadata.get("material_transport", {}).get("supported_material_transports", []) for c in contracts)

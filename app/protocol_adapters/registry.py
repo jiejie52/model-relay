@@ -17,7 +17,9 @@ class ProviderRegistry:
         self.settings = settings
         self.openai_compatible = OpenAICompatibleResponsesProvider(settings)
         self._versions = {}
+        self._versions_by_protocol: dict[tuple[str, str, str], object] = {}
         self._v2: dict[str, object] = {}
+        self._v2_by_protocol: dict[tuple[str, str], object] = {}
         self._v2_meta: dict[str, dict[str, str]] = {}
 
     def _connection_is_enabled(self, connection_id: str) -> bool:
@@ -58,17 +60,38 @@ class ProviderRegistry:
         channel_id: str | None = None,
     ) -> None:
         identity = getattr(getattr(adapter, "connection", None), "identity_hash", None)
-        if identity: self._versions[(connection_id, identity)] = adapter
+        proto = str(protocol or "").lower()
+        if identity:
+            self._versions[(connection_id, identity)] = adapter
+            if proto:
+                self._versions_by_protocol[(connection_id, identity, proto)] = adapter
         self._v2[connection_id] = adapter
+        if proto:
+            self._v2_by_protocol[(connection_id, proto)] = adapter
         self._v2_meta[connection_id] = {
             # Empty provider means this connection-scoped protocol adapter may
             # serve multiple model vendors; RouteResolver still freezes the
             # caller-visible provider in the selected ModelOffering.
             "provider": str(provider or "").lower(),
-            "protocol": str(protocol or "").lower(),
+            "protocol": proto,
             "channel_id": str(channel_id or ""),
             "adapter_version": str(getattr(adapter, "adapter_version", "unknown")),
         }
+
+    def register_companion_v2(
+        self,
+        connection_id: str,
+        adapter: object,
+        *,
+        protocol: str,
+    ) -> None:
+        proto = str(protocol or "").lower()
+        if not proto:
+            return
+        identity = getattr(getattr(adapter, "connection", None), "identity_hash", None)
+        if identity:
+            self._versions_by_protocol[(connection_id, identity, proto)] = adapter
+        self._v2_by_protocol[(connection_id, proto)] = adapter
 
     def describe(self, connection_id: str) -> dict[str, str] | None:
         from app.runtime.connection_scope import current_identity
@@ -100,17 +123,22 @@ class ProviderRegistry:
         if len(set(candidates)) != 1: raise KeyError("Legacy frozen connection cannot be resolved uniquely")
         return candidates[0]
 
-    def get_v2(self, connection_id: str):
+    def get_v2(self, connection_id: str, *, protocol: str | None = None):
         from app.runtime.connection_scope import current_identity
         identity = current_identity()
+        proto = str(protocol or "").lower() if protocol else None
         if identity:
             if not self._connection_is_enabled(connection_id): raise KeyError("Connection is disabled")
+            if proto and (connection_id, identity, proto) in self._versions_by_protocol:
+                return self._versions_by_protocol[(connection_id, identity, proto)]
             try: return self._versions[(connection_id, identity)]
             except KeyError: raise KeyError("Frozen connection version is not registered") from None
         if not self._connection_is_enabled(connection_id):
             raise KeyError(
                 f"Connection is disabled by Relay connection policy: {connection_id}"
             )
+        if proto and (connection_id, proto) in self._v2_by_protocol:
+            return self._v2_by_protocol[(connection_id, proto)]
         try:
             return self._v2[connection_id]
         except KeyError as exc:

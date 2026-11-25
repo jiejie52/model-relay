@@ -55,7 +55,7 @@ def normalize_native_payload(payload: dict[str, Any], *, unordered_tools: bool =
     if response_schemas:
         for path in (("generationConfig", "responseSchema"), ("generationConfig", "responseJsonSchema"),
                      ("output_config", "format", "schema"), ("response_format", "json_schema", "schema"),
-                     ("text", "format", "schema")):
+                     ("response_format", "schema"), ("text", "format", "schema")):
             node = result
             for key in path[:-1]:
                 node = node.get(key) if isinstance(node, dict) else None

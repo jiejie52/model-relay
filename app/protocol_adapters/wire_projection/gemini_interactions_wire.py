@@ -142,7 +142,9 @@ def project_gemini_interactions_payload(
         # Stateless or continuation disabled (includes explicit / session_materials_only / fallback)
         previous_interaction_id = None
         store = False
-        if history and not is_non_cumulative:
+        if not is_non_cumulative and versioned_proof:
+            payload_input = _format_delta_multi_turn_input(history, user_content, ordered_steps=True)
+        elif history and not is_non_cumulative:
             payload_input = _format_delta_multi_turn_input(history, user_content, ordered_steps=versioned_proof)
         else:
             payload_input = _format_current_turn_input(user_content)

@@ -1,3 +1,7 @@
+# Model Relay 10.9.0
+
+优化上下文续接与前缀缓存命中率，并在 `context_policy=explicit` 辅助轮次消除不必要协议与文件上传往返：无状态 `store=false` 路径首轮即保持 `user_input[]` 顶层结构一致；`context_policy=conversation` 默认开启状态续接与 `requested_cache_mode="auto"`；`explicit` 单轮在执行层按请求动态分流至 `gemini_native` 并对 Gemini / Kimi 小材料（`<= 4 MiB`）单次请求直读内联，同时自动抑制 Claude `breakpoint` / Gemini `stateful_resource` 写入溢价。无新增 SQL 迁移；升级配置与兼容边界见 [UPGRADE_10.9.0.md](UPGRADE_10.9.0.md)。
+
 # Model Relay 10.6.0
 
 完善 `mutable_session_container` 在 `indeterminate`、`result_stored` 后置校验失败、派发后取消及交错非累计/无状态轮次下的账本失效闭环与无状态全量重放回退；新增向前迁移 `sql/018_mutable_container_taint_closure.sql`，升级与约束说明见 [UPGRADE_10.6.0.md](UPGRADE_10.6.0.md)。
