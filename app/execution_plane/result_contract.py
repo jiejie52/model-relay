@@ -11,6 +11,8 @@ def validate_execution_observations(snapshot, observed):
     if policy["expected_billing_tier"] == "free" and billing == "paid": paid = True
     native = observed.get("native_constraint_enforced")
     guarantee = snapshot.get("structured_output_guarantee")
+    effective_protocol = snapshot.get("effective_wire_protocol") or snapshot.get("protocol")
+    prompt_guided_gemini = effective_protocol in {"gemini_interactions", "gemini_native"}
     if policy['evidence_source_mode']=='first_party_native_payload' and observed.get('evidence_source_mode')!='first_party_native_payload':
         raise ProviderRequestError('UPSTREAM_EVIDENCE_SOURCE_UNOBSERVED','First-party native evidence is missing')
     if policy['expected_billing_tier']=='official_direct' and billing not in (None,'official_direct'):
@@ -25,7 +27,7 @@ def validate_execution_observations(snapshot, observed):
         raise ProviderRequestError("UPSTREAM_BILLING_UNOBSERVED", "Fallback billing cannot be verified under the frozen policy")
     if observed.get("protocol_downgraded") is True:
         raise ProviderRequestError("UPSTREAM_PROTOCOL_CONTRACT_LOST", "Observed protocol downgrade violates the frozen execution contract")
-    native_required = guarantee in {"native_constrained", "native_json_schema"}
+    native_required = guarantee in {"native_constrained", "native_json_schema"} and not prompt_guided_gemini
     if native_required and (native is False or observed.get("json_repaired") is True):
         raise ProviderRequestError("UPSTREAM_NATIVE_CONSTRAINT_LOST", "Native generation constraint was explicitly lost")
     if native_required and native is None and policy["require_native_constraint_evidence"]:
@@ -34,7 +36,7 @@ def validate_execution_observations(snapshot, observed):
         "paid_fallback": paid if type(paid) is bool else "unknown", "billing_tier": billing or "unknown",
         "native_constraint": ("confirmed" if native is True else "rejected" if native is False else "unknown")
             if native_required else "not_required",
-        "native_evidence_policy": "required" if policy["require_native_constraint_evidence"] else "certified_supply_with_observation"}
+        "native_evidence_policy": ("required" if (policy["require_native_constraint_evidence"] and not prompt_guided_gemini) else "certified_supply_with_observation")}
 
 
 def verify_thinking_execution_contract(thinking, observed, authorization):

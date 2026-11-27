@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from app.control_plane.upstream_retention import resolve_upstream_retention
 
-VALIDATOR_VERSION = "static-contract/10.9.1"
-GEMINI_INTERACTIONS_VALIDATOR_VERSION = "static-contract/gemini-interactions/10.9.1"
+VALIDATOR_VERSION = "static-contract/10.10.0"
+GEMINI_INTERACTIONS_VALIDATOR_VERSION = "static-contract/gemini-interactions/10.10.0"
 
 
 def validation_version(protocol: str) -> str:
@@ -54,15 +54,14 @@ def qualify_supply_static(plane, settings, supply) -> dict:
     protocol = spec.protocol
     modes = cap.metadata.get("material_transport", {}).get("supported_material_transports", [])
     mechanisms = cap.cache.get("supported_mechanisms", [])
-    native = cap.structured_output.get("mode") == "native_json_schema"
 
-    facets: list[str] = ["inference", "representative_thinking"]
+    facets: list[str] = ["inference", "representative_thinking", "structured_output"]
     if "provider_files_api" in modes:
         facets.append("provider_files_api")
-    if native:
-        facets.append("native_json_schema")
-    elif protocol == "gemini_interactions":
-        facets.append("relay_result_object")
+    if protocol in {"gemini_interactions", "gemini_native"}:
+        facets.append("relay_post_validate")
+        if protocol == "gemini_interactions":
+            facets.append("relay_result_object")
     for mech in mechanisms:
         if mech not in facets:
             facets.append(mech)

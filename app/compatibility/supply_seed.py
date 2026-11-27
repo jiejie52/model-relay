@@ -49,7 +49,7 @@ def extend_gemini_supplies(contracts, profiles, offerings, settings):
             contract_id=f"{contract.contract_id}-chat-v66", revision="relay-capability/gemini-chat/6.6.0",
             supported_options=dict(contract.supported_options),
             thinking={**contract.thinking, "wire_strategy": "chat_reasoning_effort"},
-            structured_output={"mode": "post_validate"},
+            structured_output={"mode": "relay_post_validate"},
             input_modalities=("text",), features=(),
             provider_defaults=dict(contract.provider_defaults),
             cache={

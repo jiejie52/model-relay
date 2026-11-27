@@ -42,7 +42,6 @@ _PROVIDER_NAMES = {
 _MECHANISMS = {"显式资源": "stateful_resource", "隐式前缀": "implicit_prefix", "不使用": None}
 _MODALITIES = {"文本": "text", "图片": "image", "文件": "document", "音频": "audio", "视频": "video"}
 _THINKING = {"自动": "auto", "低": "low", "中": "medium", "高": "high", "超高": "xhigh", "最大": "max", "无": "none", "关闭": "off"}
-_STRUCTURED = {"原生 JSON Schema": "native", "后校验": "post_validate", "不使用": "none"}
 
 
 def _controlled_values(field: str, value: str, mapping: Mapping[str, str]) -> list[str]:
@@ -184,13 +183,9 @@ def build_candidate(
         seen_physical_supplies[physical_key] = channel
         required_modalities = _controlled_values("input modalities", model_row["输入类型"], _MODALITIES)
         required_thinking = []  # Thinking is derived exclusively from supply mappings.
-        structured = _STRUCTURED.get(model_row["结构化输出"])
-        if structured is None:
-            raise DeclarationError(f"model {model}: unknown structured output guarantee")
         supported, reason = contract.supports_requirements({
             "input_modalities": required_modalities,
             "think_levels": required_thinking,
-            "structured_output": structured,
         })
         if not supported:
             raise DeclarationError(f"model {model} channel {channel}: capability mismatch: {reason}")

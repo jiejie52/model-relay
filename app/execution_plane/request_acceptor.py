@@ -631,10 +631,19 @@ class RequestAcceptor:
             output_spec = resolve_structured_output(base_snapshot, fallback_name="structured_output")
         except StructuredOutputError as exc:
             raise ExecutionRequestError(status_code=422, detail={"code": exc.code, "message": exc.message}) from exc
-        if (base_snapshot.get("effective_wire_protocol", base_snapshot.get("protocol")) == "gemini_interactions"
-                and output_spec is not None and output_spec.mode == "json_object"):
+        effective_wire_protocol = base_snapshot.get("effective_wire_protocol", base_snapshot.get("protocol"))
+        if output_spec is None:
+            base_snapshot["structured_output_guarantee"] = "none"
+        elif effective_wire_protocol == "gemini_interactions" and output_spec.mode == "json_object":
             # Relay wraps the result; model text has no JSON constraint.
             base_snapshot["structured_output_guarantee"] = "relay_result_object"
+        elif effective_wire_protocol in {"gemini_interactions", "gemini_native"}:
+            # Schema constraint is injected into user-turn tail and enforced in ResultCommitter.
+            base_snapshot["structured_output_guarantee"] = "relay_post_validate"
+        else:
+            base_snapshot["structured_output_guarantee"] = (
+                "native_json_schema" if output_spec.mode == "json_schema" else "json_object"
+            )
         context_plan: dict[str, Any] | None = None
         cache_plan: dict[str, Any] | None = None
         history_identity: dict[str, Any] | None = None

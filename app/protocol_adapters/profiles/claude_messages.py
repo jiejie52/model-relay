@@ -288,12 +288,6 @@ class ClaudeMessagesV2Adapter:
         except StructuredOutputError as exc:
             raise ProviderRequestError(exc.code, exc.message) from exc
         if spec is not None:
-            guarantee = str(snapshot.get("structured_output_guarantee") or "legacy").lower()
-            if guarantee != "native_json_schema":
-                raise ProviderRequestError(
-                    "STRUCTURED_OUTPUT_CONTRACT_MISMATCH",
-                    "Claude Messages structured output requires a native_json_schema capability contract",
-                )
             if spec.mode == "json_object":
                 # Canonical json_object has no schema to constrain natively; use
                 # a minimal JSON value schema and keep Relay post-validation.

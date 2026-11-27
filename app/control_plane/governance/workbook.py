@@ -7,10 +7,10 @@ from string import Formatter
 from urllib.parse import urlsplit
 from app.control_plane.definitions import ModelControlPlane
 from app.control_plane.governance.v2_import import DeclarationError, parse_v2_declarations
-from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING, _STRUCTURED
+from app.control_plane.governance.snapshot_compiler import _PROVIDER_NAMES, _MODALITIES, _THINKING
 from app.core.idempotency import stable_hash
 
-COMPILER_VERSION = 'relay-excel/10.9.1'
+COMPILER_VERSION = 'relay-excel/10.10.0'
 SUPPLY_OPTIONAL = ('供应组ID','允许租户','允许区域','最大活跃会话','预留预算上限','每会话预留预算')
 CONTINUATION_OPTIONAL = ('续接模式','锚点保留时长秒数','验证多轮补发')
 PROFILE_OPTIONAL = ('证据来源','预期计费层级','要求原生约束证据','思考参数剥离响应头','思考降级响应头','有效思考模式响应头')
@@ -24,7 +24,7 @@ SCHEMAS = {
  '环境映射': ('环境','部署ID','管理提供方'),
  '连接配置': ('连接ID','渠道名称','渠道ID','协议族','账号ID','项目ID','区域','REST端点','上传端点','SDK端点','API版本','鉴权方式','凭据引用'),
  '协议配置': ('协议ID','协议族','允许主机','亲和启用','亲和头','亲和模板','实际模型响应头','原生约束响应头','计费层级响应头'),
- '能力合同': ('合同ID','输入类型','思考投影','结构化输出','最大输出Token','材料传输','外链阈值MiB','显式缓存材料模式','最低温度','最高温度','最低TopP','最高TopP'),
+ '能力合同': ('合同ID','输入类型','思考投影','最大输出Token','材料传输','外链阈值MiB','显式缓存材料模式','最低温度','最高温度','最低TopP','最高TopP'),
  '供应配置': ('对外模型名','环境','渠道名称','连接ID','协议ID','合同ID'),
 }
 
@@ -189,8 +189,6 @@ def compile_workbook(content, settings):
     for cid,row in cap_rows.items():
         modalities=parts(value(row,'输入类型'))
         if any(x not in _MODALITIES for x in modalities): fail(row,'输入类型','包含未知选项')
-        structured=value(row,'结构化输出')
-        if structured not in _STRUCTURED: fail(row,'结构化输出','包含未知选项')
         transport=parts(value(row,'材料传输'))
         if not set(transport)<= {'provider_files_api','external_signed_url','inline_data'}: fail(row,'材料传输','尚无实现')
         thinking=thinking_specs[cid]
@@ -204,7 +202,7 @@ def compile_workbook(content, settings):
             options[option]={'type':'number','min':a,'max':b}
         contracts[cid]=ModelControlPlane._contract_from_mapping({'contract_id':cid,'revision':COMPILER_VERSION,
             'supported_options':options,
-            'thinking':thinking,'structured_output':{'mode':{'native':'native_json_schema','post_validate':'post_validate','none':'none'}[_STRUCTURED[structured]]},
+            'thinking':thinking,'structured_output':{'mode':'relay_post_validate'},
             'input_modalities':[_MODALITIES[x] for x in modalities], 'cache':{},
             'metadata':{'material_transport':{'supported_material_transports':transport,'external_url_max_total_bytes':number(row,'外链阈值MiB')*1024*1024}}})
     # Excel owns only explicitly managed provider scopes; compatibility seed is

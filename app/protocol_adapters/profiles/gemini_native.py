@@ -15,12 +15,37 @@ from app.runtime.transport_guard import provider_transport
 from app.core.context_codec import serialize_wire
 from app.config import Settings
 from app.core.idempotency import CANONICAL_REQUEST_VERSIONS
-from app.protocol_adapters.wire_projection.schema_projector import project_schema_for_provider
-from app.canonical_schema import resolve_structured_output
+from app.canonical_schema import (
+    StructuredOutputSpec,
+    append_structured_output_prompt,
+    format_structured_output_prompt_guidance,
+    resolve_structured_output,
+)
 from app.protocol_adapters.wire_projection.gemini_physical import GEMINI_PHYSICAL_LAYOUT_VERSION, GEMINI_PHYSICAL_LAYOUT_VERSION_V7, GEMINI_PHYSICAL_LAYOUT_VERSION_V9, GEMINI_PHYSICAL_LAYOUT_VERSION_V10, SUPPORTED_GEMINI_PHYSICAL_LAYOUT_VERSIONS
 from app.protocol_adapters.wire_projection.gemini_wire import project_current_user_content, project_history_contents, project_system_instruction, validate_cached_content_handle
 
 
+
+
+def _append_gemini_content_schema_guidance(payload: dict[str, Any], spec: StructuredOutputSpec) -> None:
+    """Append canonical JSON Schema instructions to the current user tail without setting responseSchema."""
+    guidance = format_structured_output_prompt_guidance(spec)
+    if not guidance:
+        return
+    contents = payload.get("contents")
+    if not isinstance(contents, list) or not contents:
+        return
+    last_turn = contents[-1]
+    if not isinstance(last_turn, dict):
+        return
+    parts = last_turn.get("parts")
+    if not isinstance(parts, list):
+        parts = []
+        last_turn["parts"] = parts
+    if parts and isinstance(parts[-1], dict) and "text" in parts[-1]:
+        parts[-1]["text"] = append_structured_output_prompt(str(parts[-1].get("text") or ""), guidance)
+    else:
+        parts.append({"text": guidance})
 
 
 class GeminiNativeAdapter:
@@ -49,27 +74,14 @@ class GeminiNativeAdapter:
             fallback_name="structured_output" if normalization_active() else str(context.snapshot.get("metadata", {}).get("stage") or "structured_output"),
         )
         if spec is not None:
-            generation = payload.get("generationConfig")
-            if not isinstance(generation, dict):
-                generation = {}
-                payload["generationConfig"] = generation
             if spec.mode == "json_object":
+                generation = payload.get("generationConfig")
+                if not isinstance(generation, dict):
+                    generation = {}
+                    payload["generationConfig"] = generation
                 generation["responseMimeType"] = "application/json"
             elif spec.mode == "json_schema" and spec.schema is not None:
-                guarantee = str(context.snapshot.get("structured_output_guarantee") or "native_constrained")
-                try:
-                    projection = project_schema_for_provider(
-                        spec.schema,
-                        provider="gemini",
-                        model=context.snapshot.get("model"),
-                    )
-                    generation["responseMimeType"] = "application/json"
-                    generation["responseSchema"] = projection.schema
-                except Exception:
-                    if guarantee in {"post_validate", "relay_result_object"}:
-                        generation["responseMimeType"] = "application/json"
-                    else:
-                        raise
+                _append_gemini_content_schema_guidance(payload, spec)
 
         # AIHubMix follows the Gemini CachedContent contract here: once a
         # cachedContent reference is present, systemInstruction/tools/toolConfig

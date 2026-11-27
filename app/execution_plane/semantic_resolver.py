@@ -690,25 +690,9 @@ def validate_structured_output_capability(
     structured_output: dict[str, Any] | None,
     capability_contract: dict[str, Any] | None,
 ) -> str:
-    """Return the frozen guarantee mode, failing closed if it is unavailable."""
+    """Structured output is governed uniformly by Relay without capability gating."""
     requested = isinstance(structured_output, dict) and bool(structured_output)
-    if not requested:
-        return "none"
-    if not capability_contract:
-        return "legacy"
-    revision = str(capability_contract.get("revision") or CAPABILITY_PROFILE_REVISION)
-    structured = capability_contract.get("structured_output")
-    mode = str((structured or {}).get("mode") if isinstance(structured, dict) else "none").lower()
-    if mode in {"", "none"}:
-        raise ModelOptionError(
-            "STRUCTURED_OUTPUT_UNSUPPORTED",
-            "Structured output is not supported by the frozen capability contract",
-            provider=provider,
-            model=model,
-            option="structured_output",
-            capability_revision=revision,
-        )
-    return mode
+    return "relay_post_validate" if requested else "none"
 
 
 def effective_options(snapshot: dict[str, Any]) -> dict[str, Any]:

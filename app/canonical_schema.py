@@ -195,6 +195,106 @@ def resolve_structured_output(
 
 
 
+def format_structured_output_prompt_guidance(spec: StructuredOutputSpec) -> str:
+    """Render a canonical JSON Schema as an end-of-turn output constraint."""
+    if spec.mode != "json_schema" or not isinstance(spec.schema, dict):
+        return ""
+    schema_json = json.dumps(
+        spec.schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        "[OUTPUT_FORMAT_REQUIREMENT]\n"
+        "You MUST output ONLY a single valid JSON value strictly conforming to this JSON Schema. "
+        "Do not wrap it in markdown code fences (```json) or add any explanatory text.\n"
+        f"JSON Schema: {schema_json}"
+    )
+
+
+def append_structured_output_prompt(text: str, guidance: str) -> str:
+    """Append prompt guidance at the end of user text without altering caller wording."""
+    if not guidance:
+        return text
+    if not text:
+        return guidance
+    return f"{text}\n\n{guidance}"
+
+
+_FENCE_OPEN_RE = re.compile(r"```(?:json|JSON)?[ \t]*(?:\r?\n|$)")
+
+
+def extract_structured_json(
+    raw_text: Any,
+    spec: StructuredOutputSpec | None = None,
+) -> Any:
+    """Parse raw model text into a JSON value, tolerating Markdown fences or brief wrapper prose."""
+    if not isinstance(raw_text, str):
+        raise StructuredOutputError(
+            "STRUCTURED_OUTPUT_INVALID_JSON",
+            "Provider output is not a text JSON payload",
+        )
+    stripped = raw_text.strip()
+    if not stripped:
+        raise StructuredOutputError(
+            "STRUCTURED_OUTPUT_INVALID_JSON",
+            "Provider output is empty and not valid JSON",
+        )
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as first_exc:
+        decoder = json.JSONDecoder()
+        fenced_candidates: list[Any] = []
+        for match in _FENCE_OPEN_RE.finditer(stripped):
+            pos = match.end()
+            while pos < len(stripped) and stripped[pos] in " \t\r\n":
+                pos += 1
+            if pos >= len(stripped) or stripped[pos] not in "{[":
+                continue
+            try:
+                parsed, end_pos = decoder.raw_decode(stripped, pos)
+            except json.JSONDecodeError:
+                continue
+            trailing = stripped[end_pos:].lstrip()
+            if trailing == "" or trailing.startswith("```"):
+                fenced_candidates.append(parsed)
+
+        candidates = fenced_candidates
+        if not candidates:
+            scan_candidates: list[Any] = []
+            idx = 0
+            while idx < len(stripped):
+                if stripped[idx] in "{[":
+                    try:
+                        parsed, end_pos = decoder.raw_decode(stripped, idx)
+                        scan_candidates.append(parsed)
+                        idx = end_pos
+                        continue
+                    except json.JSONDecodeError:
+                        pass
+                idx += 1
+            candidates = scan_candidates
+
+        if not candidates:
+            raise StructuredOutputError(
+                "STRUCTURED_OUTPUT_INVALID_JSON",
+                f"Provider output is not valid JSON: {first_exc}",
+            ) from first_exc
+
+        if spec is not None and spec.mode == "json_schema" and isinstance(spec.schema, dict):
+            validator = Draft202012Validator(spec.schema)
+            for candidate in candidates:
+                if validator.is_valid(candidate):
+                    return candidate
+        return candidates[0]
+
+
+def format_structured_json_text(value: Any) -> str:
+    """Serialize a validated JSON value cleanly for compact_result.text."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
 def validate_against_schema(value: Any, spec: StructuredOutputSpec) -> None:
     if spec.mode != "json_schema" or not isinstance(spec.schema, dict):
         return

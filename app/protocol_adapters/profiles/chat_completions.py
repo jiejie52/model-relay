@@ -260,8 +260,7 @@ class ChatCompletionsV2Adapter:
             raise ProviderRequestError(exc.code, exc.message) from exc
         if spec is None:
             return
-        mode = str(snapshot.get("structured_output_guarantee") or "legacy").lower()
-        if mode == "native_json_schema" and spec.mode == "json_schema" and spec.schema is not None:
+        if spec.mode == "json_schema" and spec.schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
@@ -271,9 +270,6 @@ class ChatCompletionsV2Adapter:
                 },
             }
             return
-        # For contracts that only verify JSON-object transport, the full
-        # canonical JSON Schema is intentionally enforced after the provider
-        # response by RelayRuntimeEngine.
         payload["response_format"] = {"type": "json_object"}
 
     @staticmethod

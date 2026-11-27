@@ -141,12 +141,6 @@ class CapabilityContract:
         if missing_levels:
             return False, "unsupported_think_levels:" + ",".join(missing_levels)
 
-        requested_structured = str(req.get("structured_output") or "none").strip().lower()
-        mode = str(self.structured_output.get("mode") or "none").strip().lower()
-        if requested_structured == "native" and mode not in {"native", "native_json_schema"}:
-            return False, f"structured_output_native_required:{mode}"
-        if requested_structured == "post_validate" and mode == "none":
-            return False, "structured_output_unavailable"
         return True, None
 
 

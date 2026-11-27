@@ -9,7 +9,13 @@ from app.core.context_codec import canonical_structure, freeze_history_turn
 from app.core.idempotency import V3_FENCED_REQUEST_VERSIONS, stable_hash
 from app.protocol_adapters.base import ProviderRequestError
 from app.observability import elapsed_ms, error as log_error, info as log_info, now_ms
-from app.execution_plane.structured_output import StructuredOutputError, resolve_structured_output, validate_against_schema
+from app.execution_plane.structured_output import (
+    StructuredOutputError,
+    extract_structured_json,
+    format_structured_json_text,
+    resolve_structured_output,
+    validate_against_schema,
+)
 from app.utils import json_bytes, truncate_utf8, utcnow
 
 
@@ -97,8 +103,10 @@ class ResultCommitter:
             output_object_id=output_object_id,
         )
 
+        effective_protocol = snapshot.get("effective_wire_protocol") or snapshot.get("protocol")
         spec = resolve_structured_output(snapshot, fallback_name="structured_output")
         if (spec is not None and snapshot.get("structured_output_guarantee") in {"native_constrained", "native_json_schema"}
+                and effective_protocol not in {"gemini_interactions", "gemini_native"}
                 and (result.observed or {}).get("json_repaired") is True):
             exc = StructuredOutputError("STRUCTURED_OUTPUT_NATIVE_CONSTRAINT_LOST",
                 "The frozen native-constrained contract cannot be satisfied by gateway-repaired JSON")
@@ -107,10 +115,12 @@ class ResultCommitter:
             raise exc
         # json_object describes Relay's result envelope, never model text.
         # Only an explicit business json_schema constrains the model response.
+        visible_text = result.text
         if spec is not None and spec.mode == "json_schema":
             try:
-                parsed = json.loads(result.text)
+                parsed = extract_structured_json(result.text, spec)
                 validate_against_schema(parsed, spec)
+                visible_text = format_structured_json_text(parsed)
             except Exception as exc:
                 if isinstance(exc, StructuredOutputError):
                     structured_exc = exc
@@ -125,7 +135,6 @@ class ResultCommitter:
                 raise structured_exc
 
         full_text_object_id = None
-        visible_text = result.text
         text_truncated = False
         if len(visible_text.encode("utf-8")) > self.settings.relay_result_soft_limit_bytes:
             full_text_object_id = await self.artifacts.store_object(

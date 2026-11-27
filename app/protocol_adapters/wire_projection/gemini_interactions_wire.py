@@ -14,7 +14,12 @@ import copy
 import json
 from typing import Any
 
-from app.canonical_schema import StructuredOutputSpec, resolve_structured_output
+from app.canonical_schema import (
+    StructuredOutputSpec,
+    append_structured_output_prompt,
+    format_structured_output_prompt_guidance,
+    resolve_structured_output,
+)
 from app.core.context_codec import canonical_structure
 from app.observability.http_wire_logger import normalization_active
 from app.protocol_adapters.base import ProviderRequestError
@@ -226,38 +231,56 @@ def project_gemini_interactions_payload(
     # Use the same frozen-semantics projection as deployment qualification.
     project_thinking(payload, snapshot, "gemini_interactions")
 
-    # 9. Structured output / response format
+    # 9. Structured output: inject schema constraint at input tail without sending response_format.
     spec = resolve_structured_output(
         snapshot,
         fallback_name="structured_output" if normalization_active() else str(snapshot.get("metadata", {}).get("stage") or "structured_output"),
     )
-    response_format = project_gemini_interactions_response_format(spec)
-    if response_format is not None:
-        payload["response_format"] = response_format
+    if spec is not None:
+        if spec.mode == "json_schema" and isinstance(spec.schema, dict):
+            payload["input"] = _append_interactions_schema_guidance(payload["input"], spec)
+        elif spec.mode != "json_object":
+            raise ProviderRequestError("STRUCTURED_OUTPUT_MODE_UNSUPPORTED", "Unsupported Interactions output intent")
 
     return payload, user_content
 
 
 
 def project_gemini_interactions_response_format(spec: StructuredOutputSpec | None) -> dict[str, Any] | None:
-    """Map Relay output intent to Interactions TextResponseFormat.
-
-    Interactions takes JSON Schema under text/schema, not generateContent's
-    responseSchema and not an OpenAI json_object/json_schema discriminator.
-    The canonical schema is copied intact, including refs and nullable unions;
-    Relay still validates the original constraints after receiving the result.
-    """
+    """Interactions never emits response_format so Google implicit prefix cache stays intact."""
     if spec is None:
         return None
-    if spec.mode == "json_object":
-        # Relay builds a JSON result envelope around arbitrary model text.
-        # Do not ask the provider for JSON or synthesize a schema.
+    if spec.mode in {"json_object", "json_schema"}:
         return None
-    elif spec.mode == "json_schema" and isinstance(spec.schema, dict):
-        schema = copy.deepcopy(spec.schema)
+    raise ProviderRequestError("STRUCTURED_OUTPUT_MODE_UNSUPPORTED", "Unsupported Interactions output intent")
+
+
+def _append_interactions_schema_guidance(
+    payload_input: list[dict[str, Any]] | str,
+    spec: StructuredOutputSpec,
+) -> list[dict[str, Any]] | str:
+    """Append schema instructions to the current user tail while keeping system_instruction and history untouched."""
+    guidance = format_structured_output_prompt_guidance(spec)
+    if not guidance:
+        return payload_input
+    if isinstance(payload_input, str):
+        return append_structured_output_prompt(payload_input, guidance)
+    if not isinstance(payload_input, list) or not payload_input:
+        return [{"type": "text", "text": guidance}]
+
+    updated = copy.deepcopy(payload_input)
+    last = updated[-1]
+    if isinstance(last, dict) and last.get("type") == "user_input" and isinstance(last.get("content"), list):
+        blocks = last["content"]
+        if blocks and isinstance(blocks[-1], dict) and blocks[-1].get("type") == "text":
+            blocks[-1]["text"] = append_structured_output_prompt(str(blocks[-1].get("text") or ""), guidance)
+        else:
+            blocks.append({"type": "text", "text": guidance})
+    elif isinstance(last, dict) and last.get("type") == "text":
+        last["text"] = append_structured_output_prompt(str(last.get("text") or ""), guidance)
     else:
-        raise ProviderRequestError("STRUCTURED_OUTPUT_MODE_UNSUPPORTED", "Unsupported Interactions output intent")
-    return {"type": "text", "mime_type": "application/json", "schema": schema}
+        updated.append({"type": "text", "text": guidance})
+    return updated
 
 
 def _format_current_turn_input(user_content: dict[str, Any]) -> list[dict[str, Any]] | str:
